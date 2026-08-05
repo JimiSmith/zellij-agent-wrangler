@@ -49,8 +49,8 @@ anyway.
 ## Navigation
 
 - [x] `j`/`k` and the arrows move the selection, tree and notification area as one order
-- [x] A click selects the row it lands on
-- [ ] `Enter` focuses the selected tab, pane or agent
+- [x] A click goes to the row it lands on
+- [x] `Enter` focuses the selected tab, pane or agent
 - [ ] `Enter` on a notification opens it
 - [ ] The selection falls back sanely when the row it was on is gone
 
@@ -107,11 +107,11 @@ anyway.
 Each one is a build you can run and judge by eye. Nothing here needs
 instrumenting to tell whether it works.
 
-- [ ] **1. The live tree.** Real tabs and panes, drawn read-only. Split, close,
+- [x] **1. The live tree.** Real tabs and panes, drawn read-only. Split, close,
       rename, switch tabs, move focus: the tree matches and the gutter follows.
       Also answers whether one instance sees the whole session's panes, which is
       what decides the topology below.
-- [ ] **2. Activation.** `Enter` and a click focus the real tab and pane. From
+- [x] **2. Activation.** `Enter` and a click focus the real tab and pane. From
       here it is a usable pane switcher with no agent support at all.
 - [ ] **3. Lifecycle.** Toggle, close-when-alone, width sync and shared
       selection. Drag one sidebar wider, switch tabs, see whether the other

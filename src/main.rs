@@ -115,6 +115,20 @@ impl State {
         rows
     }
 
+    /// Go to what the selected row points at.
+    ///
+    /// A pane brings its tab with it, so selecting a pane of another tab is one
+    /// move rather than two. A tab alone lands wherever that tab was left.
+    fn activate(&self) {
+        match self.selection() {
+            Some(RowKey::Pane(id)) => focus_pane_with_id(PaneId::Terminal(id), false, false),
+            // Tabs are numbered from one here and from zero everywhere else the
+            // sidebar handles them.
+            Some(RowKey::Tab(position)) => switch_tab_to(position as u32 + 1),
+            Some(RowKey::Notification(_)) | None => {}
+        }
+    }
+
     /// Move the selection `step` places through the keys the last frame drew.
     fn step(&mut self, step: isize) {
         let mut keys: Vec<RowKey> = Vec::new();
@@ -134,9 +148,12 @@ impl State {
 
 impl ZellijPlugin for State {
     fn load(&mut self, _configuration: BTreeMap<String, String>) {
-        // Reading the session's tabs and panes is all the sidebar does so far,
-        // so it asks for nothing it would not use.
-        request_permission(&[PermissionType::ReadApplicationState]);
+        // Reading the session's tabs and panes, and going to what a row points
+        // at: the sidebar asks for nothing it would not use.
+        request_permission(&[
+            PermissionType::ReadApplicationState,
+            PermissionType::ChangeApplicationState,
+        ]);
         subscribe(&[
             EventType::Key,
             EventType::Mouse,
@@ -168,12 +185,19 @@ impl ZellijPlugin for State {
                     self.step(-1);
                     true
                 }
+                BareKey::Enter => {
+                    self.activate();
+                    false
+                }
                 _ => false,
             },
+            // A click goes where it points rather than only selecting: the row
+            // under the pointer is the one the user chose.
             Event::Mouse(Mouse::LeftClick(line, _)) => {
                 match usize::try_from(line).ok().and_then(|l| self.painted.get(l)) {
                     Some(&Some(key)) => {
                         self.selected = Some(key);
+                        self.activate();
                         true
                     }
                     _ => false,
