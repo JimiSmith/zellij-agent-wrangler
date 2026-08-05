@@ -1,0 +1,13 @@
+[package]
+name = "zellij-agent-wrangler"
+version = "0.1.0"
+edition = "2021"
+description = "A zellij sidebar listing tabs, panes and agent sessions (prototype)"
+
+[dependencies]
+zellij-tile = "0.44.3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

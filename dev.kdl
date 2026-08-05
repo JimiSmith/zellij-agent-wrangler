@@ -1,0 +1,30 @@
+// The layout `dev.sh` runs the prototype under. Every tab gets the sidebar on
+// its left, including tabs opened later, which is what `default_tab_template`
+// is for.
+//
+// PLUGIN_LOCATION is substituted for the built wasm's absolute path: a `file:`
+// location is resolved against the session's cwd rather than against this file.
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane split_direction="vertical" {
+            pane size=32 borderless=true {
+                plugin location="PLUGIN_LOCATION"
+            }
+            children
+        }
+        // One row, as the built-in default layout gives it: the status bar
+        // draws a second line of its own when it has two.
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    tab name="wrangler" focus=true {
+        pane
+    }
+    tab name="notes" {
+        pane
+    }
+}
