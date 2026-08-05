@@ -16,7 +16,10 @@ use std::collections::BTreeMap;
 
 use zellij_tile::prelude::*;
 
-use zellij_agent_wrangler::model::{Notification, Row, RowContent, RowKey};
+use zellij_agent_wrangler::agents::{
+    self, Agent, Registry, END_MESSAGE, START_MESSAGE, SYNC_MESSAGE, SYNC_REQUEST_MESSAGE,
+};
+use zellij_agent_wrangler::model::{Notification, Row, RowContent, RowKey, SessionId};
 use zellij_agent_wrangler::render::{notification_body_field, notification_rows, paint, wrap};
 use zellij_agent_wrangler::session::{self, Focus};
 use zellij_agent_wrangler::tree;
@@ -46,6 +49,12 @@ struct State {
     /// paint both read.
     rows: Vec<Row>,
     notifications: Vec<Notification>,
+    /// The agent sessions running in this zellij session.
+    ///
+    /// Every sidebar holds the whole set, because an agent's hooks report to all
+    /// of them at once and each sidebar draws every tab. A sidebar that starts
+    /// after an agent did asks the others for what they have.
+    registry: Registry,
     selected: Option<RowKey>,
     /// The answer to the permission request, absent until it is given. The
     /// sidebar can read nothing and reach nothing without it.
@@ -97,11 +106,33 @@ fn refused_rows(width: usize) -> Vec<Row> {
 }
 
 impl State {
+    /// Take one pane's title as it is now, and say whether the tree changed.
+    ///
+    /// The tabs and panes zellij reports are sent when the session's *shape*
+    /// changes, and a program renaming its own pane does not change that shape,
+    /// so the title held for a pane is whatever it was when one was last opened
+    /// or closed. Asking for it is a round trip, which is why it is asked for
+    /// one pane at a time and only when that pane is known to have changed.
+    fn refresh_title(&mut self, id: u32) -> bool {
+        let Some(fresh) = get_pane_info(PaneId::Terminal(id)) else {
+            return false;
+        };
+        for panes in self.panes.panes.values_mut() {
+            for pane in panes.iter_mut() {
+                if !pane.is_plugin && pane.id == id {
+                    pane.title = fresh.title.clone();
+                }
+            }
+        }
+        self.resolve()
+    }
+
     /// Rebuild the tree from the tabs and panes last reported, and say whether
     /// what would be drawn changed.
     fn resolve(&mut self) -> bool {
-        let resolved = session::session(&self.tabs, &self.panes, focus());
+        let mut resolved = session::session(&self.tabs, &self.panes, focus());
         self.leave_if_alone(&resolved);
+        agents::place(&mut resolved, &self.registry);
         let rows = tree::build_tree(&resolved);
         let changed = rows != self.rows;
         self.rows = rows;
@@ -130,10 +161,10 @@ impl State {
     /// The selection, falling back to the first row when what it was on has
     /// gone (or when nothing has been selected yet).
     fn selection(&self) -> Option<RowKey> {
-        let keys = || self.rows.iter().filter_map(|row| row.key);
-        match self.selected {
-            Some(selected) if keys().any(|key| key == selected) => Some(selected),
-            _ => keys().next(),
+        let keys = || self.rows.iter().filter_map(|row| row.key.as_ref());
+        match &self.selected {
+            Some(selected) if keys().any(|key| key == selected) => Some(selected.clone()),
+            _ => keys().next().cloned(),
         }
     }
 
@@ -174,13 +205,20 @@ impl State {
     /// Go to what the selected row points at.
     ///
     /// A pane brings its tab with it, so selecting a pane of another tab is one
-    /// move rather than two. A tab alone lands wherever that tab was left.
+    /// move rather than two. A tab alone lands wherever that tab was left. An
+    /// agent is wherever its pane is, and only a placed agent has a row to be
+    /// selected on.
     fn activate(&self) {
         match self.selection() {
             Some(RowKey::Pane(id)) => focus_pane_with_id(PaneId::Terminal(id), false, false),
             // Tabs are numbered from one here and from zero everywhere else the
             // sidebar handles them.
             Some(RowKey::Tab(position)) => switch_tab_to(position as u32 + 1),
+            Some(RowKey::Agent(session)) => {
+                if let Some(id) = self.registry.get(&session).and_then(|agent| agent.pane) {
+                    focus_pane_with_id(PaneId::Terminal(id), false, false);
+                }
+            }
             Some(RowKey::Notification(_)) | None => {}
         }
     }
@@ -188,12 +226,12 @@ impl State {
     /// Put the selection where `key` is and tell the other sidebars, so the
     /// sidebars of one session read as one sidebar that follows you.
     fn select(&mut self, key: Option<RowKey>) {
-        self.selected = key;
-        if let Some(key) = key {
+        if let Some(key) = &key {
             pipe_message_to_plugin(
                 MessageToPlugin::new(SELECTION_MESSAGE).with_payload(key.encode()),
             );
         }
+        self.selected = key;
     }
 
     /// Move the selection `step` places through the keys the last frame drew.
@@ -201,15 +239,34 @@ impl State {
         let mut keys: Vec<RowKey> = Vec::new();
         for key in self.painted.iter().flatten() {
             if keys.last() != Some(key) {
-                keys.push(*key);
+                keys.push(key.clone());
             }
         }
-        let Some(at) = keys.iter().position(|key| Some(*key) == self.selection()) else {
-            self.select(keys.first().copied());
+        let selection = self.selection();
+        let Some(at) = keys.iter().position(|key| Some(key) == selection.as_ref()) else {
+            self.select(keys.first().cloned());
             return;
         };
         let next = (at as isize + step).clamp(0, keys.len() as isize - 1) as usize;
-        self.select(keys.get(next).copied());
+        self.select(keys.get(next).cloned());
+    }
+
+    /// Take in what an agent's hooks reported, and say whether the tree changed
+    /// because of it.
+    fn hook(&mut self, message: &PipeMessage) -> bool {
+        let payload = message.payload.as_deref().unwrap_or_default();
+        let changed = match message.name.as_str() {
+            START_MESSAGE => Agent::decode(payload)
+                .map(|agent| self.registry.start(agent))
+                .unwrap_or(false),
+            END_MESSAGE => SessionId::new(payload)
+                .map(|session| self.registry.end(&session))
+                .unwrap_or(false),
+            _ => false,
+        };
+        // A record only reaches the tree through the pane it names, so a change
+        // to the registry is not yet a change to what is drawn.
+        changed && self.resolve()
     }
 }
 
@@ -228,6 +285,8 @@ impl ZellijPlugin for State {
             EventType::Mouse,
             EventType::TabUpdate,
             EventType::PaneUpdate,
+            EventType::CommandChanged,
+            EventType::CwdChanged,
             EventType::PermissionRequestResult,
         ]);
     }
@@ -242,8 +301,19 @@ impl ZellijPlugin for State {
                 self.panes = panes;
                 self.resolve()
             }
+            // The two things that reach a pane's title: what is running in it,
+            // and where it is running. Zellij watches both for the whole
+            // session and reports only the panes that changed, so the title is
+            // re-read exactly then and the sidebar keeps no clock of its own.
+            Event::CommandChanged(PaneId::Terminal(id), ..)
+            | Event::CwdChanged(PaneId::Terminal(id), ..) => self.refresh_title(id),
             Event::PermissionRequestResult(status) => {
                 self.permission = Some(status);
+                // Asking before the answer arrives sends nothing: a plugin
+                // without permission to message others has its sends dropped.
+                if status == PermissionStatus::Granted {
+                    pipe_message_to_plugin(MessageToPlugin::new(SYNC_REQUEST_MESSAGE));
+                }
                 true
             }
             Event::Key(key) => match key.bare_key {
@@ -271,8 +341,12 @@ impl ZellijPlugin for State {
             // A click goes where it points rather than only selecting: the row
             // under the pointer is the one the user chose.
             Event::Mouse(Mouse::LeftClick(line, _)) => {
-                match usize::try_from(line).ok().and_then(|l| self.painted.get(l)) {
-                    Some(&Some(key)) => {
+                match usize::try_from(line)
+                    .ok()
+                    .and_then(|l| self.painted.get(l))
+                    .cloned()
+                {
+                    Some(Some(key)) => {
                         self.select(Some(key));
                         self.activate();
                         true
@@ -284,23 +358,43 @@ impl ZellijPlugin for State {
         }
     }
 
-    /// Adopt a selection another sidebar made. A sidebar hears its own broadcast
-    /// too, and has nothing to learn from it.
+    /// Take in what another sidebar said, or what an agent's hooks reported.
+    ///
+    /// Every broadcast reaches its own sender, so anything a sidebar says to the
+    /// others is ignored when it comes back. Hook messages come from the command
+    /// line and are never this plugin's own.
     fn pipe(&mut self, message: PipeMessage) -> bool {
-        if message.name == OFF_MESSAGE {
-            close_self();
+        if message.source == PipeSource::Plugin(self.plugin_id) {
             return false;
         }
-        if message.name != SELECTION_MESSAGE || message.source == PipeSource::Plugin(self.plugin_id)
-        {
-            return false;
-        }
-        match message.payload.as_deref().and_then(RowKey::decode) {
-            Some(key) => {
-                self.selected = Some(key);
-                true
+        match message.name.as_str() {
+            OFF_MESSAGE => {
+                close_self();
+                false
             }
-            None => false,
+            SELECTION_MESSAGE => match message.payload.as_deref().and_then(RowKey::decode) {
+                Some(key) => {
+                    self.selected = Some(key);
+                    true
+                }
+                None => false,
+            },
+            // A sidebar that knows nothing has nothing to answer with, and
+            // answering would only tell the asker what it already has.
+            SYNC_REQUEST_MESSAGE => {
+                if !self.registry.is_empty() {
+                    pipe_message_to_plugin(
+                        MessageToPlugin::new(SYNC_MESSAGE).with_payload(self.registry.encode()),
+                    );
+                }
+                false
+            }
+            SYNC_MESSAGE => {
+                let payload = message.payload.as_deref().unwrap_or_default();
+                self.registry.absorb(payload) && self.resolve()
+            }
+            START_MESSAGE | END_MESSAGE => self.hook(&message),
+            _ => false,
         }
     }
 
@@ -316,7 +410,7 @@ impl ZellijPlugin for State {
         }
 
         let lines = self.lines(cols, rows);
-        self.painted = lines.iter().map(|row| row.key).collect();
+        self.painted = lines.iter().map(|row| row.key.clone()).collect();
         let selected = self.selection();
         let painted: Vec<String> = lines
             .iter()

@@ -15,8 +15,20 @@ name = "zellij-agent-wrangler"
 path = "src/main.rs"
 test = false
 
+# The hook client runs as an ordinary process beside the agent that invokes it.
+# Its feature is what keeps it, and the JSON it reads, out of the wasm.
+[[bin]]
+name = "wrangler"
+path = "src/wrangler.rs"
+required-features = ["native"]
+
+[features]
+default = ["native"]
+native = ["dep:serde_json"]
+
 [dependencies]
 zellij-tile = "0.44.3"
+serde_json = { version = "1", optional = true }
 
 [profile.release]
 opt-level = "z"

@@ -29,52 +29,16 @@ the tab bar and the status bar beside it. `children` has to be a direct child of
 plain pane where `children` would be: a tab built at runtime needs a pane, not a
 placeholder.
 
-Sidebars reach each other by broadcasting: a message naming this plugin's url
-reaches no running instance and launches another one instead, while an
-unaddressed message reaches every plugin there is, sender included. It needs the
-`MessageAndLaunchOtherPlugins` permission, and without it the send is dropped
-silently.
-
-A sidebar opens itself into the tab the user has gone to, which is what lets a
-layout carry the tab bar and the status bar again: only the first tab needs a
-sidebar declared. A launch lands in the tab holding the focus rather than the
-one that asked, arriving beside the focused pane and framed, so it moves itself
-to the edge and drops its frame. It cannot match a declared sidebar's width: a
-plugin resizes its own pane only by steps, which is why adopting another
-sidebar's width was dropped too.
-
-Three things make that work, and each was a wrong turn first:
-
-- The sidebar being *left behind* is the one that acts, on its own pane going
-  out of sight. That event is about its own pane, so it arrives however the user
-  moved; nothing else does.
-- It asks zellij for the session there and then rather than reading what it was
-  last told. Zellij stops telling a sidebar about the session once its tab is
-  out of sight, so what it holds is exactly what cannot be trusted at the moment
-  it is leaving.
-- Where the user went comes from two sources, either of which can be a step
-  behind. The event settles it: this pane is off screen, so a source still
-  naming this tab is the stale one.
-
-A plugin is identified by its url *and* its configuration, so every sidebar is
-opened naming the tab it is for. Without that, the second such message finds the
-sidebar the first one opened and is delivered to it instead of opening another.
-
-A layout can only carry the sidebar so far. `children` has to be a direct child
-of the tab template, or zellij drops it when it builds a tab at runtime, so the
-sidebar must be a column beside it and the UI bars, which are rows, have nowhere
-left to go: a template holds the bars or a sidebar, not both. Opening the pane
-from the plugin lifts that, and toggling the sidebar needs the same commands
-anyway.
-
 ## The tree
 
 - [x] Tabs, with their panes as children
-- [ ] A pane running an agent is drawn as that agent instead of as a pane
-- [ ] A pane hosting two agents contributes two rows
+- [x] A pane running an agent is drawn as that agent instead of as a pane
+- [x] A pane hosting two agents contributes two rows
 - [ ] Sections mode: the tree, then a block per agent, the same rows regrouped
-- [ ] Pane titles and agent labels update live
-- [ ] Agent label from the session title, or the working-directory basename
+- [x] A pane's title follows the command and the directory running in it
+- [ ] Agent labels update live
+- [x] Agent label from the working-directory basename
+- [ ] Agent label from the session title, when it has one
 - [ ] Teammates labelled `@name - title`
 
 ## Drawing
@@ -94,19 +58,31 @@ anyway.
 - [x] `j`/`k` and the arrows move the selection, tree and notification area as one order
 - [x] A click goes to the row it lands on
 - [x] `Enter` focuses the selected tab, pane or agent
+- [x] An agent's row takes you to the pane the agent is in
 - [ ] `Enter` on a notification opens it
 - [ ] The selection falls back sanely when the row it was on is gone
 
 ## The agent registry
 
-- [ ] A hook client the agents invoke, taking the payload on stdin
-- [ ] `start` / `end` / `working` / `needsAttention` / `error`, snake and camel payloads
-- [ ] Sessions recorded on disk, pruned when the pane or the process goes
+- [x] A hook client the agents invoke, taking the payload on stdin
+- [x] `start` / `end`, snake and camel payloads
+- [ ] `working` / `needsAttention` / `error`
+- [x] Sessions held by every sidebar, and asked for by one that starts later
+- [ ] Sessions surviving a session with no sidebar running at all
 - [ ] A recorded pane counts only when the agent's pid descends from the pane's
 - [ ] A pane-less session is matched by title against each pane's live title
 - [ ] A session is filed under every tab showing it, and dropped if shown nowhere
 - [ ] Title collisions broken by the recorded pane, then the cwd
-- [ ] Legacy two-field records still read
+
+The hook client reports the pane it was invoked in from `$ZELLIJ_PANE_ID`, which
+zellij sets on every terminal pane it spawns and every process started in one
+inherits. That number is the same one the plugin sees as a terminal pane's `id`,
+so the two ends agree on a pane without anything in between.
+
+It reaches the sidebars through `zellij pipe`, which is delivered to every
+running plugin of the session it was run from whatever tab that plugin is in. A
+record whose pane is not on screen is held but drawn nowhere, so an agent in a
+pane that has gone leaves no row behind.
 
 ## Turn state
 
@@ -144,6 +120,13 @@ anyway.
 
 - [ ] A published wasm and a documented one-line install
 - [ ] Keep the hook client and the plugin in step across an update
+- [ ] Split the crate so the hook client does not link `zellij-tile`
+
+The client reads its stdin and runs one command, and links 250 crates to do it:
+the library reads zellij's types in one module, which off wasm brings in curl,
+openssl, rusqlite and the rest of `zellij-utils`. Making `zellij-tile` optional
+behind a feature, with that module gated on it, leaves the client on
+`serde_json` alone. The crate builds for `x86_64-pc-windows-gnu` either way.
 
 ## Checkpoints
 
@@ -159,7 +142,7 @@ instrumenting to tell whether it works.
 - [x] **3. Lifecycle.** Leaving an empty tab, `q` turning the sidebar off for
       the session, a sidebar opening itself in a tab that has none, and a shared
       selection. Width sync was dropped.
-- [ ] **4. Agent rows.** `start` and `end` only. Launch an agent in a pane and
+- [x] **4. Agent rows.** `start` and `end` only. Launch an agent in a pane and
       watch its row appear with its label, then go when the agent exits.
 - [ ] **5. Turn state.** The rest of the hook events. Working while it works,
       attention when it wants you, cleared when you focus its pane.

@@ -3,35 +3,63 @@
 A zellij sidebar pane listing tabs, their panes as a tree, and the agent
 sessions running in them.
 
-**This is a prototype.** The rows are hardcoded. It draws one fixed arrangement
-and lets you move through it, which settles how the sidebar looks and how it
-takes input before anything resolves live state.
+**This is a port in progress.** The tree and the agent rows are live; turn
+state, notifications and the options are not. `FEATURES.md` is the list, and
+`PROGRESS.md` is what the design rests on.
 
 ```
 ▌ 1: wrangler
-  ├─ 0:   nvim
-▌ ├─ 1: 󱙺  claude · wrangler   ○
-  └─ 2:   cargo watch
+  ├─ 1:   nvim
+▌ ├─ 2: 󱙺  wrangler
+  └─ 3:   cargo watch
   2: notes
-  ├─ 0:   nvim
-  └─ 1: 󱙺  copilot · docs      ●
+  ├─ 1:   nvim
+  └─ 2: 󱙺  docs
   3: infra
-  ├─ 0:   ssh prod-1
-  └─ 1:   k9s
-
- NOTIFICATIONS
- 󱙺  copilot                    ●
-    Permission required to run
-    cargo test --release
+  ├─ 1:   ssh prod-1
+  └─ 2:   k9s
 ```
 
 ## Running it
 
 ```bash
 rustup target add wasm32-wasip1
-./dev.sh                 # builds, then opens a session with the sidebar in every tab
-cargo test               # the paint's unit tests, on the host target
+./dev.sh                 # builds both halves, then opens a session with the sidebar in every tab
+cargo test               # everything that does not call zellij, on the host target
 ```
+
+Two things are built: the plugin, which is the crate without its `native`
+feature, and `wrangler`, the hook client the agents invoke. `dev.sh` prints the
+client's path.
+
+## Agent rows
+
+An agent appears in the tree once its own lifecycle hooks call the client, which
+reports the pane it was invoked in. Installing those hooks automatically is not
+built yet, so add them by hand, with the path `dev.sh` printed:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "/abs/path/to/wrangler hook claude start" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "/abs/path/to/wrangler hook claude end" }] }
+    ]
+  }
+}
+```
+
+In `~/.claude/settings.json` that covers every agent you start anywhere; the
+client does nothing at all outside zellij, so sessions elsewhere are unaffected.
+Start an agent in a pane and that pane's row becomes the agent's, labelled with
+the directory it is working in. A pane running two agents contributes a row
+each.
+
+The agents of a session are known to every sidebar in it, and a sidebar opening
+in a new tab asks the others for what they have. Nothing survives every sidebar
+being closed at once.
 
 Each run kills the `wrangler-proto` session it opens last time, because a
 session holds the wasm it loaded at startup and attaching would run the build
@@ -89,6 +117,11 @@ patched font to draw them.
 - `model.rs` — the row vocabulary: what a row is, where it sits, what its turn
   state is.
 - `render.rs` — the line drawn for a row, and the styling of its pieces.
-- `fixture.rs` — the hardcoded rows and notifications.
+- `session.rs` — the shape of the session, read out of what zellij reports. The
+  only place zellij's types meet the sidebar's.
+- `tree.rs` — the rows a session is drawn as.
+- `agents.rs` — the agent sessions, their wire format, and the panes they sit in.
+- `payload.rs` — reading an agent's hook body. Native only.
 - `main.rs` — the plugin: the two regions, the nav order over them, and the
   event handling.
+- `wrangler.rs` — the hook client.

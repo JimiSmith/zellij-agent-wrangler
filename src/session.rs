@@ -27,11 +27,7 @@ fn panes_of(panes: &[PaneInfo]) -> Vec<Pane> {
     listed.sort_by_key(|pane| (pane.is_floating, pane.pane_y, pane.pane_x));
     listed
         .into_iter()
-        .map(|pane| Pane {
-            id: pane.id,
-            title: pane.title.clone(),
-            focused: pane.is_focused,
-        })
+        .map(|pane| Pane::new(pane.id, &pane.title, pane.is_focused))
         .collect()
 }
 

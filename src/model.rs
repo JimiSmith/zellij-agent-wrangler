@@ -84,25 +84,60 @@ impl Indicator {
     }
 }
 
+/// The id an agent gives its own session, which is what the sidebar files that
+/// agent under.
+///
+/// The id travels inside delimited text, so the only constructor replaces every
+/// character that is not a letter, a digit, `.`, `_` or `-`, and refuses an id
+/// that has no such character to begin with. A `SessionId` that could split a
+/// field or a record cannot be built.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SessionId(String);
+
+impl SessionId {
+    pub fn new(text: &str) -> Option<Self> {
+        if text.is_empty() {
+            return None;
+        }
+        Some(SessionId(
+            text.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect(),
+        ))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// What a selectable row points at.
 ///
 /// The selection is carried as one of these rather than as a position, so a
 /// pane opening or closing above the selected row moves the row without moving
 /// the selection off the thing it was on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowKey {
     Tab(usize),
     Pane(u32),
+    Agent(SessionId),
     Notification(usize),
 }
 
 impl RowKey {
     /// The key as one line of text, which is how it travels between the
     /// sidebars sharing a selection.
-    pub fn encode(self) -> String {
+    pub fn encode(&self) -> String {
         match self {
             RowKey::Tab(position) => format!("tab:{position}"),
             RowKey::Pane(id) => format!("pane:{id}"),
+            RowKey::Agent(session) => format!("agent:{}", session.as_str()),
             RowKey::Notification(index) => format!("notification:{index}"),
         }
     }
@@ -114,6 +149,7 @@ impl RowKey {
         match kind {
             "tab" => value.parse().ok().map(RowKey::Tab),
             "pane" => value.parse().ok().map(RowKey::Pane),
+            "agent" => SessionId::new(value).map(RowKey::Agent),
             "notification" => value.parse().ok().map(RowKey::Notification),
             _ => None,
         }
@@ -140,7 +176,6 @@ pub enum RowContent {
         placement: Placement,
         color: Option<NamedColor>,
     },
-    #[allow(dead_code)]
     Agent {
         index: String,
         label: String,
@@ -208,6 +243,7 @@ mod tests {
             RowKey::Tab(0),
             RowKey::Tab(12),
             RowKey::Pane(7),
+            RowKey::Agent(SessionId::new("9f3c-1a").unwrap()),
             RowKey::Notification(2),
         ] {
             assert_eq!(RowKey::decode(&key.encode()), Some(key));
@@ -216,8 +252,24 @@ mod tests {
 
     #[test]
     fn anything_else_decodes_to_nothing() {
-        for text in ["", "tab", "tab:", "tab:x", "pane:-1", "window:1", "1"] {
+        for text in [
+            "", "tab", "tab:", "tab:x", "pane:-1", "agent:", "window:1", "1",
+        ] {
             assert_eq!(RowKey::decode(text), None, "{text}");
         }
+    }
+
+    #[test]
+    fn a_session_id_keeps_nothing_that_could_split_a_field() {
+        let id = SessionId::new("a/b\tc,d=e\nf").unwrap();
+        assert_eq!(id.as_str(), "a_b_c_d_e_f");
+    }
+
+    #[test]
+    fn a_sanitized_id_is_the_one_that_comes_back() {
+        // Sanitizing on the way in is what makes the round trip total: an id
+        // decoded from the wire is already the shape the constructor allows.
+        let key = RowKey::Agent(SessionId::new("a/b").unwrap());
+        assert_eq!(RowKey::decode(&key.encode()), Some(key));
     }
 }

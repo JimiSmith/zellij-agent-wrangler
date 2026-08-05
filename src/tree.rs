@@ -5,14 +5,31 @@
 //! What is derived here is everything that follows from a thing's *position*:
 //! its placement, its branch, and the index it is labelled with.
 
+use crate::agents::Agent;
 use crate::model::{Branch, Placement, Row, RowContent, RowKey};
 
-/// A pane, as one row of the tree.
+/// A pane, and the agent sessions running in it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pane {
     pub id: u32,
     pub title: String,
     pub focused: bool,
+    /// The agents this pane hosts. A pane hosting agents is drawn as them
+    /// instead of as itself: the agent is what the user is looking for, and the
+    /// pane it happens to be in is not a second thing to point at.
+    pub agents: Vec<Agent>,
+}
+
+impl Pane {
+    /// A pane hosting nothing, which is how every pane starts out.
+    pub fn new(id: u32, title: &str, focused: bool) -> Self {
+        Pane {
+            id,
+            title: title.to_string(),
+            focused,
+            agents: Vec::new(),
+        }
+    }
 }
 
 /// A tab and the panes it shows.
@@ -46,7 +63,32 @@ fn pane_placement(tab_active: bool, focused: bool) -> Placement {
     }
 }
 
-/// The rows for one tab: the tab itself, then a child per pane.
+/// One row hanging off a tab: a pane, or one of the agents running in a pane.
+///
+/// A pane contributes itself only when it hosts no agent, so the children of a
+/// tab are what the user can actually point at, numbered in one sequence.
+enum Child<'a> {
+    Pane(&'a Pane),
+    Agent(&'a Pane, &'a Agent),
+}
+
+fn children(tab: &Tab) -> Vec<Child<'_>> {
+    tab.panes
+        .iter()
+        .flat_map(|pane| {
+            if pane.agents.is_empty() {
+                vec![Child::Pane(pane)]
+            } else {
+                pane.agents
+                    .iter()
+                    .map(|agent| Child::Agent(pane, agent))
+                    .collect()
+            }
+        })
+        .collect()
+}
+
+/// The rows for one tab: the tab itself, then a child per pane or agent.
 fn tab_rows(tab: &Tab) -> Vec<Row> {
     let mut rows = vec![Row::new(RowContent::Window {
         index: (tab.position + 1).to_string(),
@@ -56,22 +98,35 @@ fn tab_rows(tab: &Tab) -> Vec<Row> {
     })
     .at(RowKey::Tab(tab.position))];
 
-    let last = tab.panes.len().saturating_sub(1);
-    for (position, pane) in tab.panes.iter().enumerate() {
-        rows.push(
-            Row::new(RowContent::Pane {
-                index: (position + 1).to_string(),
+    let children = children(tab);
+    let last = children.len().saturating_sub(1);
+    for (position, child) in children.iter().enumerate() {
+        let index = (position + 1).to_string();
+        let branch = if position == last {
+            Branch::Last
+        } else {
+            Branch::More
+        };
+        rows.push(match child {
+            Child::Pane(pane) => Row::new(RowContent::Pane {
+                index,
                 title: pane.title.clone(),
-                branch: if position == last {
-                    Branch::Last
-                } else {
-                    Branch::More
-                },
+                branch,
                 placement: pane_placement(tab.active, pane.focused),
                 color: None,
             })
             .at(RowKey::Pane(pane.id)),
-        );
+            // An agent's placement is its pane's: the agent is where the pane
+            // is, and pointing at it takes you to that pane.
+            Child::Agent(pane, agent) => Row::new(RowContent::Agent {
+                index,
+                label: agent.label.clone(),
+                branch,
+                placement: pane_placement(tab.active, pane.focused),
+                color: None,
+            })
+            .at(RowKey::Agent(agent.session.clone())),
+        });
     }
     rows
 }
@@ -85,12 +140,25 @@ pub fn build_tree(tabs: &[Tab]) -> Vec<Row> {
 mod tests {
     use super::*;
 
+    use crate::model::SessionId;
+
     fn pane(id: u32, title: &str, focused: bool) -> Pane {
-        Pane {
-            id,
-            title: title.to_string(),
-            focused,
-        }
+        Pane::new(id, title, focused)
+    }
+
+    fn hosting(mut pane: Pane, labels: &[&str]) -> Pane {
+        pane.agents = labels
+            .iter()
+            .map(|label| {
+                Agent::new(
+                    SessionId::new(label).unwrap(),
+                    "claude",
+                    label,
+                    Some(pane.id),
+                )
+            })
+            .collect();
+        pane
     }
 
     fn tab(position: usize, name: &str, active: bool, panes: Vec<Pane>) -> Tab {
@@ -117,9 +185,9 @@ mod tests {
     fn placements(rows: &[Row]) -> Vec<Placement> {
         rows.iter()
             .map(|row| match &row.content {
-                RowContent::Window { placement, .. } | RowContent::Pane { placement, .. } => {
-                    *placement
-                }
+                RowContent::Window { placement, .. }
+                | RowContent::Pane { placement, .. }
+                | RowContent::Agent { placement, .. } => *placement,
                 other => panic!("unexpected row: {other:?}"),
             })
             .collect()
@@ -128,7 +196,7 @@ mod tests {
     #[test]
     fn a_tab_is_followed_by_its_panes() {
         let rows = build_tree(&session());
-        let keys: Vec<Option<RowKey>> = rows.iter().map(|row| row.key).collect();
+        let keys: Vec<Option<RowKey>> = rows.iter().map(|row| row.key.clone()).collect();
         assert_eq!(
             keys,
             vec![
@@ -171,14 +239,91 @@ mod tests {
     #[test]
     fn rows_are_labelled_with_their_one_based_position() {
         let rows = build_tree(&session());
-        let indices: Vec<&str> = rows
-            .iter()
+        assert_eq!(indices(&rows), vec!["1", "1", "2", "2", "1"]);
+    }
+
+    fn indices(rows: &[Row]) -> Vec<&str> {
+        rows.iter()
             .map(|row| match &row.content {
-                RowContent::Window { index, .. } | RowContent::Pane { index, .. } => index.as_str(),
+                RowContent::Window { index, .. }
+                | RowContent::Pane { index, .. }
+                | RowContent::Agent { index, .. } => index.as_str(),
                 other => panic!("unexpected row: {other:?}"),
             })
-            .collect();
-        assert_eq!(indices, vec!["1", "1", "2", "2", "1"]);
+            .collect()
+    }
+
+    #[test]
+    fn a_pane_hosting_an_agent_is_drawn_as_that_agent() {
+        let panes = vec![hosting(pane(1, "bash", true), &["wrangler"])];
+        let rows = build_tree(&[tab(0, "editor", true, panes)]);
+        assert_eq!(
+            rows[1].content,
+            RowContent::Agent {
+                index: "1".to_string(),
+                label: "wrangler".to_string(),
+                branch: Branch::Last,
+                placement: Placement::Here,
+                color: None,
+            }
+        );
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn a_pane_hosting_two_agents_contributes_two_rows() {
+        let panes = vec![hosting(pane(1, "bash", false), &["one", "two"])];
+        let rows = build_tree(&[tab(0, "editor", true, panes)]);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows.iter()
+                .skip(1)
+                .map(|row| row.key.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Some(RowKey::Agent(SessionId::new("one").unwrap())),
+                Some(RowKey::Agent(SessionId::new("two").unwrap())),
+            ]
+        );
+    }
+
+    #[test]
+    fn agents_and_panes_are_numbered_in_one_sequence() {
+        // The second pane hosts two agents, so the plain pane after it is the
+        // fourth child rather than the third.
+        let panes = vec![
+            pane(1, "nvim", false),
+            hosting(pane(2, "bash", false), &["one", "two"]),
+            pane(3, "cargo", false),
+        ];
+        let rows = build_tree(&[tab(0, "editor", true, panes)]);
+        assert_eq!(indices(&rows), vec!["1", "1", "2", "3", "4"]);
+    }
+
+    #[test]
+    fn the_last_agent_of_a_tab_closes_the_tree() {
+        let panes = vec![
+            pane(1, "nvim", false),
+            hosting(pane(2, "bash", false), &["one"]),
+        ];
+        let rows = build_tree(&[tab(0, "editor", true, panes)]);
+        assert_eq!(
+            rows.iter()
+                .skip(1)
+                .map(|row| match &row.content {
+                    RowContent::Pane { branch, .. } | RowContent::Agent { branch, .. } => *branch,
+                    other => panic!("unexpected row: {other:?}"),
+                })
+                .collect::<Vec<_>>(),
+            vec![Branch::More, Branch::Last]
+        );
+    }
+
+    #[test]
+    fn an_agent_sits_where_its_pane_sits() {
+        let panes = vec![hosting(pane(1, "bash", true), &["one"])];
+        let rows = build_tree(&[tab(0, "editor", false, panes)]);
+        assert_eq!(placements(&rows), vec![Placement::Unfocused; 2]);
     }
 
     #[test]

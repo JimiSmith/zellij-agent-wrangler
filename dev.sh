@@ -9,7 +9,13 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 wasm="$root/target/wasm32-wasip1/debug/zellij-agent-wrangler.wasm"
 
-cargo build --manifest-path "$root/Cargo.toml" --target wasm32-wasip1
+# The plugin is the crate without its native half: the hook client is a real
+# process and has no business inside the wasm.
+cargo build --manifest-path "$root/Cargo.toml" --target wasm32-wasip1 \
+    --no-default-features --bin zellij-agent-wrangler
+cargo build --manifest-path "$root/Cargo.toml" --bin wrangler
+
+echo "hook client: $root/target/debug/wrangler"
 
 layout="$(mktemp -d)/dev.kdl"
 sed "s#PLUGIN_LOCATION#file:$wasm#" "$root/dev.kdl" >"$layout"

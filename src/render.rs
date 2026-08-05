@@ -420,9 +420,9 @@ pub fn notification_rows(entry: &Notification, index: usize, width: usize) -> Ve
         color: entry.color,
     })
     .with(Indicator::Attention)
-    .at(key)];
+    .at(key.clone())];
     for line in wrap(&entry.message, notification_body_field(width)) {
-        rows.push(Row::new(RowContent::NotificationBody { text: line }).at(key));
+        rows.push(Row::new(RowContent::NotificationBody { text: line }).at(key.clone()));
     }
     rows
 }

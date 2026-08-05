@@ -7,24 +7,32 @@ rests on, and what they cost to find.
 
 ## Where it stands
 
-Checkpoints 1 to 3 are done bar one item. The sidebar draws the session's real
+Checkpoints 1 to 4 are done bar one item. The sidebar draws the session's real
 tabs and panes, `Enter` and a click go to what a row points at, a sidebar leaves
 a tab it is alone in, `q` turns them all off for the session, and the sidebars of
 a session share one selection. The layout places every sidebar, including in
-tabs opened later.
+tabs opened later. A pane running an agent is drawn as that agent, labelled with
+the directory it is working in, and goes back to being a pane when the agent
+ends.
 
 Left in checkpoint 3: turning the sidebar back on after `q`, which needs a
 zellij key binding rather than plugin code. Width sync was dropped by decision.
 
-Next is checkpoint 4, agent rows, which is the first that needs the native hook
-binary to exist.
+Next is checkpoint 5, turn state: the rest of the hook events, which is a
+larger hook manifest and an indicator, not new machinery.
 
 ## How it is tested
 
 `cargo test` covers everything that does not call zellij: the row model, the
-paint, and the reading of tabs and panes into it. That is why the plugin's own
-logic lives in `src/lib.rs` and the plugin in a wasm-only bin. Host functions do
-not link on the host target, so anything calling them cannot be unit tested.
+paint, the reading of tabs and panes into it, the agent registry and its wire
+format, and the reading of a hook body. That is why the plugin's own logic lives
+in `src/lib.rs` and the plugin in a wasm-only bin. Host functions do not link on
+the host target, so anything calling them cannot be unit tested.
+
+The crate's `native` feature is what separates the two halves. It is on by
+default, so `cargo test` covers the whole crate; the wasm is built with
+`--no-default-features`, which is what keeps the hook client and the JSON it
+reads out of the plugin.
 
 Everything else is checked by driving a real session. `zellij action
 dump-screen` returns nothing for plugin panes, so the only way to see what a
@@ -49,6 +57,27 @@ of them contradict what looks reasonable from the outside.
 fallen behind stops receiving `PaneUpdate` and `TabUpdate`. Its manifest keeps
 whatever it last held, which can be arbitrarily stale. Any design where a
 background instance is responsible for noticing something is unsound.
+
+**Pipe messages are not subject to that.** `pipe_messages` in
+`plugins/wasm_bridge.rs` walks every running plugin with no visibility filter,
+so a sidebar in a tab nobody is looking at still hears one. This is what lets
+every sidebar hold the agent registry rather than one of them owning it.
+
+**A terminal pane's id is `$ZELLIJ_PANE_ID`.** Zellij sets it to the pane's
+`terminal_id` when it spawns the process (`os_input_output_unix.rs`), and that is
+the same number the plugin reads as `PaneInfo.id` for a non-plugin pane
+(`pane_info_for_pane` in `tab/mod.rs`). Every process started in the pane
+inherits it, which is how an agent's hook says where it is running.
+
+**A plugin's `/tmp` is the host's `$TMPDIR/zellij-<uid>`,** readable and
+writable both ways; `/host`, `/data` and `/cache` are mounted too. The
+documentation says `/data` is "shared with all loaded instances of the plugin",
+and it is not: `plugin_own_data_dir` ends in `<plugin_id>-<client_id>` and is
+`remove_dir_all`'d when that one instance unloads. `/tmp` is the only one of the
+four that two instances, or a plugin and a native process, can meet in.
+
+**A plugin inherits the zellij server's environment**, `ZELLIJ_SESSION_NAME`
+included, because the WASI context is built with `inherit_env`.
 
 **A plugin's identity is its url and its configuration together.** Zellij adds
 `caller_cwd` to the configuration of an instance it launches, so a message
@@ -75,6 +104,36 @@ what gives a runtime tab the same shape: it needs a pane, not a placeholder.
 
 **A plugin cannot set its pane's size.** Tiled panes resize by `Increase` and
 `Decrease` steps only.
+
+**A pane's title is never reported, but the two things behind it are.**
+`PaneUpdate` and `TabUpdate` come from `log_and_report_session_state`, which the
+screen calls when the session's *shape* changes; a program renaming its own pane
+through OSC 0/2 does not go through it, so a held manifest carries whatever each
+title was when a pane was last opened or closed, however long ago.
+
+What does get reported is `CommandChanged` and `CwdChanged`. Zellij's pty thread
+already walks the panes that produced output once a second, and pushes those
+only when a pane's foreground command or directory actually changed. Both need
+only `ReadApplicationState`. The title itself is then one `get_pane_info` round
+trip for that one pane. This is why the sidebar keeps no clock: zellij does the
+watching once for the whole session rather than once per sidebar, and an idle
+session costs 0.1% of a core against 0.9% for polling every pane at 1Hz from
+each of four sidebars.
+
+What that misses is a rename which changes neither the command nor the
+directory — a program relabelling itself mid-run. That is mostly the case the
+sidebar does not want anyway, since an agent's row is drawn from its own record
+rather than from the pane's title.
+
+Two things that look like alternatives are not: `SessionUpdate` is driven by the
+same shape-change detection rather than by a clock, and `get_session_list`
+returns the background job's cached copy after scanning every session on the
+machine off disk.
+
+This is also what makes an empty title dangerous rather than merely odd. OSC 0/2
+`trim()`s its argument and stores the result, so a program clearing its title on
+exit leaves `Some("")` standing, and a manifest sampled then holds a blank title
+until something asks again.
 
 **`get_focused_pane_info()` and the session snapshot can each be a step behind**,
 and which one is stale alternates. Neither is authoritative on its own around a
@@ -103,6 +162,20 @@ plugin.
 
 **Selection travels as an absolute key**, never a movement, so instances cannot
 drift apart.
+
+**The agent registry is held by every sidebar, not persisted.** A hook reaches
+all of them at once and each draws the whole session, so they agree without
+anyone owning the record; a sidebar opening later asks the others for what they
+have and any sidebar that has some answers. Nothing survives every sidebar being
+closed at once. Writing the records under `/tmp` would fix that, at the cost of
+files no process is responsible for removing: an agent killed without an `end`
+would leave one behind for good, where the held version simply forgets. That
+trade is worth revisiting only if the gap is actually felt.
+
+**A record reaches the tree only through the pane it names.** An agent whose
+pane is gone is still held but drawn nowhere, so nothing has to prune the
+registry against the manifest — which matters, since a sidebar in a background
+tab holds a manifest that may be arbitrarily stale.
 
 ## A note on method
 
