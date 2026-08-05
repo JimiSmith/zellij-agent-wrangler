@@ -25,6 +25,14 @@ use model::{Notification, Row, RowContent, RowKey};
 use render::{notification_body_field, notification_rows, paint, wrap};
 use session::Focus;
 
+/// The message the sidebars of one session carry their shared selection in.
+///
+/// It is broadcast rather than addressed: a message naming this plugin's url
+/// reaches no running instance and launches another one instead, while an
+/// unaddressed message reaches every plugin there is. Every instance therefore
+/// hears every other one, and answers only to the name it knows.
+const SELECTION_MESSAGE: &str = "wrangler:selection";
+
 /// What a refused sidebar says beneath its heading.
 const REFUSED: &str = "the sidebar cannot read the session";
 
@@ -46,6 +54,15 @@ struct State {
     /// The key each screen line was drawn from, so a click resolves against the
     /// frame it landed on rather than against a tree that may since have moved.
     painted: Vec<Option<RowKey>>,
+    /// This instance's own plugin id, which is how it finds the tab it is in.
+    plugin_id: u32,
+    /// Whether the tab this sidebar is in has ever held a pane besides it.
+    ///
+    /// A tab is briefly reported as holding only the sidebar while it is still
+    /// being built, and leaving then would close a tab the user is opening.
+    /// Waiting for company first makes the rule "leave when the last pane goes"
+    /// rather than "leave when there is none yet".
+    had_company: bool,
 }
 
 register_plugin!(State);
@@ -84,10 +101,31 @@ impl State {
     /// Rebuild the tree from the tabs and panes last reported, and say whether
     /// what would be drawn changed.
     fn resolve(&mut self) -> bool {
-        let rows = tree::build_tree(&session::session(&self.tabs, &self.panes, focus()));
+        let resolved = session::session(&self.tabs, &self.panes, focus());
+        self.leave_if_alone(&resolved);
+        let rows = tree::build_tree(&resolved);
         let changed = rows != self.rows;
         self.rows = rows;
         changed
+    }
+
+    /// Close this sidebar when the tab holding it has nothing else left.
+    ///
+    /// A sidebar alone would take the whole tab and keep an empty one alive, and
+    /// closing the last pane of a tab closes the tab, so leaving is what lets
+    /// the tab go.
+    fn leave_if_alone(&mut self, resolved: &[tree::Tab]) {
+        let Some(mine) = session::tab_of_plugin(&self.panes, self.plugin_id) else {
+            return;
+        };
+        let Some(tab) = resolved.iter().find(|tab| tab.position == mine) else {
+            return;
+        };
+        if !tab.panes.is_empty() {
+            self.had_company = true;
+        } else if self.had_company {
+            close_self();
+        }
     }
 
     /// The selection, falling back to the first row when what it was on has
@@ -148,6 +186,17 @@ impl State {
         }
     }
 
+    /// Put the selection where `key` is and tell the other sidebars, so the
+    /// sidebars of one session read as one sidebar that follows you.
+    fn select(&mut self, key: Option<RowKey>) {
+        self.selected = key;
+        if let Some(key) = key {
+            pipe_message_to_plugin(
+                MessageToPlugin::new(SELECTION_MESSAGE).with_payload(key.encode()),
+            );
+        }
+    }
+
     /// Move the selection `step` places through the keys the last frame drew.
     fn step(&mut self, step: isize) {
         let mut keys: Vec<RowKey> = Vec::new();
@@ -157,21 +206,23 @@ impl State {
             }
         }
         let Some(at) = keys.iter().position(|key| Some(*key) == self.selection()) else {
-            self.selected = keys.first().copied();
+            self.select(keys.first().copied());
             return;
         };
         let next = (at as isize + step).clamp(0, keys.len() as isize - 1) as usize;
-        self.selected = keys.get(next).copied();
+        self.select(keys.get(next).copied());
     }
 }
 
 impl ZellijPlugin for State {
     fn load(&mut self, _configuration: BTreeMap<String, String>) {
+        self.plugin_id = get_plugin_ids().plugin_id;
         // Reading the session's tabs and panes, and going to what a row points
         // at: the sidebar asks for nothing it would not use.
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
+            PermissionType::MessageAndLaunchOtherPlugins,
         ]);
         subscribe(&[
             EventType::Key,
@@ -209,6 +260,10 @@ impl ZellijPlugin for State {
                     self.activate();
                     false
                 }
+                BareKey::Char('q') => {
+                    close_self();
+                    false
+                }
                 _ => false,
             },
             // A click goes where it points rather than only selecting: the row
@@ -216,7 +271,7 @@ impl ZellijPlugin for State {
             Event::Mouse(Mouse::LeftClick(line, _)) => {
                 match usize::try_from(line).ok().and_then(|l| self.painted.get(l)) {
                     Some(&Some(key)) => {
-                        self.selected = Some(key);
+                        self.select(Some(key));
                         self.activate();
                         true
                     }
@@ -224,6 +279,22 @@ impl ZellijPlugin for State {
                 }
             }
             _ => false,
+        }
+    }
+
+    /// Adopt a selection another sidebar made. A sidebar hears its own broadcast
+    /// too, and has nothing to learn from it.
+    fn pipe(&mut self, message: PipeMessage) -> bool {
+        if message.name != SELECTION_MESSAGE || message.source == PipeSource::Plugin(self.plugin_id)
+        {
+            return false;
+        }
+        match message.payload.as_deref().and_then(RowKey::decode) {
+            Some(key) => {
+                self.selected = Some(key);
+                true
+            }
+            None => false,
         }
     }
 

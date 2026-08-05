@@ -35,6 +35,17 @@ fn panes_of(panes: &[PaneInfo]) -> Vec<Pane> {
         .collect()
 }
 
+/// Which tab a plugin pane is in, found by the plugin's own id. `None` until the
+/// manifest has caught up with the pane's existence.
+pub fn tab_of_plugin(manifest: &PaneManifest, plugin_id: u32) -> Option<usize> {
+    manifest.panes.iter().find_map(|(tab, panes)| {
+        panes
+            .iter()
+            .any(|pane| pane.is_plugin && pane.id == plugin_id)
+            .then_some(*tab)
+    })
+}
+
 /// Where the user is: the tab they are in, and the pane within it when that pane
 /// is one the sidebar lists (a focused plugin pane, the sidebar itself included,
 /// leaves the tab known and no pane focused).
@@ -187,6 +198,25 @@ mod tests {
         );
         let names: Vec<&str> = session.iter().map(|tab| tab.name.as_str()).collect();
         assert_eq!(names, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn a_plugin_pane_is_found_by_its_own_id() {
+        let mine = PaneInfo {
+            id: 7,
+            is_plugin: true,
+            ..Default::default()
+        };
+        // A terminal pane numbered the same is a different pane: zellij counts
+        // the two kinds in separate sequences.
+        let namesake = PaneInfo {
+            id: 7,
+            is_plugin: false,
+            ..Default::default()
+        };
+        let manifest = manifest(vec![(0, vec![namesake]), (1, vec![mine])]);
+        assert_eq!(tab_of_plugin(&manifest, 7), Some(1));
+        assert_eq!(tab_of_plugin(&manifest, 8), None);
     }
 
     #[test]

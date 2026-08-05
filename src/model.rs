@@ -96,6 +96,30 @@ pub enum RowKey {
     Notification(usize),
 }
 
+impl RowKey {
+    /// The key as one line of text, which is how it travels between the
+    /// sidebars sharing a selection.
+    pub fn encode(self) -> String {
+        match self {
+            RowKey::Tab(position) => format!("tab:{position}"),
+            RowKey::Pane(id) => format!("pane:{id}"),
+            RowKey::Notification(index) => format!("notification:{index}"),
+        }
+    }
+
+    /// The key `encode` wrote, or `None` for anything else. A sidebar running
+    /// older code than the one that sent this says nothing rather than guessing.
+    pub fn decode(text: &str) -> Option<Self> {
+        let (kind, value) = text.split_once(':')?;
+        match kind {
+            "tab" => value.parse().ok().map(RowKey::Tab),
+            "pane" => value.parse().ok().map(RowKey::Pane),
+            "notification" => value.parse().ok().map(RowKey::Notification),
+            _ => None,
+        }
+    }
+}
+
 /// What a row is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowContent {
@@ -171,5 +195,29 @@ impl Row {
     pub fn with(mut self, indicator: Indicator) -> Self {
         self.indicator = indicator;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_key_survives_the_round_trip() {
+        for key in [
+            RowKey::Tab(0),
+            RowKey::Tab(12),
+            RowKey::Pane(7),
+            RowKey::Notification(2),
+        ] {
+            assert_eq!(RowKey::decode(&key.encode()), Some(key));
+        }
+    }
+
+    #[test]
+    fn anything_else_decodes_to_nothing() {
+        for text in ["", "tab", "tab:", "tab:x", "pane:-1", "window:1", "1"] {
+            assert_eq!(RowKey::decode(text), None, "{text}");
+        }
     }
 }

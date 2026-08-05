@@ -10,12 +10,25 @@ this repo.
 - [ ] Place the sidebar from the plugin rather than from the layout
 - [ ] Toggle the sidebar for the session, off a key binding
 - [ ] Focus this tab's sidebar, off a key binding
-- [ ] `q` closes the sidebar
-- [ ] The sidebar exits when its tab has no real panes left
+- [x] `q` closes the sidebar
+- [x] The sidebar exits when its tab has no real panes left
 - [ ] A sidebar draws the session its own tab belongs to
 - [ ] Configurable width, clamped to a min and a max
 - [ ] A resize of one sidebar is adopted by the others drawing that session
-- [ ] The sidebars drawing one session share a selection
+- [x] The sidebars drawing one session share a selection
+
+Sidebars reach each other by broadcasting: a message naming this plugin's url
+reaches no running instance and launches another one instead, while an
+unaddressed message reaches every plugin there is, sender included. It needs the
+`MessageAndLaunchOtherPlugins` permission, and without it the send is dropped
+silently.
+
+Two lifecycle pieces have no straightforward answer yet. A plugin can only
+resize its own pane by steps, `Increase` and `Decrease`, so adopting another
+sidebar's width means stepping towards it and watching what arrives rather than
+setting it. And turning the sidebar back on for a session needs something
+running to do the turning: a key binding reaches the tab it is pressed in, and
+no command opens a plugin pane in a tab you are not in.
 
 A layout can only carry the sidebar so far. `children` has to be a direct child
 of the tab template, or zellij drops it when it builds a tab at runtime, so the
