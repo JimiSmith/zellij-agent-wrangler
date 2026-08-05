@@ -32,25 +32,6 @@ const SELECTION_MESSAGE: &str = "wrangler:selection";
 /// The message that turns the sidebar off for the whole session.
 const OFF_MESSAGE: &str = "wrangler:off";
 
-/// The message a sidebar is opened with. It names nothing this plugin reads: a
-/// message addressed to this plugin's url reaches no running instance and
-/// launches one, which is what opening a sidebar is.
-const OPEN_MESSAGE: &str = "wrangler:open";
-
-/// The configuration key naming the tab a sidebar was opened for.
-///
-/// A plugin is identified by its url *and* its configuration, so without
-/// something to tell them apart the second such message finds the sidebar the
-/// first one opened and is delivered to it instead of opening another. Naming
-/// the tab gives each one an identity of its own.
-const OPENED_FOR: &str = "opened_for_tab";
-
-/// How long to wait before asking again where the user went.
-const RETRY_INTERVAL: f64 = 0.1;
-
-/// How many times that question is asked before it is left alone.
-const RETRIES: u8 = 10;
-
 /// What a refused sidebar says beneath its heading.
 const REFUSED: &str = "the sidebar cannot read the session";
 
@@ -74,11 +55,6 @@ struct State {
     painted: Vec<Option<RowKey>>,
     /// This instance's own plugin id, which is how it finds the tab it is in.
     plugin_id: u32,
-    /// The tab a sidebar has just been opened into, held until that sidebar is
-    /// reported, so the same tab is not opened into twice while it arrives.
-    opening: Option<usize>,
-    /// Attempts left at asking where the user went.
-    retries: u8,
     /// Whether the tab this sidebar is in has ever held a pane besides it.
     ///
     /// A tab is briefly reported as holding only the sidebar while it is still
@@ -107,15 +83,6 @@ fn focus() -> Option<Focus> {
     }
 }
 
-/// The session as zellij sees it now, asked for rather than remembered.
-fn current_session() -> Option<SessionInfo> {
-    get_session_list()
-        .ok()?
-        .live_sessions
-        .into_iter()
-        .find(|session| session.is_current_session)
-}
-
 /// What the pane says once the sidebar has been refused what it needs. Refusal
 /// is an answer, and an empty pane would read as a broken sidebar rather than
 /// as one that was turned away.
@@ -139,66 +106,6 @@ impl State {
         let changed = rows != self.rows;
         self.rows = rows;
         changed
-    }
-
-    /// Open a sidebar into the tab the user has just gone to, when that tab has
-    /// none.
-    ///
-    /// Everything this decides on is asked for here rather than remembered:
-    /// zellij stops telling a sidebar about the session once its tab is out of
-    /// sight, so what a sidebar was last told is exactly what cannot be trusted
-    /// at the moment it is leaving the screen. The launch lands in the tab
-    /// holding the focus rather than the one that asked, which is what lets a
-    /// sidebar reach a tab nothing is watching from.
-    fn open_where_needed(&mut self) {
-        let Some(session) = current_session() else {
-            return self.ask_again();
-        };
-        let Some(url) = session::url_of_plugin(&session.panes, self.plugin_id) else {
-            return;
-        };
-        let Some(mine) = session::tab_of_plugin(&session.panes, self.plugin_id) else {
-            return;
-        };
-        let active = session
-            .tabs
-            .iter()
-            .find(|tab| tab.active)
-            .map(|tab| tab.position);
-        let Some(there) = session::destination(mine, focus().map(|focus| focus.tab), active) else {
-            return self.ask_again();
-        };
-        self.retries = 0;
-
-        if session::sidebars(&session.panes, &url)
-            .iter()
-            .any(|sidebar| sidebar.tab == there)
-        {
-            self.opening = None;
-            return;
-        }
-        if self.opening == Some(there) {
-            return;
-        }
-        self.opening = Some(there);
-        pipe_message_to_plugin(
-            MessageToPlugin::new(OPEN_MESSAGE)
-                .with_plugin_url(url)
-                .with_plugin_config(BTreeMap::from([(
-                    OPENED_FOR.to_string(),
-                    there.to_string(),
-                )]))
-                .new_plugin_instance_should_float(false),
-        );
-    }
-
-    /// Ask where the user went once more in a moment, up to a point. Leaving a
-    /// tab outruns the answer, and both sources can be a step behind at once.
-    fn ask_again(&mut self) {
-        if self.retries > 0 {
-            self.retries -= 1;
-            set_timeout(RETRY_INTERVAL);
-        }
     }
 
     /// Close this sidebar when the tab holding it has nothing else left.
@@ -322,8 +229,6 @@ impl ZellijPlugin for State {
             EventType::TabUpdate,
             EventType::PaneUpdate,
             EventType::PermissionRequestResult,
-            EventType::Visible,
-            EventType::Timer,
         ]);
     }
 
@@ -336,18 +241,6 @@ impl ZellijPlugin for State {
             Event::PaneUpdate(panes) => {
                 self.panes = panes;
                 self.resolve()
-            }
-            // Going out of sight is the one thing a sidebar is told about its
-            // own pane rather than about the session, so it arrives however the
-            // user got where they are going.
-            Event::Visible(false) => {
-                self.retries = RETRIES;
-                self.open_where_needed();
-                false
-            }
-            Event::Timer(_) => {
-                self.open_where_needed();
-                false
             }
             Event::PermissionRequestResult(status) => {
                 self.permission = Some(status);
@@ -394,16 +287,6 @@ impl ZellijPlugin for State {
     /// Adopt a selection another sidebar made. A sidebar hears its own broadcast
     /// too, and has nothing to learn from it.
     fn pipe(&mut self, message: PipeMessage) -> bool {
-        // A sidebar opened this way arrives beside the pane that was focused
-        // rather than at the edge, and framed, wearing the wasm's path as its
-        // title. A sidebar declared in a layout arrives at the edge with no
-        // frame, and the two should be the same sidebar.
-        if message.name == OPEN_MESSAGE {
-            let me = PaneId::Plugin(self.plugin_id);
-            move_pane_with_pane_id_in_direction(me, Direction::Left);
-            set_pane_borderless(me, true);
-            return false;
-        }
         if message.name == OFF_MESSAGE {
             close_self();
             return false;

@@ -7,10 +7,8 @@ this repo.
 
 - [x] One sidebar pane per tab, never a single shared pane
 - [x] A tab opened later gets a sidebar too (`default_tab_template`)
-- [x] Place the sidebar from the plugin rather than from the layout
 - [x] Turn the sidebar off for the session
 - [ ] Turn it back on again, off a key binding
-- [ ] Open a sidebar at the width a declared one has
 - [ ] Focus this tab's sidebar, off a key binding
 - [x] `q` closes the sidebar
 - [x] The sidebar exits when its tab has no real panes left
@@ -18,6 +16,18 @@ this repo.
 - [ ] Configurable width, clamped to a min and a max
 - [ ] ~~A resize of one sidebar is adopted by the others~~ (dropped)
 - [x] The sidebars drawing one session share a selection
+
+Sidebars reach each other by broadcasting: a message naming this plugin's url
+reaches no running instance and launches another one instead, while an
+unaddressed message reaches every plugin there is, sender included. It needs the
+`MessageAndLaunchOtherPlugins` permission, and without it the send is dropped
+silently.
+
+A layout gives every tab a sidebar, runtime-created tabs included, and carries
+the tab bar and the status bar beside it. `children` has to be a direct child of
+`default_tab_template`, so a `new_tab_template` is declared alongside it with a
+plain pane where `children` would be: a tab built at runtime needs a pane, not a
+placeholder.
 
 Sidebars reach each other by broadcasting: a message naming this plugin's url
 reaches no running instance and launches another one instead, while an

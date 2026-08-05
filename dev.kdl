@@ -12,18 +12,32 @@ layout {
         pane size=1 borderless=true {
             plugin location="zellij:tab-bar"
         }
-        children
+        pane split_direction="vertical" {
+            pane size=32 borderless=true {
+                plugin location="PLUGIN_LOCATION"
+            }
+            children
+        }
         pane size=1 borderless=true {
             plugin location="zellij:status-bar"
         }
     }
-    tab name="wrangler" focus=true {
+    new_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
         pane split_direction="vertical" {
             pane size=32 borderless=true {
                 plugin location="PLUGIN_LOCATION"
             }
             pane
         }
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    tab name="wrangler" focus=true {
+        pane
     }
     tab name="notes" {
         pane

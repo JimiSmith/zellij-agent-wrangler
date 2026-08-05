@@ -46,60 +46,6 @@ pub fn tab_of_plugin(manifest: &PaneManifest, plugin_id: u32) -> Option<usize> {
     })
 }
 
-/// A sidebar pane: the tab it is in, and its own pane id.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Sidebar {
-    pub tab: usize,
-    pub id: u32,
-}
-
-/// Every pane in the session running the plugin at `url`, in tab then id order.
-///
-/// A plugin pane carries the location it was loaded from, so a sidebar can find
-/// its own kind without being told where it lives.
-pub fn sidebars(manifest: &PaneManifest, url: &str) -> Vec<Sidebar> {
-    let mut found: Vec<Sidebar> = manifest
-        .panes
-        .iter()
-        .flat_map(|(tab, panes)| {
-            panes
-                .iter()
-                .filter(|pane| pane.is_plugin && pane.plugin_url.as_deref() == Some(url))
-                .map(move |pane| Sidebar {
-                    tab: *tab,
-                    id: pane.id,
-                })
-        })
-        .collect();
-    found.sort_by_key(|sidebar| (sidebar.tab, sidebar.id));
-    found
-}
-
-/// The location a plugin pane was loaded from, by the plugin's own id.
-pub fn url_of_plugin(manifest: &PaneManifest, plugin_id: u32) -> Option<String> {
-    manifest.panes.values().flatten().find_map(|pane| {
-        (pane.is_plugin && pane.id == plugin_id)
-            .then(|| pane.plugin_url.clone())
-            .flatten()
-    })
-}
-
-/// The tab the user has gone to, asked at the moment a sidebar's own pane goes
-/// out of sight.
-///
-/// Two sources answer where the user is and either of them can be a moment
-/// behind, so neither is trusted on its own. What the event itself says is
-/// enough to choose between them: this pane is no longer on screen, so the tab
-/// the user is in is not `mine`, and a source still naming `mine` is the stale
-/// one. Both naming it means the answer has not caught up yet and there is
-/// nothing to act on.
-pub fn destination(mine: usize, focused: Option<usize>, active: Option<usize>) -> Option<usize> {
-    [focused, active]
-        .into_iter()
-        .flatten()
-        .find(|tab| *tab != mine)
-}
-
 /// Where the user is: the tab they are in, and the pane within it when that pane
 /// is one the sidebar lists (a focused plugin pane, the sidebar itself included,
 /// leaves the tab known and no pane focused).
@@ -252,54 +198,6 @@ mod tests {
         );
         let names: Vec<&str> = session.iter().map(|tab| tab.name.as_str()).collect();
         assert_eq!(names, vec!["first", "second", "third"]);
-    }
-
-    fn sidebar_pane(id: u32, url: &str) -> PaneInfo {
-        PaneInfo {
-            id,
-            is_plugin: true,
-            plugin_url: Some(url.to_string()),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn only_panes_running_this_plugin_count_as_sidebars() {
-        const URL: &str = "file:/x/wrangler.wasm";
-        let manifest = manifest(vec![
-            (0, vec![sidebar_pane(1, URL), pane(9, "bash", 0, 0)]),
-            (
-                1,
-                vec![sidebar_pane(2, URL), sidebar_pane(3, "zellij:status-bar")],
-            ),
-        ]);
-        assert_eq!(
-            sidebars(&manifest, URL),
-            vec![Sidebar { tab: 0, id: 1 }, Sidebar { tab: 1, id: 2 }]
-        );
-        assert_eq!(url_of_plugin(&manifest, 2).as_deref(), Some(URL));
-        assert_eq!(url_of_plugin(&manifest, 9), None);
-    }
-
-    #[test]
-    fn the_destination_is_whichever_source_names_another_tab() {
-        // The focused-pane query is ahead of the session snapshot here.
-        assert_eq!(destination(0, Some(1), Some(0)), Some(1));
-        // And behind it here, which is why neither is trusted on its own.
-        assert_eq!(destination(0, Some(0), Some(1)), Some(1));
-        // Agreement needs no choosing.
-        assert_eq!(destination(0, Some(2), Some(2)), Some(2));
-        // One source missing is not a reason to doubt the other.
-        assert_eq!(destination(0, None, Some(3)), Some(3));
-        assert_eq!(destination(0, Some(3), None), Some(3));
-    }
-
-    #[test]
-    fn a_destination_of_this_tab_is_no_answer_at_all() {
-        // The pane went out of sight, so the user is not in this tab whatever
-        // either source still says.
-        assert_eq!(destination(0, Some(0), Some(0)), None);
-        assert_eq!(destination(0, None, None), None);
     }
 
     #[test]

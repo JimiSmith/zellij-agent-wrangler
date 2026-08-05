@@ -61,8 +61,9 @@ on, as does `Enter`. `q` turns the sidebar off for the whole session.
 The sidebars of a session share their selection, so they read as one sidebar
 that follows you.
 
-Only the first tab is given a sidebar. Go to a tab without one and a sidebar
-opens there, from the sidebars already running.
+Every tab has one, including tabs opened later: the layout declares a
+`new_tab_template` beside its `default_tab_template`, with a plain pane where
+`children` would be.
 
 Nerd Font glyphs are used for the pane and agent icons, so the terminal needs a
 patched font to draw them.
