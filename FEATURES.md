@@ -94,6 +94,60 @@ this repo; the drawing ones are complete as code, drawn from hardcoded rows.
 - [ ] A published wasm and a documented one-line install
 - [ ] Keep the hook client and the plugin in step across an update
 
+## Checkpoints
+
+Each one is a build you can run and judge by eye. Nothing here needs
+instrumenting to tell whether it works.
+
+- [ ] **1. The live tree.** Real tabs and panes, drawn read-only. Split, close,
+      rename, switch tabs, move focus: the tree matches and the gutter follows.
+      Also answers whether one instance sees the whole session's panes, which is
+      what decides the topology below.
+- [ ] **2. Activation.** `Enter` and a click focus the real tab and pane. From
+      here it is a usable pane switcher with no agent support at all.
+- [ ] **3. Lifecycle.** Toggle, close-when-alone, width sync and shared
+      selection. Drag one sidebar wider, switch tabs, see whether the other
+      followed: this is where the instances have to talk or not.
+- [ ] **4. Agent rows.** `start` and `end` only. Launch an agent in a pane and
+      watch its row appear with its label, then go when the agent exits.
+- [ ] **5. Turn state.** The rest of the hook events. Working while it works,
+      attention when it wants you, cleared when you focus its pane.
+- [ ] **6. Notifications.** The area fills on attention, opening an entry lands
+      on the agent's pane and dismisses the right entries. Bell and desktop
+      notification beside it.
+- [ ] **7. The rest.** Options, sections mode, label modes, hook install,
+      distribution.
+
+Checkpoints 1 to 3 need no agent running, so they can be tested in any session.
+Checkpoint 4 is the first that needs the native binary to exist.
+
+## Porting steps
+
+The split is by seam rather than by feature: each piece owns its modules and
+meets the others at one agreed type.
+
+- [ ] **Phase 0.** Freeze the types everything else compiles against: the
+      command enum, the resolved view the tree is built from, the pipe message
+      schema, the permission set. Serial, and nothing fans out before it.
+- [ ] **Phase 1, three pieces in parallel.**
+  - [ ] *Tree*: the manifest and the placements to a row tree. Owns `rows`.
+  - [ ] *Assoc*: records, pid ancestry and title matching to placements. Owns
+        `assoc` and the registry read side. Pure, and the original's fixtures
+        come across with it.
+  - [ ] *Hooks*: the native side. The hook binary, the relay that orders and
+        coalesces events into one pipe per session, and the installer. Shares no
+        files with the other two and needs no zellij to test.
+- [ ] **Phase 2.** Integration, serial: the reducer, the live subscriptions,
+      activation, the lifecycle. One owner, because this is where the three meet
+      and where the plugin entry point is rewritten.
+- [ ] **Phase 3, in parallel.** Notifications and bell; options and
+      configuration; publishing the wasm and keeping it in step with the binary.
+
+Two rules that keep the parallel work parallel: the plugin entry point belongs
+to Phase 2 and nobody touches it before then, and every module is a pure
+function of values a test can construct, so no piece waits on a running session
+to verify itself.
+
 ## Blocked
 
 - OSC 9;4 progress indicators: zellij reports no per-pane progress state
