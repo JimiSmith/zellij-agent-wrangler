@@ -64,6 +64,7 @@ pub enum Indicator {
     /// The agent wants you.
     Attention,
     /// The agent is mid-turn.
+    #[allow(dead_code)]
     Working,
 }
 
@@ -83,8 +84,20 @@ impl Indicator {
     }
 }
 
+/// What a selectable row points at.
+///
+/// The selection is carried as one of these rather than as a position, so a
+/// pane opening or closing above the selected row moves the row without moving
+/// the selection off the thing it was on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowKey {
+    Tab(usize),
+    Pane(u32),
+    Notification(usize),
+}
+
 /// What a row is.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowContent {
     Header {
         text: String,
@@ -103,6 +116,7 @@ pub enum RowContent {
         placement: Placement,
         color: Option<NamedColor>,
     },
+    #[allow(dead_code)]
     Agent {
         index: String,
         label: String,
@@ -119,31 +133,43 @@ pub enum RowContent {
     },
 }
 
-/// A drawn line: its content, the marker pinned to its right edge, and whether
-/// the selection can land on it.
-#[derive(Clone, Debug)]
+/// An agent's call for attention, as the notification area lists it: the agent
+/// that raised it, and the message describing where it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notification {
+    pub agent: String,
+    pub color: Option<NamedColor>,
+    pub message: String,
+}
+
+/// A drawn line: its content, the marker pinned to its right edge, and the thing
+/// the selection lands on when it is here. A row with no key cannot be selected
+/// or clicked.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     pub content: RowContent,
     pub indicator: Indicator,
-    pub selectable: bool,
+    pub key: Option<RowKey>,
 }
 
 impl Row {
+    /// An inert row: a heading, a blank, or anything else that labels rather
+    /// than points.
     pub fn new(content: RowContent) -> Self {
         Row {
             content,
             indicator: Indicator::None,
-            selectable: true,
+            key: None,
         }
+    }
+
+    pub fn at(mut self, key: RowKey) -> Self {
+        self.key = Some(key);
+        self
     }
 
     pub fn with(mut self, indicator: Indicator) -> Self {
         self.indicator = indicator;
-        self
-    }
-
-    pub fn inert(mut self) -> Self {
-        self.selectable = false;
         self
     }
 }

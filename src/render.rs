@@ -9,7 +9,9 @@
 //! what lets a pane's or agent's color sit on its icon alone while the name
 //! beside it stays in the terminal's default.
 
-use crate::model::{Branch, Indicator, NamedColor, Placement, Row, RowContent};
+use crate::model::{
+    Branch, Indicator, NamedColor, Notification, Placement, Row, RowContent, RowKey,
+};
 
 /// Column 0: a block marks "where you are", a space does not.
 ///
@@ -409,19 +411,18 @@ pub fn wrap(text: &str, field: usize) -> Vec<String> {
 
 /// The rows a notification entry is drawn as: its title over the wrapped lines
 /// of its message.
-pub fn notification_rows(
-    agent: &str,
-    color: Option<NamedColor>,
-    message: &str,
-    width: usize,
-) -> Vec<Row> {
+/// Every line carries the entry's own key, so a click anywhere in it lands on
+/// the same thing.
+pub fn notification_rows(entry: &Notification, index: usize, width: usize) -> Vec<Row> {
+    let key = RowKey::Notification(index);
     let mut rows = vec![Row::new(RowContent::NotificationTitle {
-        title: agent.to_string(),
-        color,
+        title: entry.agent.clone(),
+        color: entry.color,
     })
-    .with(Indicator::Attention)];
-    for line in wrap(message, notification_body_field(width)) {
-        rows.push(Row::new(RowContent::NotificationBody { text: line }));
+    .with(Indicator::Attention)
+    .at(key)];
+    for line in wrap(&entry.message, notification_body_field(width)) {
+        rows.push(Row::new(RowContent::NotificationBody { text: line }).at(key));
     }
     rows
 }

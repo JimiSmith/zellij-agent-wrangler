@@ -1,130 +1,164 @@
-//! A zellij sidebar pane listing tabs, their panes as a tree, and the agent
-//! sessions running in them.
+//! A zellij sidebar pane listing the session's tabs and their panes as a tree.
 //!
-//! The rows are fixed: this draws one hardcoded arrangement and lets you move
-//! through it, which is enough to settle how the sidebar looks and how it takes
-//! input before anything resolves live state.
-//!
-//! The pane is drawn as two regions. The tree scrolls; the notification area is
+//! The pane is drawn as two regions. The tree fills it; the notification area is
 //! pinned to the foot and capped at a quarter of the pane, and an entry is
 //! admitted only if it fits whole, so a title never appears over a cut-off
 //! message. Both regions are navigated in one order, and every line of a
-//! notification entry carries that entry's id, so a click anywhere in it selects
-//! the same thing.
+//! notification entry carries that entry's key, so a click anywhere in it
+//! selects the same thing.
+//!
+//! The tree is resolved from the tabs and panes zellij reports, which arrive as
+//! two separate events, so both are held and the tree is rebuilt from whichever
+//! arrived. A rebuild that changes nothing drawn asks for no repaint: a plugin
+//! reprints its whole pane every time, and pane updates are frequent.
 
-mod fixture;
 mod model;
 mod render;
+mod session;
+mod tree;
 
 use std::collections::BTreeMap;
 
 use zellij_tile::prelude::*;
 
-use fixture::Notification;
-use model::{Row, RowContent};
+use model::{Notification, Row, RowContent, RowKey};
 use render::{notification_rows, paint};
+use session::Focus;
 
 /// The heading the notification area is drawn under.
 const NOTIFICATIONS_HEADING: &str = "notifications";
 
-/// One drawn line: the row it paints and the selection id it answers to. A line
-/// with no id (a heading, or padding) cannot be selected or clicked.
-struct Line {
-    row: Row,
-    id: Option<usize>,
-}
-
 #[derive(Default)]
 struct State {
-    tree: Vec<Row>,
+    tabs: Vec<TabInfo>,
+    panes: PaneManifest,
+    /// The tree as it was last resolved, which is what the selection and the
+    /// paint both read.
+    rows: Vec<Row>,
     notifications: Vec<Notification>,
-    selected: usize,
-    /// The id each screen line was drawn from, so a click resolves against the
+    selected: Option<RowKey>,
+    /// The key each screen line was drawn from, so a click resolves against the
     /// frame it landed on rather than against a tree that may since have moved.
-    painted: Vec<Option<usize>>,
+    painted: Vec<Option<RowKey>>,
 }
 
 register_plugin!(State);
 
+/// Ask zellij where this plugin's client is, which is one synchronous round
+/// trip and the only reading the sidebar does outside its subscriptions.
+///
+/// A focused plugin pane (the sidebar itself, most often) leaves the tab known
+/// and no pane focused, so pointing at another tab does not move the gutter off
+/// the tab you are in.
+fn focus() -> Option<Focus> {
+    match get_focused_pane_info() {
+        Ok((tab, PaneId::Terminal(pane))) => Some(Focus {
+            tab,
+            pane: Some(pane),
+        }),
+        Ok((tab, PaneId::Plugin(_))) => Some(Focus { tab, pane: None }),
+        Err(_) => None,
+    }
+}
+
 impl State {
+    /// Rebuild the tree from the tabs and panes last reported, and say whether
+    /// what would be drawn changed.
+    fn resolve(&mut self) -> bool {
+        let rows = tree::build_tree(&session::session(&self.tabs, &self.panes, focus()));
+        let changed = rows != self.rows;
+        self.rows = rows;
+        changed
+    }
+
+    /// The selection, falling back to the first row when what it was on has
+    /// gone (or when nothing has been selected yet).
+    fn selection(&self) -> Option<RowKey> {
+        let keys = || self.rows.iter().filter_map(|row| row.key);
+        match self.selected {
+            Some(selected) if keys().any(|key| key == selected) => Some(selected),
+            _ => keys().next(),
+        }
+    }
+
     /// The notification area for a pane `width` columns wide, given `cap` lines
     /// to fill. Empty when that leaves no room for the heading and one whole
     /// entry beside it.
-    fn notification_area(&self, width: usize, cap: usize) -> Vec<Line> {
-        let mut lines = vec![Line {
-            row: Row::new(RowContent::Header {
-                text: NOTIFICATIONS_HEADING.to_string(),
-            })
-            .inert(),
-            id: None,
-        }];
+    fn notification_area(&self, width: usize, cap: usize) -> Vec<Row> {
+        let mut rows = vec![Row::new(RowContent::Header {
+            text: NOTIFICATIONS_HEADING.to_string(),
+        })];
         for (index, entry) in self.notifications.iter().enumerate() {
-            let rows = notification_rows(entry.agent, entry.color, entry.message, width);
-            if lines.len() + rows.len() > cap {
+            let entry = notification_rows(entry, index, width);
+            if rows.len() + entry.len() > cap {
                 break;
             }
-            let id = self.tree.len() + index;
-            lines.extend(rows.into_iter().map(|row| Line { row, id: Some(id) }));
+            rows.extend(entry);
         }
-        if lines.len() < 2 {
+        if rows.len() < 2 {
             return Vec::new();
         }
-        lines
+        rows
     }
 
     /// Every line of the pane, in the order it is drawn and navigated: the tree,
     /// then enough blank padding to hold the notification area at the foot.
-    fn lines(&self, width: usize, height: usize) -> Vec<Line> {
+    fn lines(&self, width: usize, height: usize) -> Vec<Row> {
         let area = self.notification_area(width, height / 4);
-        let mut lines: Vec<Line> = self
-            .tree
-            .iter()
-            .enumerate()
-            .map(|(id, row)| Line {
-                row: row.clone(),
-                id: Some(id),
-            })
-            .collect();
-        lines.truncate(height.saturating_sub(area.len()));
-        while lines.len() + area.len() < height {
-            lines.push(Line {
-                row: Row::new(RowContent::Blank).inert(),
-                id: None,
-            });
-        }
-        lines.extend(area);
-        lines
+        let mut rows = self.rows.clone();
+        rows.truncate(height.saturating_sub(area.len()));
+        rows.resize(
+            height.saturating_sub(area.len()),
+            Row::new(RowContent::Blank),
+        );
+        rows.extend(area);
+        rows
     }
 
-    /// Move the selection `step` places through the ids the last frame drew.
+    /// Move the selection `step` places through the keys the last frame drew.
     fn step(&mut self, step: isize) {
-        let ids: Vec<usize> = self.painted.iter().flatten().copied().fold(
-            Vec::new(),
-            |mut ids: Vec<usize>, id: usize| {
-                if ids.last() != Some(&id) {
-                    ids.push(id);
-                }
-                ids
-            },
-        );
-        let Some(at) = ids.iter().position(|&id| id == self.selected) else {
-            self.selected = ids.first().copied().unwrap_or(0);
+        let mut keys: Vec<RowKey> = Vec::new();
+        for key in self.painted.iter().flatten() {
+            if keys.last() != Some(key) {
+                keys.push(*key);
+            }
+        }
+        let Some(at) = keys.iter().position(|key| Some(*key) == self.selection()) else {
+            self.selected = keys.first().copied();
             return;
         };
-        let next = (at as isize + step).clamp(0, ids.len() as isize - 1) as usize;
-        self.selected = ids[next];
+        let next = (at as isize + step).clamp(0, keys.len() as isize - 1) as usize;
+        self.selected = keys.get(next).copied();
     }
 }
 
 impl ZellijPlugin for State {
     fn load(&mut self, _configuration: BTreeMap<String, String>) {
-        self.tree = fixture::tree();
-        self.notifications = fixture::notifications();
-        subscribe(&[EventType::Key, EventType::Mouse]);
+        // Reading the session's tabs and panes is all the sidebar does so far,
+        // so it asks for nothing it would not use.
+        request_permission(&[PermissionType::ReadApplicationState]);
+        subscribe(&[
+            EventType::Key,
+            EventType::Mouse,
+            EventType::TabUpdate,
+            EventType::PaneUpdate,
+            EventType::PermissionRequestResult,
+        ]);
     }
 
     fn update(&mut self, event: Event) -> bool {
         match event {
+            Event::TabUpdate(tabs) => {
+                self.tabs = tabs;
+                self.resolve()
+            }
+            Event::PaneUpdate(panes) => {
+                self.panes = panes;
+                self.resolve()
+            }
+            // The prompt draws over this pane, so the sidebar is repainted once
+            // the answer takes the prompt away.
+            Event::PermissionRequestResult(_) => true,
             Event::Key(key) => match key.bare_key {
                 BareKey::Down | BareKey::Char('j') => {
                     self.step(1);
@@ -138,8 +172,8 @@ impl ZellijPlugin for State {
             },
             Event::Mouse(Mouse::LeftClick(line, _)) => {
                 match usize::try_from(line).ok().and_then(|l| self.painted.get(l)) {
-                    Some(&Some(id)) => {
-                        self.selected = id;
+                    Some(&Some(key)) => {
+                        self.selected = Some(key);
                         true
                     }
                     _ => false,
@@ -151,10 +185,11 @@ impl ZellijPlugin for State {
 
     fn render(&mut self, rows: usize, cols: usize) {
         let lines = self.lines(cols, rows);
-        self.painted = lines.iter().map(|line| line.id).collect();
+        self.painted = lines.iter().map(|row| row.key).collect();
+        let selected = self.selection();
         let painted: Vec<String> = lines
             .iter()
-            .map(|line| paint(&line.row, cols, line.id == Some(self.selected)))
+            .map(|row| paint(row, cols, row.key.is_some() && row.key == selected))
             .collect();
         print!("{}", painted.join("\r\n"));
     }
