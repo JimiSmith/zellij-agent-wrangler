@@ -84,6 +84,22 @@ pub fn url_of_plugin(manifest: &PaneManifest, plugin_id: u32) -> Option<String> 
     })
 }
 
+/// The tab the user has gone to, asked at the moment a sidebar's own pane goes
+/// out of sight.
+///
+/// Two sources answer where the user is and either of them can be a moment
+/// behind, so neither is trusted on its own. What the event itself says is
+/// enough to choose between them: this pane is no longer on screen, so the tab
+/// the user is in is not `mine`, and a source still naming `mine` is the stale
+/// one. Both naming it means the answer has not caught up yet and there is
+/// nothing to act on.
+pub fn destination(mine: usize, focused: Option<usize>, active: Option<usize>) -> Option<usize> {
+    [focused, active]
+        .into_iter()
+        .flatten()
+        .find(|tab| *tab != mine)
+}
+
 /// Where the user is: the tab they are in, and the pane within it when that pane
 /// is one the sidebar lists (a focused plugin pane, the sidebar itself included,
 /// leaves the tab known and no pane focused).
@@ -263,6 +279,27 @@ mod tests {
         );
         assert_eq!(url_of_plugin(&manifest, 2).as_deref(), Some(URL));
         assert_eq!(url_of_plugin(&manifest, 9), None);
+    }
+
+    #[test]
+    fn the_destination_is_whichever_source_names_another_tab() {
+        // The focused-pane query is ahead of the session snapshot here.
+        assert_eq!(destination(0, Some(1), Some(0)), Some(1));
+        // And behind it here, which is why neither is trusted on its own.
+        assert_eq!(destination(0, Some(0), Some(1)), Some(1));
+        // Agreement needs no choosing.
+        assert_eq!(destination(0, Some(2), Some(2)), Some(2));
+        // One source missing is not a reason to doubt the other.
+        assert_eq!(destination(0, None, Some(3)), Some(3));
+        assert_eq!(destination(0, Some(3), None), Some(3));
+    }
+
+    #[test]
+    fn a_destination_of_this_tab_is_no_answer_at_all() {
+        // The pane went out of sight, so the user is not in this tab whatever
+        // either source still says.
+        assert_eq!(destination(0, Some(0), Some(0)), None);
+        assert_eq!(destination(0, None, None), None);
     }
 
     #[test]

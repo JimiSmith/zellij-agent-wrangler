@@ -37,9 +37,19 @@ const OFF_MESSAGE: &str = "wrangler:off";
 /// launches one, which is what opening a sidebar is.
 const OPEN_MESSAGE: &str = "wrangler:open";
 
-/// The message claiming the tab a sidebar is being opened into, so no other
-/// sidebar opens a second one there.
-const CLAIM_MESSAGE: &str = "wrangler:claim";
+/// The configuration key naming the tab a sidebar was opened for.
+///
+/// A plugin is identified by its url *and* its configuration, so without
+/// something to tell them apart the second such message finds the sidebar the
+/// first one opened and is delivered to it instead of opening another. Naming
+/// the tab gives each one an identity of its own.
+const OPENED_FOR: &str = "opened_for_tab";
+
+/// How long to wait before asking again where the user went.
+const RETRY_INTERVAL: f64 = 0.1;
+
+/// How many times that question is asked before it is left alone.
+const RETRIES: u8 = 10;
 
 /// What a refused sidebar says beneath its heading.
 const REFUSED: &str = "the sidebar cannot read the session";
@@ -67,6 +77,8 @@ struct State {
     /// The tab a sidebar has just been opened into, held until that sidebar is
     /// reported, so the same tab is not opened into twice while it arrives.
     opening: Option<usize>,
+    /// Attempts left at asking where the user went.
+    retries: u8,
     /// Whether the tab this sidebar is in has ever held a pane besides it.
     ///
     /// A tab is briefly reported as holding only the sidebar while it is still
@@ -95,6 +107,15 @@ fn focus() -> Option<Focus> {
     }
 }
 
+/// The session as zellij sees it now, asked for rather than remembered.
+fn current_session() -> Option<SessionInfo> {
+    get_session_list()
+        .ok()?
+        .live_sessions
+        .into_iter()
+        .find(|session| session.is_current_session)
+}
+
 /// What the pane says once the sidebar has been refused what it needs. Refusal
 /// is an answer, and an empty pane would read as a broken sidebar rather than
 /// as one that was turned away.
@@ -114,43 +135,70 @@ impl State {
     fn resolve(&mut self) -> bool {
         let resolved = session::session(&self.tabs, &self.panes, focus());
         self.leave_if_alone(&resolved);
-        self.open_where_needed();
         let rows = tree::build_tree(&resolved);
         let changed = rows != self.rows;
         self.rows = rows;
         changed
     }
 
-    /// Open a sidebar into the tab the user is in when that tab has none.
+    /// Open a sidebar into the tab the user has just gone to, when that tab has
+    /// none.
     ///
-    /// A launch lands in the tab that holds the focus rather than the one the
-    /// launcher is in, which is what lets a sidebar reach a tab nothing is
-    /// watching from. Whichever sidebar notices first claims the tab out loud,
-    /// and the others hold off: zellij stops delivering events to a sidebar
-    /// whose tab has fallen far enough behind, so which of them notices is not
-    /// something to decide in advance.
+    /// Everything this decides on is asked for here rather than remembered:
+    /// zellij stops telling a sidebar about the session once its tab is out of
+    /// sight, so what a sidebar was last told is exactly what cannot be trusted
+    /// at the moment it is leaving the screen. The launch lands in the tab
+    /// holding the focus rather than the one that asked, which is what lets a
+    /// sidebar reach a tab nothing is watching from.
     fn open_where_needed(&mut self) {
-        let Some(url) = session::url_of_plugin(&self.panes, self.plugin_id) else {
+        let Some(session) = current_session() else {
+            return self.ask_again();
+        };
+        let Some(url) = session::url_of_plugin(&session.panes, self.plugin_id) else {
             return;
         };
-        let sidebars = session::sidebars(&self.panes, &url);
-        let Some(here) = focus().map(|focus| focus.tab) else {
+        let Some(mine) = session::tab_of_plugin(&session.panes, self.plugin_id) else {
             return;
         };
-        if sidebars.iter().any(|sidebar| sidebar.tab == here) {
+        let active = session
+            .tabs
+            .iter()
+            .find(|tab| tab.active)
+            .map(|tab| tab.position);
+        let Some(there) = session::destination(mine, focus().map(|focus| focus.tab), active) else {
+            return self.ask_again();
+        };
+        self.retries = 0;
+
+        if session::sidebars(&session.panes, &url)
+            .iter()
+            .any(|sidebar| sidebar.tab == there)
+        {
             self.opening = None;
             return;
         }
-        if self.opening == Some(here) {
+        if self.opening == Some(there) {
             return;
         }
-        self.opening = Some(here);
-        pipe_message_to_plugin(MessageToPlugin::new(CLAIM_MESSAGE).with_payload(here.to_string()));
+        self.opening = Some(there);
         pipe_message_to_plugin(
             MessageToPlugin::new(OPEN_MESSAGE)
                 .with_plugin_url(url)
+                .with_plugin_config(BTreeMap::from([(
+                    OPENED_FOR.to_string(),
+                    there.to_string(),
+                )]))
                 .new_plugin_instance_should_float(false),
         );
+    }
+
+    /// Ask where the user went once more in a moment, up to a point. Leaving a
+    /// tab outruns the answer, and both sources can be a step behind at once.
+    fn ask_again(&mut self) {
+        if self.retries > 0 {
+            self.retries -= 1;
+            set_timeout(RETRY_INTERVAL);
+        }
     }
 
     /// Close this sidebar when the tab holding it has nothing else left.
@@ -274,6 +322,8 @@ impl ZellijPlugin for State {
             EventType::TabUpdate,
             EventType::PaneUpdate,
             EventType::PermissionRequestResult,
+            EventType::Visible,
+            EventType::Timer,
         ]);
     }
 
@@ -286,6 +336,18 @@ impl ZellijPlugin for State {
             Event::PaneUpdate(panes) => {
                 self.panes = panes;
                 self.resolve()
+            }
+            // Going out of sight is the one thing a sidebar is told about its
+            // own pane rather than about the session, so it arrives however the
+            // user got where they are going.
+            Event::Visible(false) => {
+                self.retries = RETRIES;
+                self.open_where_needed();
+                false
+            }
+            Event::Timer(_) => {
+                self.open_where_needed();
+                false
             }
             Event::PermissionRequestResult(status) => {
                 self.permission = Some(status);
@@ -340,10 +402,6 @@ impl ZellijPlugin for State {
             let me = PaneId::Plugin(self.plugin_id);
             move_pane_with_pane_id_in_direction(me, Direction::Left);
             set_pane_borderless(me, true);
-            return false;
-        }
-        if message.name == CLAIM_MESSAGE {
-            self.opening = message.payload.as_deref().and_then(|tab| tab.parse().ok());
             return false;
         }
         if message.name == OFF_MESSAGE {

@@ -33,10 +33,22 @@ to the edge and drops its frame. It cannot match a declared sidebar's width: a
 plugin resizes its own pane only by steps, which is why adopting another
 sidebar's width was dropped too.
 
-Whichever sidebar notices the tab claims it out loud and the others hold off.
-Electing one in advance does not work: zellij stops delivering events to a
-sidebar whose tab has fallen far enough behind, so the one chosen may be the one
-asleep.
+Three things make that work, and each was a wrong turn first:
+
+- The sidebar being *left behind* is the one that acts, on its own pane going
+  out of sight. That event is about its own pane, so it arrives however the user
+  moved; nothing else does.
+- It asks zellij for the session there and then rather than reading what it was
+  last told. Zellij stops telling a sidebar about the session once its tab is
+  out of sight, so what it holds is exactly what cannot be trusted at the moment
+  it is leaving.
+- Where the user went comes from two sources, either of which can be a step
+  behind. The event settles it: this pane is off screen, so a source still
+  naming this tab is the stale one.
+
+A plugin is identified by its url *and* its configuration, so every sidebar is
+opened naming the tab it is for. Without that, the second such message finds the
+sidebar the first one opened and is delivered to it instead of opening another.
 
 A layout can only carry the sidebar so far. `children` has to be a direct child
 of the tab template, or zellij drops it when it builds a tab at runtime, so the
