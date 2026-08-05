@@ -58,9 +58,11 @@ arrow) or to quit (`Ctrl+q`).
 `j`/`k` and the arrow keys move the selection; a click goes to the row it lands
 on, as does `Enter`. `q` turns the sidebar off for the whole session.
 
+The sidebars of a session share their selection, so they read as one sidebar
+that follows you.
+
 Only the first tab is given a sidebar. Go to a tab without one and a sidebar
-opens there, from the sidebars already running. Every line of a notification entry answers to that entry, so a click
-anywhere in one selects the same thing.
+opens there, from the sidebars already running.
 
 Nerd Font glyphs are used for the pane and agent icons, so the terminal needs a
 patched font to draw them.
