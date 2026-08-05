@@ -1,25 +1,29 @@
-// The layout `dev.sh` runs the prototype under. Every tab gets the sidebar down
-// its left, including tabs opened later, which is what `default_tab_template`
-// is for.
+// The layout `dev.sh` runs the prototype under.
 //
-// `children` has to be a direct child of the template: nested inside another
-// pane it is dropped when zellij builds a tab at runtime, and the tab comes up
-// holding only what surrounds it. That is what fixes the shape here, since the
-// sidebar has to be a sibling of `children` to sit beside it, and it costs the
-// tab bar and the status bar: they are rows, and this template's children are
-// columns.
+// Only the first tab is given a sidebar. A tab without one gets a sidebar from
+// the sidebars already running, the moment the user goes to it, so the tab
+// template carries the tab bar and the status bar exactly as zellij's own
+// default layout does.
 //
 // PLUGIN_LOCATION is substituted for the built wasm's absolute path: a `file:`
 // location is resolved against the session's cwd rather than against this file.
 layout {
-    default_tab_template split_direction="vertical" {
-        pane size=32 borderless=true {
-            plugin location="PLUGIN_LOCATION"
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
         }
         children
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
     }
     tab name="wrangler" focus=true {
-        pane
+        pane split_direction="vertical" {
+            pane size=32 borderless=true {
+                plugin location="PLUGIN_LOCATION"
+            }
+            pane
+        }
     }
     tab name="notes" {
         pane

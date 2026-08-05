@@ -4,6 +4,17 @@ version = "0.1.0"
 edition = "2021"
 description = "A zellij sidebar listing tabs, panes and agent sessions (prototype)"
 
+[lib]
+name = "zellij_agent_wrangler"
+path = "src/lib.rs"
+
+# The plugin itself calls zellij's host functions, which exist only inside the
+# wasm host, so it is built for that target and tested through the library.
+[[bin]]
+name = "zellij-agent-wrangler"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 zellij-tile = "0.44.3"
 

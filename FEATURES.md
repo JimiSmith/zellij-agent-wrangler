@@ -5,16 +5,18 @@ this repo.
 
 ## Sidebar lifecycle
 
-- [ ] One sidebar pane per tab, never a single shared pane
+- [x] One sidebar pane per tab, never a single shared pane
 - [x] A tab opened later gets a sidebar too (`default_tab_template`)
-- [ ] Place the sidebar from the plugin rather than from the layout
-- [ ] Toggle the sidebar for the session, off a key binding
+- [x] Place the sidebar from the plugin rather than from the layout
+- [x] Turn the sidebar off for the session
+- [ ] Turn it back on again, off a key binding
+- [ ] Open a sidebar at the width a declared one has
 - [ ] Focus this tab's sidebar, off a key binding
 - [x] `q` closes the sidebar
 - [x] The sidebar exits when its tab has no real panes left
 - [ ] A sidebar draws the session its own tab belongs to
 - [ ] Configurable width, clamped to a min and a max
-- [ ] A resize of one sidebar is adopted by the others drawing that session
+- [ ] ~~A resize of one sidebar is adopted by the others~~ (dropped)
 - [x] The sidebars drawing one session share a selection
 
 Sidebars reach each other by broadcasting: a message naming this plugin's url
@@ -23,12 +25,18 @@ unaddressed message reaches every plugin there is, sender included. It needs the
 `MessageAndLaunchOtherPlugins` permission, and without it the send is dropped
 silently.
 
-Two lifecycle pieces have no straightforward answer yet. A plugin can only
-resize its own pane by steps, `Increase` and `Decrease`, so adopting another
-sidebar's width means stepping towards it and watching what arrives rather than
-setting it. And turning the sidebar back on for a session needs something
-running to do the turning: a key binding reaches the tab it is pressed in, and
-no command opens a plugin pane in a tab you are not in.
+A sidebar opens itself into the tab the user has gone to, which is what lets a
+layout carry the tab bar and the status bar again: only the first tab needs a
+sidebar declared. A launch lands in the tab holding the focus rather than the
+one that asked, arriving beside the focused pane and framed, so it moves itself
+to the edge and drops its frame. It cannot match a declared sidebar's width: a
+plugin resizes its own pane only by steps, which is why adopting another
+sidebar's width was dropped too.
+
+Whichever sidebar notices the tab claims it out loud and the others hold off.
+Electing one in advance does not work: zellij stops delivering events to a
+sidebar whose tab has fallen far enough behind, so the one chosen may be the one
+asleep.
 
 A layout can only carry the sidebar so far. `children` has to be a direct child
 of the tab template, or zellij drops it when it builds a tab at runtime, so the
@@ -126,9 +134,9 @@ instrumenting to tell whether it works.
       what decides the topology below.
 - [x] **2. Activation.** `Enter` and a click focus the real tab and pane. From
       here it is a usable pane switcher with no agent support at all.
-- [ ] **3. Lifecycle.** Toggle, close-when-alone, width sync and shared
-      selection. Drag one sidebar wider, switch tabs, see whether the other
-      followed: this is where the instances have to talk or not.
+- [x] **3. Lifecycle.** Leaving an empty tab, `q` turning the sidebar off for
+      the session, a sidebar opening itself in a tab that has none, and a shared
+      selection. Width sync was dropped.
 - [ ] **4. Agent rows.** `start` and `end` only. Launch an agent in a pane and
       watch its row appear with its label, then go when the agent exits.
 - [ ] **5. Turn state.** The rest of the hook events. Working while it works,

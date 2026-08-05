@@ -46,6 +46,44 @@ pub fn tab_of_plugin(manifest: &PaneManifest, plugin_id: u32) -> Option<usize> {
     })
 }
 
+/// A sidebar pane: the tab it is in, and its own pane id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sidebar {
+    pub tab: usize,
+    pub id: u32,
+}
+
+/// Every pane in the session running the plugin at `url`, in tab then id order.
+///
+/// A plugin pane carries the location it was loaded from, so a sidebar can find
+/// its own kind without being told where it lives.
+pub fn sidebars(manifest: &PaneManifest, url: &str) -> Vec<Sidebar> {
+    let mut found: Vec<Sidebar> = manifest
+        .panes
+        .iter()
+        .flat_map(|(tab, panes)| {
+            panes
+                .iter()
+                .filter(|pane| pane.is_plugin && pane.plugin_url.as_deref() == Some(url))
+                .map(move |pane| Sidebar {
+                    tab: *tab,
+                    id: pane.id,
+                })
+        })
+        .collect();
+    found.sort_by_key(|sidebar| (sidebar.tab, sidebar.id));
+    found
+}
+
+/// The location a plugin pane was loaded from, by the plugin's own id.
+pub fn url_of_plugin(manifest: &PaneManifest, plugin_id: u32) -> Option<String> {
+    manifest.panes.values().flatten().find_map(|pane| {
+        (pane.is_plugin && pane.id == plugin_id)
+            .then(|| pane.plugin_url.clone())
+            .flatten()
+    })
+}
+
 /// Where the user is: the tab they are in, and the pane within it when that pane
 /// is one the sidebar lists (a focused plugin pane, the sidebar itself included,
 /// leaves the tab known and no pane focused).
@@ -198,6 +236,33 @@ mod tests {
         );
         let names: Vec<&str> = session.iter().map(|tab| tab.name.as_str()).collect();
         assert_eq!(names, vec!["first", "second", "third"]);
+    }
+
+    fn sidebar_pane(id: u32, url: &str) -> PaneInfo {
+        PaneInfo {
+            id,
+            is_plugin: true,
+            plugin_url: Some(url.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_panes_running_this_plugin_count_as_sidebars() {
+        const URL: &str = "file:/x/wrangler.wasm";
+        let manifest = manifest(vec![
+            (0, vec![sidebar_pane(1, URL), pane(9, "bash", 0, 0)]),
+            (
+                1,
+                vec![sidebar_pane(2, URL), sidebar_pane(3, "zellij:status-bar")],
+            ),
+        ]);
+        assert_eq!(
+            sidebars(&manifest, URL),
+            vec![Sidebar { tab: 0, id: 1 }, Sidebar { tab: 1, id: 2 }]
+        );
+        assert_eq!(url_of_plugin(&manifest, 2).as_deref(), Some(URL));
+        assert_eq!(url_of_plugin(&manifest, 9), None);
     }
 
     #[test]

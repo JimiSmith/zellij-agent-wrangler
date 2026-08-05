@@ -12,18 +12,14 @@
 //! arrived. A rebuild that changes nothing drawn asks for no repaint: a plugin
 //! reprints its whole pane every time, and pane updates are frequent.
 
-mod model;
-mod render;
-mod session;
-mod tree;
-
 use std::collections::BTreeMap;
 
 use zellij_tile::prelude::*;
 
-use model::{Notification, Row, RowContent, RowKey};
-use render::{notification_body_field, notification_rows, paint, wrap};
-use session::Focus;
+use zellij_agent_wrangler::model::{Notification, Row, RowContent, RowKey};
+use zellij_agent_wrangler::render::{notification_body_field, notification_rows, paint, wrap};
+use zellij_agent_wrangler::session::{self, Focus};
+use zellij_agent_wrangler::tree;
 
 /// The message the sidebars of one session carry their shared selection in.
 ///
@@ -32,6 +28,18 @@ use session::Focus;
 /// unaddressed message reaches every plugin there is. Every instance therefore
 /// hears every other one, and answers only to the name it knows.
 const SELECTION_MESSAGE: &str = "wrangler:selection";
+
+/// The message that turns the sidebar off for the whole session.
+const OFF_MESSAGE: &str = "wrangler:off";
+
+/// The message a sidebar is opened with. It names nothing this plugin reads: a
+/// message addressed to this plugin's url reaches no running instance and
+/// launches one, which is what opening a sidebar is.
+const OPEN_MESSAGE: &str = "wrangler:open";
+
+/// The message claiming the tab a sidebar is being opened into, so no other
+/// sidebar opens a second one there.
+const CLAIM_MESSAGE: &str = "wrangler:claim";
 
 /// What a refused sidebar says beneath its heading.
 const REFUSED: &str = "the sidebar cannot read the session";
@@ -56,6 +64,9 @@ struct State {
     painted: Vec<Option<RowKey>>,
     /// This instance's own plugin id, which is how it finds the tab it is in.
     plugin_id: u32,
+    /// The tab a sidebar has just been opened into, held until that sidebar is
+    /// reported, so the same tab is not opened into twice while it arrives.
+    opening: Option<usize>,
     /// Whether the tab this sidebar is in has ever held a pane besides it.
     ///
     /// A tab is briefly reported as holding only the sidebar while it is still
@@ -103,10 +114,43 @@ impl State {
     fn resolve(&mut self) -> bool {
         let resolved = session::session(&self.tabs, &self.panes, focus());
         self.leave_if_alone(&resolved);
+        self.open_where_needed();
         let rows = tree::build_tree(&resolved);
         let changed = rows != self.rows;
         self.rows = rows;
         changed
+    }
+
+    /// Open a sidebar into the tab the user is in when that tab has none.
+    ///
+    /// A launch lands in the tab that holds the focus rather than the one the
+    /// launcher is in, which is what lets a sidebar reach a tab nothing is
+    /// watching from. Whichever sidebar notices first claims the tab out loud,
+    /// and the others hold off: zellij stops delivering events to a sidebar
+    /// whose tab has fallen far enough behind, so which of them notices is not
+    /// something to decide in advance.
+    fn open_where_needed(&mut self) {
+        let Some(url) = session::url_of_plugin(&self.panes, self.plugin_id) else {
+            return;
+        };
+        let sidebars = session::sidebars(&self.panes, &url);
+        let Some(here) = focus().map(|focus| focus.tab) else {
+            return;
+        };
+        if sidebars.iter().any(|sidebar| sidebar.tab == here) {
+            self.opening = None;
+            return;
+        }
+        if self.opening == Some(here) {
+            return;
+        }
+        self.opening = Some(here);
+        pipe_message_to_plugin(MessageToPlugin::new(CLAIM_MESSAGE).with_payload(here.to_string()));
+        pipe_message_to_plugin(
+            MessageToPlugin::new(OPEN_MESSAGE)
+                .with_plugin_url(url)
+                .new_plugin_instance_should_float(false),
+        );
     }
 
     /// Close this sidebar when the tab holding it has nothing else left.
@@ -260,8 +304,11 @@ impl ZellijPlugin for State {
                     self.activate();
                     false
                 }
+                // Off is a fact about the session, not about this pane: the
+                // sidebars of a session are one sidebar, and one of them left
+                // behind would open the rest again.
                 BareKey::Char('q') => {
-                    close_self();
+                    pipe_message_to_plugin(MessageToPlugin::new(OFF_MESSAGE));
                     false
                 }
                 _ => false,
@@ -285,6 +332,24 @@ impl ZellijPlugin for State {
     /// Adopt a selection another sidebar made. A sidebar hears its own broadcast
     /// too, and has nothing to learn from it.
     fn pipe(&mut self, message: PipeMessage) -> bool {
+        // A sidebar opened this way arrives beside the pane that was focused
+        // rather than at the edge, and framed, wearing the wasm's path as its
+        // title. A sidebar declared in a layout arrives at the edge with no
+        // frame, and the two should be the same sidebar.
+        if message.name == OPEN_MESSAGE {
+            let me = PaneId::Plugin(self.plugin_id);
+            move_pane_with_pane_id_in_direction(me, Direction::Left);
+            set_pane_borderless(me, true);
+            return false;
+        }
+        if message.name == CLAIM_MESSAGE {
+            self.opening = message.payload.as_deref().and_then(|tab| tab.parse().ok());
+            return false;
+        }
+        if message.name == OFF_MESSAGE {
+            close_self();
+            return false;
+        }
         if message.name != SELECTION_MESSAGE || message.source == PipeSource::Plugin(self.plugin_id)
         {
             return false;
