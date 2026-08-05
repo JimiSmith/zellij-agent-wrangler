@@ -1,20 +1,13 @@
 # Features to port
 
 Everything tmux-agent-wrangler does, as a list of work. A checked box is done in
-this repo; the drawing ones are complete as code, drawn from hardcoded rows.
+this repo.
 
 ## Sidebar lifecycle
 
 - [ ] One sidebar pane per tab, never a single shared pane
 - [x] A tab opened later gets a sidebar too (`default_tab_template`)
 - [ ] Place the sidebar from the plugin rather than from the layout
-
-A layout can only carry the sidebar so far. `children` has to be a direct child
-of the tab template, or zellij drops it when it builds a tab at runtime, so the
-sidebar must be a column beside it and the UI bars, which are rows, have nowhere
-left to go: a template holds the bars or a sidebar, not both. Opening the pane
-from the plugin lifts that, and toggling the sidebar needs the same commands
-anyway.
 - [ ] Toggle the sidebar for the session, off a key binding
 - [ ] Focus this tab's sidebar, off a key binding
 - [ ] `q` closes the sidebar
@@ -24,9 +17,16 @@ anyway.
 - [ ] A resize of one sidebar is adopted by the others drawing that session
 - [ ] The sidebars drawing one session share a selection
 
+A layout can only carry the sidebar so far. `children` has to be a direct child
+of the tab template, or zellij drops it when it builds a tab at runtime, so the
+sidebar must be a column beside it and the UI bars, which are rows, have nowhere
+left to go: a template holds the bars or a sidebar, not both. Opening the pane
+from the plugin lifts that, and toggling the sidebar needs the same commands
+anyway.
+
 ## The tree
 
-- [ ] Tabs, with their panes as children
+- [x] Tabs, with their panes as children
 - [ ] A pane running an agent is drawn as that agent instead of as a pane
 - [ ] A pane hosting two agents contributes two rows
 - [ ] Sections mode: the tree, then a block per agent, the same rows regrouped
