@@ -22,8 +22,11 @@ use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
 use model::{Notification, Row, RowContent, RowKey};
-use render::{notification_rows, paint};
+use render::{notification_body_field, notification_rows, paint, wrap};
 use session::Focus;
+
+/// What a refused sidebar says beneath its heading.
+const REFUSED: &str = "the sidebar cannot read the session";
 
 /// The heading the notification area is drawn under.
 const NOTIFICATIONS_HEADING: &str = "notifications";
@@ -37,6 +40,9 @@ struct State {
     rows: Vec<Row>,
     notifications: Vec<Notification>,
     selected: Option<RowKey>,
+    /// The answer to the permission request, absent until it is given. The
+    /// sidebar can read nothing and reach nothing without it.
+    permission: Option<PermissionStatus>,
     /// The key each screen line was drawn from, so a click resolves against the
     /// frame it landed on rather than against a tree that may since have moved.
     painted: Vec<Option<RowKey>>,
@@ -59,6 +65,19 @@ fn focus() -> Option<Focus> {
         Ok((tab, PaneId::Plugin(_))) => Some(Focus { tab, pane: None }),
         Err(_) => None,
     }
+}
+
+/// What the pane says once the sidebar has been refused what it needs. Refusal
+/// is an answer, and an empty pane would read as a broken sidebar rather than
+/// as one that was turned away.
+fn refused_rows(width: usize) -> Vec<Row> {
+    let mut rows = vec![Row::new(RowContent::Header {
+        text: "no permission".to_string(),
+    })];
+    for line in wrap(REFUSED, notification_body_field(width)) {
+        rows.push(Row::new(RowContent::NotificationBody { text: line }));
+    }
+    rows
 }
 
 impl State {
@@ -173,9 +192,10 @@ impl ZellijPlugin for State {
                 self.panes = panes;
                 self.resolve()
             }
-            // The prompt draws over this pane, so the sidebar is repainted once
-            // the answer takes the prompt away.
-            Event::PermissionRequestResult(_) => true,
+            Event::PermissionRequestResult(status) => {
+                self.permission = Some(status);
+                true
+            }
             Event::Key(key) => match key.bare_key {
                 BareKey::Down | BareKey::Char('j') => {
                     self.step(1);
@@ -208,6 +228,16 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        if self.permission == Some(PermissionStatus::Denied) {
+            let rows: Vec<String> = refused_rows(cols)
+                .iter()
+                .map(|row| paint(row, cols, false))
+                .collect();
+            print!("{}", rows.join("\r\n"));
+            self.painted.clear();
+            return;
+        }
+
         let lines = self.lines(cols, rows);
         self.painted = lines.iter().map(|row| row.key).collect();
         let selected = self.selection();

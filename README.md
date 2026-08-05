@@ -37,6 +37,18 @@ Each run kills the `wrangler-proto` session it opens last time, because a
 session holds the wasm it loaded at startup and attaching would run the build
 before last.
 
+**The first run comes up blank.** The sidebar needs zellij's
+`ReadApplicationState` and `ChangeApplicationState`, and zellij asks by drawing
+over the plugin's pane, but nothing paints the question until something else
+forces a redraw, and a plugin is not rendered at all while its request is
+pending. Focus the sidebar (`Ctrl+g`, then `Ctrl+p` and `←`) and press `y`.
+Zellij caches the answer against the wasm's path in
+`~/.cache/zellij/permissions.kdl`, so this is once per machine rather than once
+per run, and the path does not change when the wasm is rebuilt. Each tab that
+existed before the answer asks separately, since every tab's sidebar is its own
+plugin instance; tabs opened afterwards find the answer cached. See
+[zellij#4749](https://github.com/zellij-org/zellij/issues/4749).
+
 Keys reach the plugin whenever its pane has focus. Zellij starts every session
 in locked mode, which turns off zellij's own bindings and passes keystrokes
 through to the focused pane, so the sidebar works while locked; `Ctrl+g`
