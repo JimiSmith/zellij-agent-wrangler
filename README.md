@@ -41,7 +41,8 @@ Keys reach the plugin whenever its pane has focus. Zellij starts every session
 in locked mode, which turns off zellij's own bindings and passes keystrokes
 through to the focused pane, so the sidebar works while locked; `Ctrl+g`
 unlocks, which is what you need to move focus onto the sidebar (`Ctrl+p` then an
-arrow) or to quit (`Ctrl+q`).
+arrow) or to quit (`Ctrl+q`). This layout carries no status bar to say which
+mode you are in, for the reason its own comment gives.
 
 `j`/`k` and the arrow keys move the selection; a click selects the row it lands
 on. Every line of a notification entry answers to that entry, so a click
