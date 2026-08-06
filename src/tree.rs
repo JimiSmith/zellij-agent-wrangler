@@ -5,8 +5,17 @@
 //! What is derived here is everything that follows from a thing's *position*:
 //! its placement, its branch, and the index it is labelled with.
 
-use crate::agents::Agent;
-use crate::model::{Branch, Placement, Row, RowContent, RowKey};
+use crate::agents::{Agent, Turn};
+use crate::model::{Branch, Indicator, Placement, Row, RowContent, RowKey};
+
+/// The marker an agent's row carries at its right edge.
+fn indicator(turn: Turn) -> Indicator {
+    match turn {
+        Turn::Idle => Indicator::None,
+        Turn::Working => Indicator::Working,
+        Turn::Attention => Indicator::Attention,
+    }
+}
 
 /// A pane, and the agent sessions running in it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,7 +134,8 @@ fn tab_rows(tab: &Tab) -> Vec<Row> {
                 placement: pane_placement(tab.active, pane.focused),
                 color: None,
             })
-            .at(RowKey::Agent(agent.session.clone())),
+            .at(RowKey::Agent(agent.session.clone()))
+            .with(indicator(agent.turn)),
         });
     }
     rows
@@ -317,6 +327,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Branch::More, Branch::Last]
         );
+    }
+
+    #[test]
+    fn an_agents_turn_is_the_marker_its_row_carries() {
+        for (turn, marker) in [
+            (Turn::Idle, Indicator::None),
+            (Turn::Working, Indicator::Working),
+            (Turn::Attention, Indicator::Attention),
+        ] {
+            let mut pane = hosting(pane(1, "bash", false), &["one"]);
+            pane.agents[0].turn = turn;
+            let rows = build_tree(&[tab(0, "editor", true, vec![pane])]);
+            assert_eq!(rows[1].indicator, marker, "{turn:?}");
+        }
+    }
+
+    #[test]
+    fn a_pane_row_never_carries_a_marker() {
+        let rows = build_tree(&session());
+        assert!(rows.iter().all(|row| row.indicator == Indicator::None));
     }
 
     #[test]

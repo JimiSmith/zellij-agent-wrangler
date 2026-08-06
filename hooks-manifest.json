@@ -1,0 +1,107 @@
+{
+  "claude": {
+    "target": "~/.claude/settings.json",
+    "format": "claude",
+    "events": {
+      "SessionStart": [
+        "start"
+      ],
+      "SessionEnd": [
+        "end"
+      ],
+      "UserPromptSubmit": [
+        "working"
+      ],
+      "PostToolUse": [
+        "working"
+      ],
+      "PostToolUseFailure": [
+        "working"
+      ],
+      "PostToolBatch": [
+        "working"
+      ],
+      "SubagentStart": [
+        "working"
+      ],
+      "PreToolUse": [
+        {
+          "matcher": "AskUserQuestion|ExitPlanMode",
+          "actions": [
+            "needsAttention"
+          ]
+        }
+      ],
+      "Stop": [
+        "needsAttention"
+      ],
+      "StopFailure": [
+        "needsAttention"
+      ],
+      "PermissionRequest": [
+        "needsAttention"
+      ],
+      "Notification": [
+        {
+          "matcher": "idle_prompt",
+          "actions": [
+            "needsAttention"
+          ]
+        },
+        {
+          "matcher": "elicitation_dialog",
+          "actions": [
+            "needsAttention"
+          ]
+        }
+      ]
+    }
+  },
+  "copilot": {
+    "target": "~/.copilot/hooks/zellij-wrangler.json",
+    "format": "copilot",
+    "events": {
+      "sessionStart": [
+        "start"
+      ],
+      "userPromptSubmitted": [
+        "working"
+      ],
+      "postToolUse": [
+        "working"
+      ],
+      "postToolUseFailure": [
+        "working"
+      ],
+      "subagentStart": [
+        "working"
+      ],
+      "subagentStop": [
+        "working"
+      ],
+      "agentStop": [
+        "needsAttention"
+      ],
+      "errorOccurred": [
+        "error"
+      ],
+      "notification": [
+        {
+          "matcher": "shell_completed|shell_detached_completed|agent_completed|agent_idle",
+          "actions": [
+            "working"
+          ]
+        },
+        {
+          "matcher": "permission_prompt|elicitation_dialog",
+          "actions": [
+            "needsAttention"
+          ]
+        }
+      ],
+      "sessionEnd": [
+        "end"
+      ]
+    }
+  }
+}

@@ -18,18 +18,53 @@ const RECORD: char = '\n';
 /// The pipe an agent's hooks report a session on, carrying one record.
 pub const START_MESSAGE: &str = "wrangler:agent-start";
 
-/// The pipe they report its end on, carrying the session id alone.
+/// The pipes they report a session's end and its turn on, each carrying the
+/// session id alone. What the agent is doing is a fact about a session already
+/// filed, so these name it rather than describing it again.
 pub const END_MESSAGE: &str = "wrangler:agent-end";
+pub const WORKING_MESSAGE: &str = "wrangler:agent-working";
+pub const ATTENTION_MESSAGE: &str = "wrangler:agent-attention";
 
 /// What a sidebar with no records of its own asks, and what any sidebar that
 /// has some answers with.
 pub const SYNC_REQUEST_MESSAGE: &str = "wrangler:agents?";
 pub const SYNC_MESSAGE: &str = "wrangler:agents";
 
-/// One agent session: who it is, what to call it, and the pane it reported
-/// itself from.
+/// Whose turn it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Turn {
+    /// The agent is waiting, and wants nothing.
+    #[default]
+    Idle,
+    /// The agent is mid-turn.
+    Working,
+    /// The agent wants the user.
+    Attention,
+}
+
+impl Turn {
+    fn encode(self) -> &'static str {
+        match self {
+            Turn::Idle => "idle",
+            Turn::Working => "working",
+            Turn::Attention => "attention",
+        }
+    }
+
+    fn decode(text: &str) -> Option<Self> {
+        match text {
+            "idle" => Some(Turn::Idle),
+            "working" => Some(Turn::Working),
+            "attention" => Some(Turn::Attention),
+            _ => None,
+        }
+    }
+}
+
+/// One agent session: who it is, what to call it, the pane it reported itself
+/// from, and whose turn it is.
 ///
-/// The three strings are trimmed of anything that could split the wire format,
+/// The two strings are trimmed of anything that could split the wire format,
 /// which is why the fields are built rather than assigned.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
@@ -37,6 +72,7 @@ pub struct Agent {
     pub agent: String,
     pub label: String,
     pub pane: Option<u32>,
+    pub turn: Turn,
 }
 
 /// Replace every character that would split a record or a field, and every
@@ -54,17 +90,19 @@ impl Agent {
             agent: field(agent),
             label: field(label),
             pane,
+            turn: Turn::default(),
         }
     }
 
-    /// The record as one line: session, agent, pane, label. The pane is written
-    /// as nothing at all when the agent reported none.
+    /// The record as one line: session, agent, pane, turn, label. The pane is
+    /// written as nothing at all when the agent reported none.
     pub fn encode(&self) -> String {
         let pane = self.pane.map(|id| id.to_string()).unwrap_or_default();
         format!(
-            "{}{FIELD}{}{FIELD}{pane}{FIELD}{}",
+            "{}{FIELD}{}{FIELD}{pane}{FIELD}{}{FIELD}{}",
             self.session.as_str(),
             self.agent,
+            self.turn.encode(),
             self.label
         )
     }
@@ -75,17 +113,21 @@ impl Agent {
     /// field character would still parse; it cannot, because the constructor
     /// takes that character out.
     pub fn decode(line: &str) -> Option<Self> {
-        let mut fields = line.splitn(4, FIELD);
+        let mut fields = line.splitn(5, FIELD);
         let session = SessionId::new(fields.next()?)?;
         let agent = fields.next()?;
         let pane = fields.next()?;
+        let turn = Turn::decode(fields.next()?)?;
         let label = fields.next()?;
         let pane = if pane.is_empty() {
             None
         } else {
             Some(pane.parse().ok()?)
         };
-        Some(Agent::new(session, agent, label, pane))
+        Some(Agent {
+            turn,
+            ..Agent::new(session, agent, label, pane)
+        })
     }
 }
 
@@ -97,15 +139,55 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// File an agent, replacing whatever was known about that session. `true`
+    /// File an agent, keeping whose turn it already was.
+    ///
+    /// An agent announces itself again whenever its own session restarts under
+    /// it, which says nothing new about the turn it is in the middle of. `true`
     /// when this changed anything.
-    pub fn start(&mut self, agent: Agent) -> bool {
+    pub fn start(&mut self, mut agent: Agent) -> bool {
+        if let Some(known) = self.sessions.get(&agent.session) {
+            agent.turn = known.turn;
+        }
+        self.adopt(agent)
+    }
+
+    /// File an agent exactly as given, turn included.
+    fn adopt(&mut self, agent: Agent) -> bool {
         self.sessions.insert(agent.session.clone(), agent.clone()) != Some(agent)
     }
 
     /// Drop an agent's session. `true` when there was one to drop.
     pub fn end(&mut self, session: &SessionId) -> bool {
         self.sessions.remove(session).is_some()
+    }
+
+    /// Say whose turn it is in a session already filed. An agent the sidebar
+    /// has never been told about has no row to mark, so this says nothing.
+    pub fn mark(&mut self, session: &SessionId, turn: Turn) -> bool {
+        match self.sessions.get_mut(session) {
+            Some(agent) if agent.turn != turn => {
+                agent.turn = turn;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Answer the agents in `pane` that were asking for the user.
+    ///
+    /// Attention is a fact about an agent the user has not got to yet, so
+    /// arriving at its pane is what settles it. Every sidebar reads this off
+    /// the same focus and reaches the same answer, so none has to tell the
+    /// others.
+    pub fn seen(&mut self, pane: u32) -> bool {
+        let mut changed = false;
+        for agent in self.sessions.values_mut() {
+            if agent.pane == Some(pane) && agent.turn == Turn::Attention {
+                agent.turn = Turn::Idle;
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn get(&self, session: &SessionId) -> Option<&Agent> {
@@ -125,13 +207,13 @@ impl Registry {
             .join(&RECORD.to_string())
     }
 
-    /// Take in every record of a run `encode` wrote, keeping what is already
-    /// known about a session the run does not mention. `true` when this changed
-    /// anything.
+    /// Take in every record of a run `encode` wrote, turns included, keeping
+    /// what is already known about a session the run does not mention. `true`
+    /// when this changed anything.
     pub fn absorb(&mut self, text: &str) -> bool {
         let mut changed = false;
         for agent in text.split(RECORD).filter_map(Agent::decode) {
-            changed |= self.start(agent);
+            changed |= self.adopt(agent);
         }
         changed
     }
@@ -223,6 +305,77 @@ mod tests {
         assert!(registry.start(agent("one", Some(3))));
         assert!(!registry.start(agent("one", Some(3))));
         assert!(registry.start(agent("one", Some(4))));
+    }
+
+    #[test]
+    fn a_turn_survives_the_round_trip() {
+        for turn in [Turn::Idle, Turn::Working, Turn::Attention] {
+            let record = Agent {
+                turn,
+                ..agent("one", Some(3))
+            };
+            assert_eq!(Agent::decode(&record.encode()), Some(record));
+        }
+    }
+
+    #[test]
+    fn a_record_with_no_turn_it_recognises_decodes_to_nothing() {
+        assert_eq!(Agent::decode("one\tclaude\t3\tdozing\tlabel"), None);
+    }
+
+    #[test]
+    fn a_turn_is_only_marked_on_a_session_already_filed() {
+        let mut registry = Registry::default();
+        assert!(!registry.mark(&session("one"), Turn::Working));
+        registry.start(agent("one", Some(3)));
+        assert!(registry.mark(&session("one"), Turn::Working));
+        // Saying the same thing twice is not a change.
+        assert!(!registry.mark(&session("one"), Turn::Working));
+    }
+
+    #[test]
+    fn announcing_a_session_again_leaves_its_turn_alone() {
+        // An agent re-registers whenever its own session restarts under it,
+        // which says nothing about the turn it is in the middle of.
+        let mut registry = Registry::default();
+        registry.start(agent("one", Some(3)));
+        registry.mark(&session("one"), Turn::Working);
+        registry.start(agent("one", Some(3)));
+        assert_eq!(registry.get(&session("one")).unwrap().turn, Turn::Working);
+    }
+
+    #[test]
+    fn absorbing_takes_the_turn_it_is_told() {
+        let mut mine = Registry::default();
+        mine.start(agent("one", Some(3)));
+        let mut theirs = Registry::default();
+        theirs.start(agent("one", Some(3)));
+        theirs.mark(&session("one"), Turn::Attention);
+        assert!(mine.absorb(&theirs.encode()));
+        assert_eq!(mine.get(&session("one")).unwrap().turn, Turn::Attention);
+    }
+
+    #[test]
+    fn arriving_at_a_pane_answers_the_agents_asking_from_it() {
+        let mut registry = Registry::default();
+        registry.start(agent("one", Some(3)));
+        registry.start(agent("two", Some(9)));
+        registry.mark(&session("one"), Turn::Attention);
+        registry.mark(&session("two"), Turn::Attention);
+        assert!(registry.seen(3));
+        assert_eq!(registry.get(&session("one")).unwrap().turn, Turn::Idle);
+        // Another pane's agent is still asking.
+        assert_eq!(registry.get(&session("two")).unwrap().turn, Turn::Attention);
+    }
+
+    #[test]
+    fn arriving_at_a_pane_leaves_an_agent_working_in_it_alone() {
+        // Only a call for the user is answered by turning up; work carries on.
+        let mut registry = Registry::default();
+        registry.start(agent("one", Some(3)));
+        registry.mark(&session("one"), Turn::Working);
+        assert!(!registry.seen(3));
+        assert_eq!(registry.get(&session("one")).unwrap().turn, Turn::Working);
     }
 
     #[test]

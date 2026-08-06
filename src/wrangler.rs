@@ -11,7 +11,10 @@
 use std::io::Read;
 use std::process::{Command, ExitCode, Stdio};
 
-use zellij_agent_wrangler::agents::{Agent, END_MESSAGE, START_MESSAGE};
+use zellij_agent_wrangler::agents::{
+    Agent, ATTENTION_MESSAGE, END_MESSAGE, START_MESSAGE, WORKING_MESSAGE,
+};
+use zellij_agent_wrangler::install;
 use zellij_agent_wrangler::model::SessionId;
 use zellij_agent_wrangler::payload::{label, Payload};
 
@@ -41,29 +44,50 @@ fn read_stdin() -> String {
     body
 }
 
+/// The pipe an agent's own event name reports on.
+///
+/// An error is the one event whose meaning depends on who raised it: Copilot
+/// says whether it can carry on, and one that can is still working rather than
+/// waiting. Every other agent's error is something the user has to look at.
+/// Anything unrecognised is a session announcing itself, which is also how a
+/// session already known re-states where it is.
+fn message(agent: &str, event: &str, recoverable: Option<bool>) -> &'static str {
+    match event {
+        "end" => END_MESSAGE,
+        "working" => WORKING_MESSAGE,
+        "needsAttention" => ATTENTION_MESSAGE,
+        "error" if agent == "copilot" && recoverable == Some(true) => WORKING_MESSAGE,
+        "error" => ATTENTION_MESSAGE,
+        _ => START_MESSAGE,
+    }
+}
+
 fn hook(agent: &str, event: &str) {
     let payload = Payload::parse(&read_stdin());
     // An event naming no session describes nothing the sidebar can file.
     let Some(session) = SessionId::new(&payload.session_id) else {
         return;
     };
-    match event {
-        "end" => pipe(END_MESSAGE, session.as_str()),
-        // Anything else is a session announcing itself, which is also how a
-        // session already known re-states where it is.
-        _ => {
+    match message(agent, event, payload.recoverable) {
+        // Only a session announcing itself carries where it is and what to call
+        // it; the rest name a session the sidebar has already filed.
+        START_MESSAGE => {
             let record = Agent::new(session, agent, &label(&payload.cwd, agent), pane());
             pipe(START_MESSAGE, &record.encode());
         }
+        name => pipe(name, session.as_str()),
     }
 }
+
+const USAGE: &str = "usage: zellij-wrangler hook <agent> <start|end|working|needsAttention|error>
+       zellij-wrangler install-hooks [all|claude|copilot] [--uninstall]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("hook") => {
             let Some(agent) = args.get(1) else {
-                eprintln!("wrangler hook: agent name required");
+                eprintln!("zellij-wrangler hook: agent name required");
                 return ExitCode::from(2);
             };
             // A session outside zellij has no sidebar to tell, and running the
@@ -73,9 +97,46 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Some("install-hooks") => {
+            let (said, ok) = install::run(&args[1..]);
+            for line in said {
+                println!("{line}");
+            }
+            match ok {
+                true => ExitCode::SUCCESS,
+                false => ExitCode::FAILURE,
+            }
+        }
         _ => {
-            eprintln!("usage: wrangler hook <agent> <start|end>");
+            eprintln!("{USAGE}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_event_reports_on_its_own_pipe() {
+        assert_eq!(message("claude", "start", None), START_MESSAGE);
+        assert_eq!(message("claude", "end", None), END_MESSAGE);
+        assert_eq!(message("claude", "working", None), WORKING_MESSAGE);
+        assert_eq!(message("claude", "needsAttention", None), ATTENTION_MESSAGE);
+    }
+
+    #[test]
+    fn an_unrecognised_event_registers_the_session() {
+        assert_eq!(message("claude", "", None), START_MESSAGE);
+        assert_eq!(message("claude", "wat", Some(true)), START_MESSAGE);
+    }
+
+    #[test]
+    fn only_a_copilot_error_it_can_carry_on_from_is_still_working() {
+        assert_eq!(message("copilot", "error", Some(true)), WORKING_MESSAGE);
+        assert_eq!(message("copilot", "error", Some(false)), ATTENTION_MESSAGE);
+        assert_eq!(message("copilot", "error", None), ATTENTION_MESSAGE);
+        assert_eq!(message("claude", "error", Some(true)), ATTENTION_MESSAGE);
     }
 }

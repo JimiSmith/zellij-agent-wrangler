@@ -65,8 +65,7 @@ placeholder.
 ## The agent registry
 
 - [x] A hook client the agents invoke, taking the payload on stdin
-- [x] `start` / `end`, snake and camel payloads
-- [ ] `working` / `needsAttention` / `error`
+- [x] `start` / `end` / `working` / `needsAttention` / `error`, snake and camel payloads
 - [x] Sessions held by every sidebar, and asked for by one that starts later
 - [ ] Sessions surviving a session with no sidebar running at all
 - [ ] A recorded pane counts only when the agent's pid descends from the pane's
@@ -86,8 +85,14 @@ pane that has gone leaves no row behind.
 
 ## Turn state
 
-- [ ] Working and attention state driven by the agent hooks
-- [ ] Attention clears when you focus the agent's pane
+- [x] Working and attention state driven by the agent hooks
+- [x] Attention clears when you focus the agent's pane
+
+Whose turn it is rides on the record, so a sidebar that opens later learns it
+with everything else. Nothing is sent between sidebars to clear attention:
+arriving at an agent's pane is not an event of its own, it is whichever change
+moved the focus, and every sidebar reads that the same way and reaches the same
+answer.
 
 ## Notifications
 
@@ -104,11 +109,18 @@ pane that has gone leaves no row behind.
 
 ## Hook installation
 
-- [ ] Install the hook invocations into each agent's config from a manifest
-- [ ] Merge into Claude's shared settings without touching other hooks, with a backup
-- [ ] Write Copilot's dedicated config outright
-- [ ] Idempotent, with `--uninstall`, upgrading a command written by an older release
+- [x] Install the hook invocations into each agent's config from a manifest
+- [x] Merge into Claude's shared settings without touching other hooks, with a backup
+- [x] Write Copilot's dedicated config outright
+- [x] Idempotent, with `--uninstall`, upgrading a command written under the other name
 - [ ] Install on load, behind an option
+
+A hook command is claimed only when the program it runs is named
+`zellij-wrangler`, or `wrangler` from a path holding `zellij-agent-wrangler`.
+Matching the program rather than a word in the line is what lets another
+installer's hooks sit in the same file untouched. The command is read back with
+the quoting it was written with, so a path with a space in it is recognised
+rather than installed again beside itself.
 
 ## Options
 
@@ -144,7 +156,7 @@ instrumenting to tell whether it works.
       selection. Width sync was dropped.
 - [x] **4. Agent rows.** `start` and `end` only. Launch an agent in a pane and
       watch its row appear with its label, then go when the agent exits.
-- [ ] **5. Turn state.** The rest of the hook events. Working while it works,
+- [x] **5. Turn state.** The rest of the hook events. Working while it works,
       attention when it wants you, cleared when you focus its pane.
 - [ ] **6. Notifications.** The area fills on attention, opening an entry lands
       on the agent's pane and dismisses the right entries. Bell and desktop

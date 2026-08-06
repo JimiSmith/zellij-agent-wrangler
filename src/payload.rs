@@ -7,11 +7,14 @@
 
 use serde_json::Value;
 
-/// The fields the sidebar takes from a hook body.
+/// The fields the sidebar takes from a hook body. `recoverable` is present only
+/// when the body carried a genuine JSON boolean, since an agent that says
+/// nothing about it is not saying `false`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Payload {
     pub session_id: String,
     pub cwd: String,
+    pub recoverable: Option<bool>,
 }
 
 impl Payload {
@@ -27,6 +30,7 @@ impl Payload {
         Payload {
             session_id: first_nonempty(&["session_id", "sessionId"]),
             cwd: first_nonempty(&["cwd"]),
+            recoverable: value.get("recoverable").and_then(Value::as_bool),
         }
     }
 }
@@ -55,7 +59,25 @@ mod tests {
             Payload {
                 session_id: "abc".to_string(),
                 cwd: "/home/u/repo".to_string(),
+                recoverable: None,
             }
+        );
+    }
+
+    #[test]
+    fn recoverable_is_read_only_from_a_boolean() {
+        assert_eq!(
+            Payload::parse(r#"{"sessionId":"s","recoverable":true}"#).recoverable,
+            Some(true)
+        );
+        assert_eq!(
+            Payload::parse(r#"{"sessionId":"s","recoverable":false}"#).recoverable,
+            Some(false)
+        );
+        // A string is not a boolean, so it says nothing either way.
+        assert_eq!(
+            Payload::parse(r#"{"sessionId":"s","recoverable":"true"}"#).recoverable,
+            None
         );
     }
 

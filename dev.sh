@@ -13,9 +13,9 @@ wasm="$root/target/wasm32-wasip1/debug/zellij-agent-wrangler.wasm"
 # process and has no business inside the wasm.
 cargo build --manifest-path "$root/Cargo.toml" --target wasm32-wasip1 \
     --no-default-features --bin zellij-agent-wrangler
-cargo build --manifest-path "$root/Cargo.toml" --bin wrangler
+cargo build --manifest-path "$root/Cargo.toml" --bin zellij-wrangler
 
-echo "hook client: $root/target/debug/wrangler"
+echo "hook client: $root/target/debug/zellij-wrangler"
 
 layout="$(mktemp -d)/dev.kdl"
 sed "s#PLUGIN_LOCATION#file:$wasm#" "$root/dev.kdl" >"$layout"

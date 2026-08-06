@@ -10,4 +10,6 @@ pub mod session;
 pub mod tree;
 
 #[cfg(feature = "native")]
+pub mod install;
+#[cfg(feature = "native")]
 pub mod payload;

@@ -35,27 +35,28 @@ client's path.
 ## Agent rows
 
 An agent appears in the tree once its own lifecycle hooks call the client, which
-reports the pane it was invoked in. Installing those hooks automatically is not
-built yet, so add them by hand, with the path `dev.sh` printed:
+reports the pane it was invoked in. Install those hooks with:
 
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "/abs/path/to/wrangler hook claude start" }] }
-    ],
-    "SessionEnd": [
-      { "hooks": [{ "type": "command", "command": "/abs/path/to/wrangler hook claude end" }] }
-    ]
-  }
-}
+```bash
+./target/debug/zellij-wrangler install-hooks            # or: claude, copilot
+./target/debug/zellij-wrangler install-hooks --uninstall
 ```
 
-In `~/.claude/settings.json` that covers every agent you start anywhere; the
-client does nothing at all outside zellij, so sessions elsewhere are unaffected.
+It writes the absolute path of the binary you ran, so it works from wherever
+that is; run it again after moving the binary. Claude's hooks are merged into
+`~/.claude/settings.json`, keeping every other key, the order they are in, the
+file's permissions and a `.zellij-wrangler.bak` copy of what was there; only
+commands running *this* client are replaced, so hooks belonging to anything else
+survive both installing and uninstalling. Copilot's file is one this owns
+outright. Running install twice writes the same bytes.
+
+The hooks cover every agent you start anywhere; the client does nothing at all
+outside zellij, so sessions elsewhere are unaffected.
+
 Start an agent in a pane and that pane's row becomes the agent's, labelled with
 the directory it is working in. A pane running two agents contributes a row
-each.
+each. `○` at the right edge says the agent is mid-turn and `●` says it wants
+you; going to its pane answers the second and leaves the first alone.
 
 The agents of a session are known to every sidebar in it, and a sidebar opening
 in a new tab asks the others for what they have. Nothing survives every sidebar

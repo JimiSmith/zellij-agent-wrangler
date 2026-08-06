@@ -17,7 +17,8 @@ use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
 use zellij_agent_wrangler::agents::{
-    self, Agent, Registry, END_MESSAGE, START_MESSAGE, SYNC_MESSAGE, SYNC_REQUEST_MESSAGE,
+    self, Agent, Registry, Turn, ATTENTION_MESSAGE, END_MESSAGE, START_MESSAGE, SYNC_MESSAGE,
+    SYNC_REQUEST_MESSAGE, WORKING_MESSAGE,
 };
 use zellij_agent_wrangler::model::{Notification, Row, RowContent, RowKey, SessionId};
 use zellij_agent_wrangler::render::{notification_body_field, notification_rows, paint, wrap};
@@ -130,7 +131,14 @@ impl State {
     /// Rebuild the tree from the tabs and panes last reported, and say whether
     /// what would be drawn changed.
     fn resolve(&mut self) -> bool {
-        let mut resolved = session::session(&self.tabs, &self.panes, focus());
+        let focus = focus();
+        // Being at an agent's pane answers what it was asking for, and it is
+        // answered here because arriving is not an event of its own: it shows
+        // up as whichever change moved the focus.
+        if let Some(pane) = focus.and_then(|focus| focus.pane) {
+            self.registry.seen(pane);
+        }
+        let mut resolved = session::session(&self.tabs, &self.panes, focus);
         self.leave_if_alone(&resolved);
         agents::place(&mut resolved, &self.registry);
         let rows = tree::build_tree(&resolved);
@@ -261,6 +269,12 @@ impl State {
                 .unwrap_or(false),
             END_MESSAGE => SessionId::new(payload)
                 .map(|session| self.registry.end(&session))
+                .unwrap_or(false),
+            WORKING_MESSAGE => SessionId::new(payload)
+                .map(|session| self.registry.mark(&session, Turn::Working))
+                .unwrap_or(false),
+            ATTENTION_MESSAGE => SessionId::new(payload)
+                .map(|session| self.registry.mark(&session, Turn::Attention))
                 .unwrap_or(false),
             _ => false,
         };
@@ -393,7 +407,9 @@ impl ZellijPlugin for State {
                 let payload = message.payload.as_deref().unwrap_or_default();
                 self.registry.absorb(payload) && self.resolve()
             }
-            START_MESSAGE | END_MESSAGE => self.hook(&message),
+            START_MESSAGE | END_MESSAGE | WORKING_MESSAGE | ATTENTION_MESSAGE => {
+                self.hook(&message)
+            }
             _ => false,
         }
     }
