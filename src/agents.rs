@@ -18,9 +18,10 @@ const RECORD: char = '\n';
 /// The pipe an agent's hooks report a session on, carrying one record.
 pub const START_MESSAGE: &str = "wrangler:agent-start";
 
-/// The pipes they report a session's end and its turn on, each carrying the
-/// session id alone. What the agent is doing is a fact about a session already
-/// filed, so these name it rather than describing it again.
+/// The pipes they report a session's end and its turn on. What the agent is
+/// doing is a fact about a session already filed, so these name it rather than
+/// describing it again; a call for the user carries the moment it was raised
+/// beside the name, which is what orders the calls against each other.
 pub const END_MESSAGE: &str = "wrangler:agent-end";
 pub const WORKING_MESSAGE: &str = "wrangler:agent-working";
 pub const ATTENTION_MESSAGE: &str = "wrangler:agent-attention";
@@ -73,6 +74,10 @@ pub struct Agent {
     pub label: String,
     pub pane: Option<u32>,
     pub turn: Turn,
+    /// When the agent last called for the user, as the client read the clock.
+    /// It comes from the one process that sees each call once, so every sidebar
+    /// orders the calls the same way without comparing clocks of its own.
+    pub raised: u64,
 }
 
 /// Replace every character that would split a record or a field, and every
@@ -91,6 +96,7 @@ impl Agent {
             label: field(label),
             pane,
             turn: Turn::default(),
+            raised: 0,
         }
     }
 
@@ -99,10 +105,11 @@ impl Agent {
     pub fn encode(&self) -> String {
         let pane = self.pane.map(|id| id.to_string()).unwrap_or_default();
         format!(
-            "{}{FIELD}{}{FIELD}{pane}{FIELD}{}{FIELD}{}",
+            "{}{FIELD}{}{FIELD}{pane}{FIELD}{}{FIELD}{}{FIELD}{}",
             self.session.as_str(),
             self.agent,
             self.turn.encode(),
+            self.raised,
             self.label
         )
     }
@@ -113,11 +120,12 @@ impl Agent {
     /// field character would still parse; it cannot, because the constructor
     /// takes that character out.
     pub fn decode(line: &str) -> Option<Self> {
-        let mut fields = line.splitn(5, FIELD);
+        let mut fields = line.splitn(6, FIELD);
         let session = SessionId::new(fields.next()?)?;
         let agent = fields.next()?;
         let pane = fields.next()?;
         let turn = Turn::decode(fields.next()?)?;
+        let raised = fields.next()?.parse().ok()?;
         let label = fields.next()?;
         let pane = if pane.is_empty() {
             None
@@ -126,6 +134,7 @@ impl Agent {
         };
         Some(Agent {
             turn,
+            raised,
             ..Agent::new(session, agent, label, pane)
         })
     }
@@ -147,6 +156,7 @@ impl Registry {
     pub fn start(&mut self, mut agent: Agent) -> bool {
         if let Some(known) = self.sessions.get(&agent.session) {
             agent.turn = known.turn;
+            agent.raised = known.raised;
         }
         self.adopt(agent)
     }
@@ -161,16 +171,33 @@ impl Registry {
         self.sessions.remove(session).is_some()
     }
 
-    /// Say whose turn it is in a session already filed. An agent the sidebar
-    /// has never been told about has no row to mark, so this says nothing.
-    pub fn mark(&mut self, session: &SessionId, turn: Turn) -> bool {
+    /// Say whose turn it is in a session already filed, and when a call for the
+    /// user was raised. An agent the sidebar has never been told about has no
+    /// row to mark, so this says nothing.
+    pub fn mark(&mut self, session: &SessionId, turn: Turn, at: u64) -> bool {
         match self.sessions.get_mut(session) {
-            Some(agent) if agent.turn != turn => {
+            Some(agent)
+                if agent.turn != turn || (turn == Turn::Attention && agent.raised != at) =>
+            {
                 agent.turn = turn;
+                if turn == Turn::Attention {
+                    agent.raised = at;
+                }
                 true
             }
             _ => false,
         }
+    }
+
+    /// Every agent calling for the user, the most recent call first.
+    pub fn calling(&self) -> Vec<&Agent> {
+        let mut calling: Vec<&Agent> = self
+            .sessions
+            .values()
+            .filter(|agent| agent.turn == Turn::Attention)
+            .collect();
+        calling.sort_by(|a, b| b.raised.cmp(&a.raised).then(a.session.cmp(&b.session)));
+        calling
     }
 
     /// Answer the agents in `pane` that were asking for the user.
@@ -326,11 +353,11 @@ mod tests {
     #[test]
     fn a_turn_is_only_marked_on_a_session_already_filed() {
         let mut registry = Registry::default();
-        assert!(!registry.mark(&session("one"), Turn::Working));
+        assert!(!registry.mark(&session("one"), Turn::Working, 0));
         registry.start(agent("one", Some(3)));
-        assert!(registry.mark(&session("one"), Turn::Working));
+        assert!(registry.mark(&session("one"), Turn::Working, 0));
         // Saying the same thing twice is not a change.
-        assert!(!registry.mark(&session("one"), Turn::Working));
+        assert!(!registry.mark(&session("one"), Turn::Working, 0));
     }
 
     #[test]
@@ -339,7 +366,7 @@ mod tests {
         // which says nothing about the turn it is in the middle of.
         let mut registry = Registry::default();
         registry.start(agent("one", Some(3)));
-        registry.mark(&session("one"), Turn::Working);
+        registry.mark(&session("one"), Turn::Working, 0);
         registry.start(agent("one", Some(3)));
         assert_eq!(registry.get(&session("one")).unwrap().turn, Turn::Working);
     }
@@ -350,7 +377,7 @@ mod tests {
         mine.start(agent("one", Some(3)));
         let mut theirs = Registry::default();
         theirs.start(agent("one", Some(3)));
-        theirs.mark(&session("one"), Turn::Attention);
+        theirs.mark(&session("one"), Turn::Attention, 5);
         assert!(mine.absorb(&theirs.encode()));
         assert_eq!(mine.get(&session("one")).unwrap().turn, Turn::Attention);
     }
@@ -360,8 +387,8 @@ mod tests {
         let mut registry = Registry::default();
         registry.start(agent("one", Some(3)));
         registry.start(agent("two", Some(9)));
-        registry.mark(&session("one"), Turn::Attention);
-        registry.mark(&session("two"), Turn::Attention);
+        registry.mark(&session("one"), Turn::Attention, 0);
+        registry.mark(&session("two"), Turn::Attention, 0);
         assert!(registry.seen(3));
         assert_eq!(registry.get(&session("one")).unwrap().turn, Turn::Idle);
         // Another pane's agent is still asking.
@@ -369,11 +396,39 @@ mod tests {
     }
 
     #[test]
+    fn calls_for_the_user_are_listed_newest_first() {
+        let mut registry = Registry::default();
+        for (id, at) in [("one", 10), ("two", 30), ("three", 20)] {
+            registry.start(agent(id, Some(1)));
+            registry.mark(&session(id), Turn::Attention, at);
+        }
+        // An agent that is not calling is not listed at all.
+        registry.start(agent("quiet", Some(1)));
+        let calling: Vec<&str> = registry
+            .calling()
+            .iter()
+            .map(|agent| agent.session.as_str())
+            .collect();
+        assert_eq!(calling, vec!["two", "three", "one"]);
+    }
+
+    #[test]
+    fn a_call_raised_again_moves_to_the_front() {
+        let mut registry = Registry::default();
+        registry.start(agent("one", Some(1)));
+        registry.start(agent("two", Some(1)));
+        registry.mark(&session("one"), Turn::Attention, 10);
+        registry.mark(&session("two"), Turn::Attention, 20);
+        assert!(registry.mark(&session("one"), Turn::Attention, 30));
+        assert_eq!(registry.calling()[0].session.as_str(), "one");
+    }
+
+    #[test]
     fn arriving_at_a_pane_leaves_an_agent_working_in_it_alone() {
         // Only a call for the user is answered by turning up; work carries on.
         let mut registry = Registry::default();
         registry.start(agent("one", Some(3)));
-        registry.mark(&session("one"), Turn::Working);
+        registry.mark(&session("one"), Turn::Working, 0);
         assert!(!registry.seen(3));
         assert_eq!(registry.get(&session("one")).unwrap().turn, Turn::Working);
     }

@@ -49,7 +49,6 @@ struct State {
     /// The tree as it was last resolved, which is what the selection and the
     /// paint both read.
     rows: Vec<Row>,
-    notifications: Vec<Notification>,
     /// The agent sessions running in this zellij session.
     ///
     /// Every sidebar holds the whole set, because an agent's hooks report to all
@@ -63,6 +62,13 @@ struct State {
     /// The key each screen line was drawn from, so a click resolves against the
     /// frame it landed on rather than against a tree that may since have moved.
     painted: Vec<Option<RowKey>>,
+    /// Where the user was when zellij was last asked.
+    ///
+    /// Asking is a round trip into the server, which cannot be made while a
+    /// message from the command line is being handled: that message is itself
+    /// waiting on the server, and the two would wait on each other. So it is
+    /// asked on the events that move the focus and remembered for the rest.
+    focus: Option<Focus>,
     /// This instance's own plugin id, which is how it finds the tab it is in.
     plugin_id: u32,
     /// Whether the tab this sidebar is in has ever held a pane besides it.
@@ -125,13 +131,20 @@ impl State {
                 }
             }
         }
+        self.resolve_asking()
+    }
+
+    /// Ask zellij where the user is, then rebuild. Only safe on an event: see
+    /// `focus`.
+    fn resolve_asking(&mut self) -> bool {
+        self.focus = focus();
         self.resolve()
     }
 
     /// Rebuild the tree from the tabs and panes last reported, and say whether
     /// what would be drawn changed.
     fn resolve(&mut self) -> bool {
-        let focus = focus();
+        let focus = self.focus;
         // Being at an agent's pane answers what it was asking for, and it is
         // answered here because arriving is not an event of its own: it shows
         // up as whichever change moved the focus.
@@ -176,6 +189,42 @@ impl State {
         }
     }
 
+    /// The agents calling for the user, as the area lists them: newest first,
+    /// one per session, each described by where it is rather than by what it
+    /// said.
+    ///
+    /// The list is read off the registry every time rather than kept, so an
+    /// entry is a live pointer: an agent whose call has been answered, or whose
+    /// session has ended, simply stops being listed.
+    fn notifications(&self) -> Vec<Notification> {
+        self.registry
+            .calling()
+            .into_iter()
+            .map(|agent| Notification {
+                session: agent.session.clone(),
+                agent: agent.agent.clone(),
+                color: None,
+                message: self.where_it_is(agent),
+            })
+            .collect()
+    }
+
+    /// Where an agent is, as an entry says it: the tab holding its pane, then
+    /// the agent's own label.
+    fn where_it_is(&self, agent: &Agent) -> String {
+        let tab = agent
+            .pane
+            .and_then(|pane| session::tab_of_pane(&self.panes, pane))
+            .and_then(|position| self.tabs.iter().find(|tab| tab.position == position))
+            .map(|tab| tab.name.clone())
+            .unwrap_or_default();
+        match (tab.is_empty(), agent.label.is_empty()) {
+            (true, _) => agent.label.clone(),
+            (false, true) => tab,
+            (false, false) => format!("{tab} · {}", agent.label),
+        }
+    }
+
     /// The notification area for a pane `width` columns wide, given `cap` lines
     /// to fill. Empty when that leaves no room for the heading and one whole
     /// entry beside it.
@@ -183,8 +232,8 @@ impl State {
         let mut rows = vec![Row::new(RowContent::Header {
             text: NOTIFICATIONS_HEADING.to_string(),
         })];
-        for (index, entry) in self.notifications.iter().enumerate() {
-            let entry = notification_rows(entry, index, width);
+        for entry in self.notifications() {
+            let entry = notification_rows(&entry, width);
             if rows.len() + entry.len() > cap {
                 break;
             }
@@ -222,12 +271,14 @@ impl State {
             // Tabs are numbered from one here and from zero everywhere else the
             // sidebar handles them.
             Some(RowKey::Tab(position)) => switch_tab_to(position as u32 + 1),
-            Some(RowKey::Agent(session)) => {
+            // Opening an entry goes where the agent is now. Arriving is what
+            // answers it, along with every other call raised from that pane.
+            Some(RowKey::Agent(session)) | Some(RowKey::Notification(session)) => {
                 if let Some(id) = self.registry.get(&session).and_then(|agent| agent.pane) {
                     focus_pane_with_id(PaneId::Terminal(id), false, false);
                 }
             }
-            Some(RowKey::Notification(_)) | None => {}
+            None => {}
         }
     }
 
@@ -271,11 +322,19 @@ impl State {
                 .map(|session| self.registry.end(&session))
                 .unwrap_or(false),
             WORKING_MESSAGE => SessionId::new(payload)
-                .map(|session| self.registry.mark(&session, Turn::Working))
+                .map(|session| self.registry.mark(&session, Turn::Working, 0))
                 .unwrap_or(false),
-            ATTENTION_MESSAGE => SessionId::new(payload)
-                .map(|session| self.registry.mark(&session, Turn::Attention))
-                .unwrap_or(false),
+            // A call for the user carries the moment it was raised, so that
+            // every sidebar lists the calls in the same order.
+            ATTENTION_MESSAGE => match payload.split_once('\t') {
+                Some((session, at)) => SessionId::new(session)
+                    .map(|session| {
+                        self.registry
+                            .mark(&session, Turn::Attention, at.parse().unwrap_or(0))
+                    })
+                    .unwrap_or(false),
+                None => false,
+            },
             _ => false,
         };
         // A record only reaches the tree through the pane it names, so a change
@@ -309,11 +368,11 @@ impl ZellijPlugin for State {
         match event {
             Event::TabUpdate(tabs) => {
                 self.tabs = tabs;
-                self.resolve()
+                self.resolve_asking()
             }
             Event::PaneUpdate(panes) => {
                 self.panes = panes;
-                self.resolve()
+                self.resolve_asking()
             }
             // The two things that reach a pane's title: what is running in it,
             // and where it is running. Zellij watches both for the whole

@@ -42,6 +42,17 @@ pub fn tab_of_plugin(manifest: &PaneManifest, plugin_id: u32) -> Option<usize> {
     })
 }
 
+/// Which tab a terminal pane is in, found by its id. `None` until the manifest
+/// has caught up with the pane's existence.
+pub fn tab_of_pane(manifest: &PaneManifest, pane_id: u32) -> Option<usize> {
+    manifest.panes.iter().find_map(|(tab, panes)| {
+        panes
+            .iter()
+            .any(|pane| !pane.is_plugin && pane.id == pane_id)
+            .then_some(*tab)
+    })
+}
+
 /// Where the user is: the tab they are in, and the pane within it when that pane
 /// is one the sidebar lists (a focused plugin pane, the sidebar itself included,
 /// leaves the tab known and no pane focused).

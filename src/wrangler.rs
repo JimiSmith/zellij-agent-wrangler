@@ -38,6 +38,16 @@ fn pipe(name: &str, payload: &str) {
         .status();
 }
 
+/// Milliseconds since the epoch, which is what orders one call for the user
+/// against another. Read here because this process sees each call exactly once,
+/// where every sidebar sees all of them.
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn read_stdin() -> String {
     let mut body = String::new();
     let _ = std::io::stdin().read_to_string(&mut body);
@@ -75,6 +85,12 @@ fn hook(agent: &str, event: &str) {
             let record = Agent::new(session, agent, &label(&payload.cwd, agent), pane());
             pipe(START_MESSAGE, &record.encode());
         }
+        // A call for the user carries the moment it was raised, which is what
+        // orders one call against another.
+        ATTENTION_MESSAGE => pipe(
+            ATTENTION_MESSAGE,
+            &format!("{}\t{}", session.as_str(), now()),
+        ),
         name => pipe(name, session.as_str()),
     }
 }

@@ -7,19 +7,24 @@ rests on, and what they cost to find.
 
 ## Where it stands
 
-Checkpoints 1 to 4 are done bar one item. The sidebar draws the session's real
+Checkpoints 1 to 6 are done bar one item. The sidebar draws the session's real
 tabs and panes, `Enter` and a click go to what a row points at, a sidebar leaves
 a tab it is alone in, `q` turns them all off for the session, and the sidebars of
 a session share one selection. The layout places every sidebar, including in
 tabs opened later. A pane running an agent is drawn as that agent, labelled with
 the directory it is working in, and goes back to being a pane when the agent
-ends.
+ends, and says whose turn it is: `○` mid-turn, `●` when it wants you, answered
+by going to its pane. The calls for the user are listed in the notification area
+at the foot, newest first, and opening one goes to where that agent is now.
 
 Left in checkpoint 3: turning the sidebar back on after `q`, which needs a
 zellij key binding rather than plugin code. Width sync was dropped by decision.
 
-Next is checkpoint 5, turn state: the rest of the hook events, which is a
-larger hook manifest and an indicator, not new machinery.
+Next is checkpoint 7: options as plugin configuration, sections mode, label
+modes, and distribution. The desktop notification waits for that, since it is
+the option that turns it on that is missing rather than the way to raise it -
+the hook client can run a command, and is the one process that sees each event
+once.
 
 ## How it is tested
 
@@ -42,8 +47,10 @@ dump-layout` answers structural questions (which tabs hold what) without any
 screen scraping, and `list-clients` says which pane holds the focus. The scripts
 doing this were session-scratch and are not in the repo.
 
-Two traps in that harness, both of which produced false results before they were
-noticed: a capture must be cumulative from the start of the session rather than
+Three traps in that harness, each of which produced a false result before it was
+noticed. A shell redirection written to discard a stream can fail to:
+`>&2 2>/dev/null` points stdout at the *old* stderr before redirecting, so a
+test of "output that is thrown away" was testing the opposite. The other two: a capture must be cumulative from the start of the session rather than
 reset between steps, since a frame is only the cells that changed; and zellij
 writes each attribute as its own SGR sequence, so a replay has to accumulate
 attributes rather than replace them.
@@ -149,6 +156,19 @@ rather than swallowing them, so the sidebar works while locked. `zellij --layout
 X --session Y` attaches instead of creating; `--new-session-with-layout` creates.
 Closing a pane leaves the focus on the sidebar, not on the surviving terminal.
 
+**A plugin cannot make a host call while handling a message from the command
+line.** `zellij pipe` waits for the plugin to finish, and a synchronous request
+back into the server during that handling waits on the server in turn: the CLI
+blocks until zellij gives up ("Action CliPipe did not complete within 1s"), the
+answer comes back as an error, and the sidebar resolves against nothing. So
+where the user is is asked for on the events that move the focus, and remembered
+for anything a pipe triggers.
+
+**A plugin cannot ring the terminal bell.** A plugin pane owns a `Grid` and its
+output is parsed by it, so a printed `\x07` does set `ring_bell` — but `has_bell`
+is only implemented for terminal panes and defaults to `false` in the `Pane`
+trait, so nothing ever reads it. There is no bell command or action either.
+
 ## Decisions
 
 **Per-tab instances, no background owner.** Each sidebar resolves the whole
@@ -162,6 +182,13 @@ plugin.
 
 **Selection travels as an absolute key**, never a movement, so instances cannot
 drift apart.
+
+**The bell was dropped rather than chased.** Only a terminal pane's own output
+can ring one, and a hook has no way to reach that: its stdout and stderr are
+captured by whatever invoked it, and it runs with no controlling terminal, so
+`/dev/tty` fails with `ENXIO`. What remained was walking the process tree for an
+ancestor still attached to a pseudo-terminal, which works and is far too much
+apparatus for a beep. The notification area carries the same event.
 
 **The agent registry is held by every sidebar, not persisted.** A hook reaches
 all of them at once and each draws the whole session, so they agree without

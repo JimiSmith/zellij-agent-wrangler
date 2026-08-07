@@ -96,16 +96,29 @@ answer.
 
 ## Notifications
 
-- [ ] Terminal bell when an agent needs attention
+- [ ] ~~Terminal bell when an agent needs attention~~ (dropped)
 - [ ] Desktop notification for the same event
-- [ ] Notification area at the foot: newest first, one entry per session, capped
+- [x] Notification area at the foot: newest first, one entry per session, capped
 - [x] An entry is a title over its wrapped message, admitted only if it fits whole
 - [x] The area never grows past a quarter of the pane
-- [ ] Opening an entry jumps to the pane the agent is in now
-- [ ] Opening dismisses every entry naming that pane, and only those
-- [ ] An entry clears when you focus the pane it points at
-- [ ] An event raised by the pane you are in never appears
-- [ ] Each event fires the bell, the notification and the entry exactly once
+- [x] Opening an entry jumps to the pane the agent is in now
+- [x] Opening dismisses every entry naming that pane, and only those
+- [x] An entry clears when you focus the pane it points at
+- [x] An event raised by the pane you are in never appears
+- [x] Each event raises its entry exactly once
+
+The area is not kept, it is read off the registry: the entries are the agents
+calling for the user, newest call first, each described by the tab holding its
+pane and its own label. That makes every one of these a consequence rather than
+a rule. An entry is one per session because an agent is; opening one goes where
+the agent is now because the pane is read at the time; arriving answers the call,
+so opening dismisses exactly the calls raised from the pane landed on, and a call
+raised by the pane already focused is answered in the same pass that recorded it
+and never draws.
+
+The bell was dropped. A plugin cannot ring one, and reaching a terminal from the
+hook client turned out to need a search up the process tree for an ancestor
+still attached to one, which is far more machinery than a beep is worth.
 
 ## Hook installation
 
@@ -125,8 +138,8 @@ rather than installed again beside itself.
 ## Options
 
 - [ ] Every user-facing option the original exposes, as plugin configuration:
-      width, min/max width, width sync, label mode, sections, hook progress,
-      bell, desktop notification, notification area, auto-install hooks
+      width, min/max width, label mode, sections, hook progress, desktop
+      notification, notification area, auto-install hooks
 
 ## Distribution
 
@@ -158,7 +171,7 @@ instrumenting to tell whether it works.
       watch its row appear with its label, then go when the agent exits.
 - [x] **5. Turn state.** The rest of the hook events. Working while it works,
       attention when it wants you, cleared when you focus its pane.
-- [ ] **6. Notifications.** The area fills on attention, opening an entry lands
+- [x] **6. Notifications.** The area fills on attention, opening an entry lands
       on the agent's pane and dismisses the right entries. Bell and desktop
       notification beside it.
 - [ ] **7. The rest.** Options, sections mode, label modes, hook install,
@@ -186,7 +199,7 @@ meets the others at one agreed type.
 - [ ] **Phase 2.** Integration, serial: the reducer, the live subscriptions,
       activation, the lifecycle. One owner, because this is where the three meet
       and where the plugin entry point is rewritten.
-- [ ] **Phase 3, in parallel.** Notifications and bell; options and
+- [ ] **Phase 3, in parallel.** Notifications; options and
       configuration; publishing the wasm and keeping it in step with the binary.
 
 Two rules that keep the parallel work parallel: the plugin entry point belongs

@@ -127,7 +127,10 @@ pub enum RowKey {
     Tab(usize),
     Pane(u32),
     Agent(SessionId),
-    Notification(usize),
+    /// An entry in the notification area. It names the same session an agent
+    /// row does, and is a separate kind so that opening the entry can do more
+    /// than selecting the agent does.
+    Notification(SessionId),
 }
 
 impl RowKey {
@@ -138,7 +141,7 @@ impl RowKey {
             RowKey::Tab(position) => format!("tab:{position}"),
             RowKey::Pane(id) => format!("pane:{id}"),
             RowKey::Agent(session) => format!("agent:{}", session.as_str()),
-            RowKey::Notification(index) => format!("notification:{index}"),
+            RowKey::Notification(session) => format!("notification:{}", session.as_str()),
         }
     }
 
@@ -150,7 +153,7 @@ impl RowKey {
             "tab" => value.parse().ok().map(RowKey::Tab),
             "pane" => value.parse().ok().map(RowKey::Pane),
             "agent" => SessionId::new(value).map(RowKey::Agent),
-            "notification" => value.parse().ok().map(RowKey::Notification),
+            "notification" => SessionId::new(value).map(RowKey::Notification),
             _ => None,
         }
     }
@@ -196,6 +199,9 @@ pub enum RowContent {
 /// that raised it, and the message describing where it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notification {
+    /// The agent session this entry points at, which is what opening it goes
+    /// to and what stops the same session being listed twice.
+    pub session: SessionId,
     pub agent: String,
     pub color: Option<NamedColor>,
     pub message: String,
@@ -244,7 +250,7 @@ mod tests {
             RowKey::Tab(12),
             RowKey::Pane(7),
             RowKey::Agent(SessionId::new("9f3c-1a").unwrap()),
-            RowKey::Notification(2),
+            RowKey::Notification(SessionId::new("9f3c-1a").unwrap()),
         ] {
             assert_eq!(RowKey::decode(&key.encode()), Some(key));
         }

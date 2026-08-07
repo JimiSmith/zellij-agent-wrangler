@@ -413,8 +413,8 @@ pub fn wrap(text: &str, field: usize) -> Vec<String> {
 /// of its message.
 /// Every line carries the entry's own key, so a click anywhere in it lands on
 /// the same thing.
-pub fn notification_rows(entry: &Notification, index: usize, width: usize) -> Vec<Row> {
-    let key = RowKey::Notification(index);
+pub fn notification_rows(entry: &Notification, width: usize) -> Vec<Row> {
+    let key = RowKey::Notification(entry.session.clone());
     let mut rows = vec![Row::new(RowContent::NotificationTitle {
         title: entry.agent.clone(),
         color: entry.color,
