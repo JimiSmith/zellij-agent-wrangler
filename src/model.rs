@@ -127,6 +127,11 @@ pub enum RowKey {
     Tab(usize),
     Pane(u32),
     Agent(SessionId),
+    /// The same session as [`RowKey::Agent`], drawn a second time under the
+    /// agent it belongs to rather than under the tab it is in. It is a kind of
+    /// its own because a key has to name one row: two rows sharing one would
+    /// both be drawn selected, and the selection could never reach the second.
+    Section(SessionId),
     /// An entry in the notification area. It names the same session an agent
     /// row does, and is a separate kind so that opening the entry can do more
     /// than selecting the agent does.
@@ -141,6 +146,7 @@ impl RowKey {
             RowKey::Tab(position) => format!("tab:{position}"),
             RowKey::Pane(id) => format!("pane:{id}"),
             RowKey::Agent(session) => format!("agent:{}", session.as_str()),
+            RowKey::Section(session) => format!("section:{}", session.as_str()),
             RowKey::Notification(session) => format!("notification:{}", session.as_str()),
         }
     }
@@ -153,6 +159,7 @@ impl RowKey {
             "tab" => value.parse().ok().map(RowKey::Tab),
             "pane" => value.parse().ok().map(RowKey::Pane),
             "agent" => SessionId::new(value).map(RowKey::Agent),
+            "section" => SessionId::new(value).map(RowKey::Section),
             "notification" => SessionId::new(value).map(RowKey::Notification),
             _ => None,
         }
@@ -250,6 +257,7 @@ mod tests {
             RowKey::Tab(12),
             RowKey::Pane(7),
             RowKey::Agent(SessionId::new("9f3c-1a").unwrap()),
+            RowKey::Section(SessionId::new("9f3c-1a").unwrap()),
             RowKey::Notification(SessionId::new("9f3c-1a").unwrap()),
         ] {
             assert_eq!(RowKey::decode(&key.encode()), Some(key));

@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
+use crate::command::words;
+
 /// Which of each agent's events call which action, embedded so the installed
 /// binary carries it.
 const MANIFEST_JSON: &str = include_str!("../hooks-manifest.json");
@@ -53,43 +55,6 @@ fn shell_quote(text: &str) -> String {
 /// The command a hook runs: this executable's `hook <agent> <action>`.
 fn hook_command(exe: &str, agent: &str, action: &str) -> String {
     format!("{} hook {agent} {action}", shell_quote(exe))
-}
-
-/// Split a command line into the words a POSIX shell would run it as: single
-/// quotes take everything literally, double quotes the same for this purpose,
-/// and unquoted whitespace separates.
-///
-/// A path with a space in it is written quoted, so reading one back has to undo
-/// the same quoting rather than split on whitespace.
-fn words(command: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut started = false;
-    let mut quote: Option<char> = None;
-    for c in command.chars() {
-        match (quote, c) {
-            (Some(open), c) if c == open => quote = None,
-            (Some(_), c) => word.push(c),
-            (None, '\'') | (None, '"') => {
-                quote = Some(c);
-                started = true;
-            }
-            (None, c) if c.is_whitespace() => {
-                if started {
-                    words.push(std::mem::take(&mut word));
-                    started = false;
-                }
-            }
-            (None, c) => {
-                word.push(c);
-                started = true;
-            }
-        }
-    }
-    if started {
-        words.push(word);
-    }
-    words
 }
 
 /// Whether a hook command is one this installer owns for `agent`, so that it is

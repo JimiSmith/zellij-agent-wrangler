@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "zellij-agent-wrangler"
 path = "src/main.rs"
+required-features = ["plugin"]
 test = false
 
 # The hook client runs as an ordinary process beside the agent that invokes it.
@@ -22,12 +23,17 @@ name = "zellij-wrangler"
 path = "src/wrangler.rs"
 required-features = ["native"]
 
+# Two halves that share a wire format and nothing else. Both are on by default
+# so `cargo test` covers the whole crate; each build turns off the half it does
+# not want. Off wasm, `zellij-tile` brings in the whole of `zellij-utils` -
+# curl, openssl, rusqlite - which the hook client has no use for.
 [features]
-default = ["native"]
+default = ["native", "plugin"]
 native = ["dep:serde_json"]
+plugin = ["dep:zellij-tile"]
 
 [dependencies]
-zellij-tile = "0.44.3"
+zellij-tile = { version = "0.44.3", optional = true }
 serde_json = { version = "1", optional = true, features = ["preserve_order"] }
 
 [profile.release]

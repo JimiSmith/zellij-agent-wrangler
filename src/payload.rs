@@ -14,6 +14,9 @@ use serde_json::Value;
 pub struct Payload {
     pub session_id: String,
     pub cwd: String,
+    /// Where the agent is writing the conversation, which is the only place it
+    /// says what it has decided to call the session.
+    pub transcript_path: String,
     pub recoverable: Option<bool>,
 }
 
@@ -30,21 +33,19 @@ impl Payload {
         Payload {
             session_id: first_nonempty(&["session_id", "sessionId"]),
             cwd: first_nonempty(&["cwd"]),
+            transcript_path: first_nonempty(&["transcript_path", "transcriptPath"]),
             recoverable: value.get("recoverable").and_then(Value::as_bool),
         }
     }
 }
 
-/// What to call an agent working in `cwd`: the directory's own name.
-///
-/// A path with no final component (the root, or nothing at all) has no name to
-/// take, and the agent is labelled by what it is instead.
-pub fn label(cwd: &str, agent: &str) -> String {
+/// The name of the directory an agent is working in, which is empty for a path
+/// with no final component: the root, or nothing at all.
+pub fn dir(cwd: &str) -> String {
     std::path::Path::new(cwd)
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| agent.to_string())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -59,6 +60,7 @@ mod tests {
             Payload {
                 session_id: "abc".to_string(),
                 cwd: "/home/u/repo".to_string(),
+                transcript_path: "/t.jsonl".to_string(),
                 recoverable: None,
             }
         );
@@ -106,14 +108,14 @@ mod tests {
     }
 
     #[test]
-    fn a_label_is_the_working_directorys_own_name() {
-        assert_eq!(label("/home/u/repo", "claude"), "repo");
-        assert_eq!(label("/home/u/repo/", "claude"), "repo");
+    fn the_directory_is_its_own_name() {
+        assert_eq!(dir("/home/u/repo"), "repo");
+        assert_eq!(dir("/home/u/repo/"), "repo");
     }
 
     #[test]
-    fn a_path_with_no_name_leaves_the_agent_labelled_by_what_it_is() {
-        assert_eq!(label("/", "claude"), "claude");
-        assert_eq!(label("", "copilot"), "copilot");
+    fn a_path_with_no_name_yields_none() {
+        assert_eq!(dir("/"), "");
+        assert_eq!(dir(""), "");
     }
 }

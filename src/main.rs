@@ -17,10 +17,11 @@ use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
 use zellij_agent_wrangler::agents::{
-    self, Agent, Registry, Turn, ATTENTION_MESSAGE, END_MESSAGE, START_MESSAGE, SYNC_MESSAGE,
+    self, Agent, Record, Registry, ATTENTION_MESSAGE, END_MESSAGE, START_MESSAGE, SYNC_MESSAGE,
     SYNC_REQUEST_MESSAGE, WORKING_MESSAGE,
 };
 use zellij_agent_wrangler::model::{Notification, Row, RowContent, RowKey, SessionId};
+use zellij_agent_wrangler::options::Options;
 use zellij_agent_wrangler::render::{notification_body_field, notification_rows, paint, wrap};
 use zellij_agent_wrangler::session::{self, Focus};
 use zellij_agent_wrangler::tree;
@@ -36,6 +37,10 @@ const SELECTION_MESSAGE: &str = "wrangler:selection";
 /// The message that turns the sidebar off for the whole session.
 const OFF_MESSAGE: &str = "wrangler:off";
 
+/// The message saying the agent hooks have been installed, so that the sidebars
+/// asked to install them do it once between them rather than once each.
+const INSTALLED_MESSAGE: &str = "wrangler:hooks-installed";
+
 /// What a refused sidebar says beneath its heading.
 const REFUSED: &str = "the sidebar cannot read the session";
 
@@ -44,6 +49,8 @@ const NOTIFICATIONS_HEADING: &str = "notifications";
 
 #[derive(Default)]
 struct State {
+    /// What the layout asked this sidebar for.
+    options: Options,
     tabs: Vec<TabInfo>,
     panes: PaneManifest,
     /// The tree as it was last resolved, which is what the selection and the
@@ -78,6 +85,13 @@ struct State {
     /// Waiting for company first makes the rule "leave when the last pane goes"
     /// rather than "leave when there is none yet".
     had_company: bool,
+    /// Whether the agent hooks have been installed by one of the sidebars of
+    /// this session, so that the rest leave the config alone.
+    installed: bool,
+    /// Whether a hook client of another version has reported to this sidebar.
+    /// It stays set: the client that reported is installed, and will keep
+    /// reporting until it is replaced.
+    mismatched: bool,
 }
 
 register_plugin!(State);
@@ -99,14 +113,17 @@ fn focus() -> Option<Focus> {
     }
 }
 
-/// What the pane says once the sidebar has been refused what it needs. Refusal
-/// is an answer, and an empty pane would read as a broken sidebar rather than
-/// as one that was turned away.
-fn refused_rows(width: usize) -> Vec<Row> {
+/// What the sidebar says when the hook client reporting to it was built against
+/// another version of the record format.
+const MISMATCH: &str = "the hook client is a different version; install both again";
+
+/// A heading over a wrapped message: how the sidebar says something about
+/// itself, where every other row says something about the session.
+fn notice(heading: &str, text: &str, width: usize) -> Vec<Row> {
     let mut rows = vec![Row::new(RowContent::Header {
-        text: "no permission".to_string(),
+        text: heading.to_string(),
     })];
-    for line in wrap(REFUSED, notification_body_field(width)) {
+    for line in wrap(text, notification_body_field(width)) {
         rows.push(Row::new(RowContent::NotificationBody { text: line }));
     }
     rows
@@ -153,11 +170,70 @@ impl State {
         }
         let mut resolved = session::session(&self.tabs, &self.panes, focus);
         self.leave_if_alone(&resolved);
+        self.install_hooks();
         agents::place(&mut resolved, &self.registry);
-        let rows = tree::build_tree(&resolved);
+        let rows = tree::build_tree(&resolved, &self.options);
         let changed = rows != self.rows;
         self.rows = rows;
         changed
+    }
+
+    /// Whether zellij has answered this sidebar's request for what it needs.
+    /// Nothing that reaches outside the pane is attempted before it has.
+    fn allowed(&self) -> bool {
+        self.permission == Some(PermissionStatus::Granted)
+    }
+
+    /// Whether this sidebar is the one in the tab the user is in.
+    ///
+    /// Every sidebar of a session hears every message, so anything that must
+    /// happen once needs a rule every sidebar reads the same way and only one
+    /// answers to. Being where the user is is that rule: exactly one tab is
+    /// active, and the sidebar in it is the one whose idea of the focus is
+    /// current.
+    fn is_where_the_user_is(&self) -> bool {
+        match session::tab_of_plugin(&self.panes, self.plugin_id) {
+            Some(mine) => self.focus.map(|focus| focus.tab) == Some(mine),
+            None => false,
+        }
+    }
+
+    /// Install the agent hooks, if the sidebar was asked to and no sidebar of
+    /// this session has yet.
+    ///
+    /// Side effect: runs the hook client, which rewrites each agent's config.
+    /// The others are told rather than left to work it out, because two of them
+    /// installing at once would be two processes writing one file.
+    fn install_hooks(&mut self) {
+        let Some(client) = self.options.install_hooks.clone() else {
+            return;
+        };
+        if self.installed || !self.allowed() || !self.is_where_the_user_is() {
+            return;
+        }
+        self.installed = true;
+        run_command(&[&client, "install-hooks"], BTreeMap::new());
+        pipe_message_to_plugin(MessageToPlugin::new(INSTALLED_MESSAGE));
+    }
+
+    /// Raise a desktop notification for a call an agent has just made.
+    ///
+    /// Side effect: runs the command the options name, with the agent's name
+    /// and where it is as its last two arguments.
+    ///
+    /// It is raised for every call, whichever pane is focused, because a
+    /// notification is for the user who is not looking at the terminal at all
+    /// and pane focus says nothing about that.
+    fn raise(&self, agent: &Agent) {
+        let Some(notifier) = &self.options.desktop else {
+            return;
+        };
+        if !self.allowed() || !self.is_where_the_user_is() {
+            return;
+        }
+        let command = notifier.command(&agent.agent, &self.where_it_is(agent));
+        let command: Vec<&str> = command.iter().map(String::as_str).collect();
+        run_command(&command, BTreeMap::new());
     }
 
     /// Close this sidebar when the tab holding it has nothing else left.
@@ -218,17 +294,22 @@ impl State {
             .and_then(|position| self.tabs.iter().find(|tab| tab.position == position))
             .map(|tab| tab.name.clone())
             .unwrap_or_default();
-        match (tab.is_empty(), agent.label.is_empty()) {
-            (true, _) => agent.label.clone(),
+        let label = agent.label(self.options.label);
+        match (tab.is_empty(), label.is_empty()) {
+            (true, _) => label,
             (false, true) => tab,
-            (false, false) => format!("{tab} · {}", agent.label),
+            (false, false) => format!("{tab} · {label}"),
         }
     }
 
     /// The notification area for a pane `width` columns wide, given `cap` lines
     /// to fill. Empty when that leaves no room for the heading and one whole
-    /// entry beside it.
+    /// entry beside it, and when the sidebar was asked not to list the calls at
+    /// all.
     fn notification_area(&self, width: usize, cap: usize) -> Vec<Row> {
+        if !self.options.notifications {
+            return Vec::new();
+        }
         let mut rows = vec![Row::new(RowContent::Header {
             text: NOTIFICATIONS_HEADING.to_string(),
         })];
@@ -247,9 +328,16 @@ impl State {
 
     /// Every line of the pane, in the order it is drawn and navigated: the tree,
     /// then enough blank padding to hold the notification area at the foot.
+    ///
+    /// A sidebar being reported to by a hook client of another version leads
+    /// with saying so, since that is why the tree beneath it is missing rows.
     fn lines(&self, width: usize, height: usize) -> Vec<Row> {
         let area = self.notification_area(width, height / 4);
-        let mut rows = self.rows.clone();
+        let mut rows = match self.mismatched {
+            true => notice("out of step", MISMATCH, width),
+            false => Vec::new(),
+        };
+        rows.extend(self.rows.iter().cloned());
         rows.truncate(height.saturating_sub(area.len()));
         rows.resize(
             height.saturating_sub(area.len()),
@@ -273,7 +361,9 @@ impl State {
             Some(RowKey::Tab(position)) => switch_tab_to(position as u32 + 1),
             // Opening an entry goes where the agent is now. Arriving is what
             // answers it, along with every other call raised from that pane.
-            Some(RowKey::Agent(session)) | Some(RowKey::Notification(session)) => {
+            Some(RowKey::Agent(session))
+            | Some(RowKey::Section(session))
+            | Some(RowKey::Notification(session)) => {
                 if let Some(id) = self.registry.get(&session).and_then(|agent| agent.pane) {
                     focus_pane_with_id(PaneId::Terminal(id), false, false);
                 }
@@ -312,29 +402,40 @@ impl State {
 
     /// Take in what an agent's hooks reported, and say whether the tree changed
     /// because of it.
+    ///
+    /// Every event but the last carries the whole record, so what a session
+    /// calls itself is taken in again each time and a label follows the session
+    /// while it runs. The message name says only which event it was: announcing
+    /// a session says nothing about the turn it is in the middle of, where the
+    /// rest say exactly that.
     fn hook(&mut self, message: &PipeMessage) -> bool {
         let payload = message.payload.as_deref().unwrap_or_default();
-        let changed = match message.name.as_str() {
-            START_MESSAGE => Agent::decode(payload)
-                .map(|agent| self.registry.start(agent))
-                .unwrap_or(false),
-            END_MESSAGE => SessionId::new(payload)
+        if message.name == END_MESSAGE {
+            let ended = SessionId::new(payload)
                 .map(|session| self.registry.end(&session))
-                .unwrap_or(false),
-            WORKING_MESSAGE => SessionId::new(payload)
-                .map(|session| self.registry.mark(&session, Turn::Working, 0))
-                .unwrap_or(false),
+                .unwrap_or(false);
+            return ended && self.resolve();
+        }
+        let record = match Agent::decode(payload) {
+            Record::Known(agent) => agent,
+            // A client of another version is worth saying so about: it is why
+            // an agent that is plainly running has no row, and no amount of
+            // looking at the sidebar would otherwise explain it.
+            Record::Foreign(_) => {
+                let known = std::mem::replace(&mut self.mismatched, true);
+                return !known;
+            }
+            Record::None => return false,
+        };
+        let changed = match message.name.as_str() {
+            START_MESSAGE => self.registry.start(record),
+            WORKING_MESSAGE => self.registry.report(record),
             // A call for the user carries the moment it was raised, so that
             // every sidebar lists the calls in the same order.
-            ATTENTION_MESSAGE => match payload.split_once('\t') {
-                Some((session, at)) => SessionId::new(session)
-                    .map(|session| {
-                        self.registry
-                            .mark(&session, Turn::Attention, at.parse().unwrap_or(0))
-                    })
-                    .unwrap_or(false),
-                None => false,
-            },
+            ATTENTION_MESSAGE => {
+                self.raise(&record);
+                self.registry.report(record)
+            }
             _ => false,
         };
         // A record only reaches the tree through the pane it names, so a change
@@ -344,15 +445,22 @@ impl State {
 }
 
 impl ZellijPlugin for State {
-    fn load(&mut self, _configuration: BTreeMap<String, String>) {
+    fn load(&mut self, configuration: BTreeMap<String, String>) {
+        self.options = Options::read(&configuration);
         self.plugin_id = get_plugin_ids().plugin_id;
         // Reading the session's tabs and panes, and going to what a row points
-        // at: the sidebar asks for nothing it would not use.
-        request_permission(&[
+        // at: the sidebar asks for nothing it would not use. Running a command
+        // is asked for only by a sidebar configured to run one, so turning the
+        // options that do off is also turning that question off.
+        let mut permissions = vec![
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
             PermissionType::MessageAndLaunchOtherPlugins,
-        ]);
+        ];
+        if self.options.runs_commands() {
+            permissions.push(PermissionType::RunCommands);
+        }
+        request_permission(&permissions);
         subscribe(&[
             EventType::Key,
             EventType::Mouse,
@@ -445,6 +553,10 @@ impl ZellijPlugin for State {
                 close_self();
                 false
             }
+            INSTALLED_MESSAGE => {
+                self.installed = true;
+                false
+            }
             SELECTION_MESSAGE => match message.payload.as_deref().and_then(RowKey::decode) {
                 Some(key) => {
                     self.selected = Some(key);
@@ -475,7 +587,7 @@ impl ZellijPlugin for State {
 
     fn render(&mut self, rows: usize, cols: usize) {
         if self.permission == Some(PermissionStatus::Denied) {
-            let rows: Vec<String> = refused_rows(cols)
+            let rows: Vec<String> = notice("no permission", REFUSED, cols)
                 .iter()
                 .map(|row| paint(row, cols, false))
                 .collect();

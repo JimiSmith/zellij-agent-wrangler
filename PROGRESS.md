@@ -7,37 +7,44 @@ rests on, and what they cost to find.
 
 ## Where it stands
 
-Checkpoints 1 to 6 are done bar one item. The sidebar draws the session's real
-tabs and panes, `Enter` and a click go to what a row points at, a sidebar leaves
-a tab it is alone in, `q` turns them all off for the session, and the sidebars of
+Every checkpoint is done bar one item. The sidebar draws the session's real tabs
+and panes, `Enter` and a click go to what a row points at, a sidebar leaves a
+tab it is alone in, `q` turns them all off for the session, and the sidebars of
 a session share one selection. The layout places every sidebar, including in
 tabs opened later. A pane running an agent is drawn as that agent, labelled with
-the directory it is working in, and goes back to being a pane when the agent
+what the session calls itself, and goes back to being a pane when the agent
 ends, and says whose turn it is: `○` mid-turn, `●` when it wants you, answered
 by going to its pane. The calls for the user are listed in the notification area
-at the foot, newest first, and opening one goes to where that agent is now.
+at the foot, newest first, opening one goes to where that agent is now, and a
+desktop notification carries the same event out of the terminal. The layout
+configures all of it, sections mode included. Both halves are released together
+and installed by one script.
 
 Left in checkpoint 3: turning the sidebar back on after `q`, which needs a
-zellij key binding rather than plugin code. Width sync was dropped by decision.
+zellij key binding rather than plugin code. Width sync was dropped by decision,
+and so was the bell.
 
-Next is checkpoint 7: options as plugin configuration, sections mode, label
-modes, and distribution. The desktop notification waits for that, since it is
-the option that turns it on that is missing rather than the way to raise it -
-the hook client can run a command, and is the one process that sees each event
-once.
+What is left is not a checkpoint but a list: color, which the original takes
+from each session's own and matches to the Claude theme; the record-to-pane
+rules the original has for a session whose pane it cannot take at face value
+(pid ancestry, title matching); and the selection falling back to a nearby row
+rather than to the first one when the row it was on goes.
 
 ## How it is tested
 
 `cargo test` covers everything that does not call zellij: the row model, the
 paint, the reading of tabs and panes into it, the agent registry and its wire
-format, and the reading of a hook body. That is why the plugin's own logic lives
-in `src/lib.rs` and the plugin in a wasm-only bin. Host functions do not link on
-the host target, so anything calling them cannot be unit tested.
+format, the options, the reading of a hook body, and the reading of a title off
+disk. That is why the plugin's own logic lives in `src/lib.rs` and the plugin in
+a wasm-only bin. Host functions do not link on the host target, so anything
+calling them cannot be unit tested.
 
-The crate's `native` feature is what separates the two halves. It is on by
-default, so `cargo test` covers the whole crate; the wasm is built with
-`--no-default-features`, which is what keeps the hook client and the JSON it
-reads out of the plugin.
+Two features separate the halves. `native` carries the hook client, the JSON it
+reads and the installer; `plugin` carries the one module that reads zellij's own
+types, and with it the `zellij-tile` dependency. Both are on by default so
+`cargo test` covers the whole crate, and each build turns off the half it does
+not want. Bare `cargo build` on the host is the one command that does not work:
+it tries to link the plugin bin, whose host functions exist only inside zellij.
 
 Everything else is checked by driving a real session. `zellij action
 dump-screen` returns nothing for plugin panes, so the only way to see what a
@@ -112,6 +119,20 @@ what gives a runtime tab the same shape: it needs a pane, not a placeholder.
 **A plugin cannot set its pane's size.** Tiled panes resize by `Increase` and
 `Decrease` steps only.
 
+**A plugin's configuration is the child nodes of its `plugin` block**, plus any
+properties on the block itself, with `location`, `path` and
+`_allow_exec_host_cmd` reserved. Every value arrives as a string whatever it was
+written as, so `sections true` and `sections "true"` are the same thing
+(`parse_plugin_user_configuration` in `kdl_layout_parser.rs`). Bare arguments
+are dropped rather than read as flags.
+
+**A remote plugin is cached under the last segment of its url, and a name
+already there is never fetched again.** `Downloader::download` returns early on
+`file_path.exists()`, and the name is `parse_name`'s last path segment
+(`downloader.rs`). Two releases of a plugin under one file name are one file: a
+published wasm has to carry its version in its name for an update to arrive at
+all.
+
 **A pane's title is never reported, but the two things behind it are.**
 `PaneUpdate` and `TabUpdate` come from `log_and_report_session_state`, which the
 screen calls when the session's *shape* changes; a program renaming its own pane
@@ -164,12 +185,48 @@ answer comes back as an error, and the sidebar resolves against nothing. So
 where the user is is asked for on the events that move the focus, and remembered
 for anything a pipe triggers.
 
+What is safe there is a command that wants no answer back. `run_command` posts
+the command and reads nothing, so raising a desktop notification while handling
+a hook's pipe does not wait on anything: it is the *reply* that deadlocks, not
+the crossing. Measured, not reasoned about.
+
+**Asking for a permission that was not asked for before asks the user again.**
+The cache in `~/.cache/zellij/permissions.kdl` holds the set that was granted
+against the plugin's path, so a build that adds `RunCommands` prompts on a
+machine that had already answered. That is the price of the options that run
+commands, and it is why the sidebar asks for that one only when an option uses
+it.
+
 **A plugin cannot ring the terminal bell.** A plugin pane owns a `Grid` and its
 output is parsed by it, so a printed `\x07` does set `ring_bell` — but `has_bell`
 is only implemented for terminal panes and defaults to `false` in the `Pane`
 trait, so nothing ever reads it. There is no bell command or action either.
 
 ## Decisions
+
+**One sidebar acts for all of them: the one in the tab you are in.** Every
+sidebar hears every pipe, so anything that must happen once needs a rule they
+all read the same way and only one answers to. Being where the user is is that
+rule, and it needs nothing sent between them: exactly one tab is active, and the
+sidebar in it is the one whose idea of the focus is current. It is what raises
+one desktop notification per call rather than one per tab, and what installs the
+hooks once. Installing also broadcasts that it has happened, because that one is
+not idempotent in the way that matters: two processes writing one settings file
+is a race whatever each of them writes.
+
+**What a session is called by travels; what its row says does not.** The client
+reports the directory, the title and the teammate name; composing a label out of
+them is the sidebar's, so the label option changes every row at once and no
+agent has to report itself again. It is also why every event carries the whole
+record rather than naming a session already filed: a title taken on mid-session
+then arrives on the next event of any kind, and a session whose start nobody
+heard is filed by whichever event is heard first.
+
+**Every record says which format it is written in.** The halves are installed
+and updated separately, so one can be older than the other. Without the format
+an out-of-date client's records would simply fail to parse and the symptom would
+be agents that never appear; with it the sidebar can say what is wrong at the
+top of the pane.
 
 **Per-tab instances, no background owner.** Each sidebar resolves the whole
 session for itself; only the selection is shared, by broadcast. A headless owner

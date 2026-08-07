@@ -1,0 +1,85 @@
+name: release
+
+# The two halves are released together and named for the same tag. That is what
+# lets a layout pin the plugin to the version of the client that is installed:
+# zellij caches a downloaded plugin under the last segment of its url and never
+# re-fetches a name it already holds, so a wasm named for its version is the only
+# kind an update can actually replace.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add clippy rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  release:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Open the release this tag names
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --verify-tag \
+              --title "$GITHUB_REF_NAME" --generate-notes
+
+  plugin:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add wasm32-wasip1
+      - name: Build the plugin
+        run: |
+          cargo build --release --locked --target wasm32-wasip1 \
+            --no-default-features --features plugin --bin zellij-agent-wrangler
+      - name: Attach it, named for this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp target/wasm32-wasip1/release/zellij-agent-wrangler.wasm \
+            "zellij-agent-wrangler-$GITHUB_REF_NAME.wasm"
+          gh release upload "$GITHUB_REF_NAME" \
+            "zellij-agent-wrangler-$GITHUB_REF_NAME.wasm" --clobber
+
+  client:
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+          - runner: macos-13
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add ${{ matrix.target }}
+      - name: Build the hook client
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }} \
+            --no-default-features --features native --bin zellij-wrangler
+      - name: Attach it, named for this tag and its platform
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          asset="zellij-wrangler-$GITHUB_REF_NAME-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/zellij-wrangler" "$asset"
+          gh release upload "$GITHUB_REF_NAME" "$asset" --clobber

@@ -3,9 +3,8 @@
 A zellij sidebar pane listing tabs, their panes as a tree, and the agent
 sessions running in them.
 
-**This is a port in progress.** The tree and the agent rows are live; turn
-state, notifications and the options are not. `FEATURES.md` is the list, and
-`PROGRESS.md` is what the design rests on.
+`FEATURES.md` is the list of what it does and what is left; `PROGRESS.md` is
+what the design rests on.
 
 ```
 ▌ 1: wrangler
@@ -20,7 +19,36 @@ state, notifications and the options are not. `FEATURES.md` is the list, and
   └─ 2:   k9s
 ```
 
-## Running it
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JimiSmith/zellij-agent-wrangler/main/install.sh | sh
+```
+
+That installs the hook client, wires it into each agent's hooks, and prints the
+layout block for the plugin that goes with it. Nothing downloads the plugin:
+zellij fetches it from the url in that block and holds it.
+
+Put the block in your layout inside both `default_tab_template` and
+`new_tab_template`, beside `children`:
+
+```kdl
+pane size=32 borderless=true {
+    plugin location="https://github.com/JimiSmith/zellij-agent-wrangler/releases/download/v0.1.0/zellij-agent-wrangler-v0.1.0.wasm"
+}
+```
+
+Updating is running the script again and changing the version in that url to
+match. The two halves are released together and named for the same tag, and each
+record the client sends says which format it is written in, so a sidebar being
+reported to by a client of another version says so at the top of the pane
+instead of quietly drawing no agents.
+
+The url is also how zellij tells one build from another: it caches a downloaded
+plugin under the last part of the url and never fetches that name again, which
+is why the version is in the file name.
+
+## Building it
 
 ```bash
 rustup target add wasm32-wasip1
@@ -28,19 +56,24 @@ rustup target add wasm32-wasip1
 cargo test               # everything that does not call zellij, on the host target
 ```
 
-Two things are built: the plugin, which is the crate without its `native`
-feature, and `wrangler`, the hook client the agents invoke. `dev.sh` prints the
-client's path.
+Two things are built, each without the other's half of the crate: the plugin
+(`--features plugin`), and `zellij-wrangler`, the hook client the agents invoke
+(`--features native`). `dev.sh` prints the client's path. The split is what
+keeps zellij's own crate out of the client, which off wasm would bring in curl,
+openssl and the rest of `zellij-utils`: 9 crates rather than 250.
 
 ## Agent rows
 
 An agent appears in the tree once its own lifecycle hooks call the client, which
-reports the pane it was invoked in. Install those hooks with:
+reports the pane it was invoked in. The install script does this for you; to do it by hand, or after moving the
+binary:
 
 ```bash
-./target/debug/zellij-wrangler install-hooks            # or: claude, copilot
-./target/debug/zellij-wrangler install-hooks --uninstall
+zellij-wrangler install-hooks            # or: claude, copilot
+zellij-wrangler install-hooks --uninstall
 ```
+
+Or have the sidebar do it on load, with `install_hooks` below.
 
 It writes the absolute path of the binary you ran, so it works from wherever
 that is; run it again after moving the binary. Claude's hooks are merged into
@@ -54,8 +87,10 @@ The hooks cover every agent you start anywhere; the client does nothing at all
 outside zellij, so sessions elsewhere are unaffected.
 
 Start an agent in a pane and that pane's row becomes the agent's, labelled with
-the directory it is working in. A pane running two agents contributes a row
-each. `○` at the right edge says the agent is mid-turn and `●` says it wants
+whatever the session has decided to call itself and falling back to the
+directory it is working in until it has a name. A teammate is labelled
+`@name - title`, so it is never mistaken for a session of its own. A pane
+running two agents contributes a row each. `○` at the right edge says the agent is mid-turn and `●` says it wants
 you; going to its pane answers the second and leaves the first alone.
 
 The agents of a session are known to every sidebar in it, and a sidebar opening
@@ -97,6 +132,47 @@ Every tab has one, including tabs opened later: the layout declares a
 Nerd Font glyphs are used for the pane and agent icons, so the terminal needs a
 patched font to draw them.
 
+## Options
+
+Options go in the plugin's own block in the layout, and every one of them is
+shown here at its default:
+
+```kdl
+plugin location="..." {
+    label "name"                 // agent rows: 'name' (session title, falling
+                                 // back to the directory) | 'dir'
+    sections false               // a block per agent below the tree
+    turn_state true              // '○' mid-turn and '●' when it wants you
+    notifications true           // the calls for the user, at the foot
+    desktop_notification "off"   // 'off' | 'on' (notify-send) | a command line
+    install_hooks "off"          // 'off' | 'on' | a path to the hook client
+}
+```
+
+Put the same block in both templates: a tab opened later is built from
+`new_tab_template`, and takes its options from there.
+
+A value an option does not recognise leaves that option at its default, so a
+typo costs you the setting rather than the sidebar.
+
+`sections on` draws the tree and then the same sessions again, gathered under
+the agent running them (`CLAUDE`, `COPILOT`, ...) rather than under the tab
+they are in. It only groups: a tab, a pane and an agent are drawn exactly the
+same wherever they appear.
+
+`desktop_notification` and `install_hooks` are the only two things the sidebar
+runs a command for, and they are the reason it would ask for zellij's
+`RunCommands` permission; with both off it never does. Turned on, one sidebar
+acts and the others stand down - whichever is in the tab you are in, which every
+sidebar works out the same way. The notification takes the agent's name and
+`<tab> · <label>` as its last two arguments, which is what `notify-send` wants.
+It is raised for every call whatever pane is focused, since sitting in a pane
+says nothing about whether the terminal is on screen; the `●` and the entry at
+the foot still clear when you get to the agent.
+
+`install_hooks "on"` runs `zellij-wrangler` from your `PATH`. Name a path
+instead if it is not there.
+
 ## What it demonstrates
 
 - **The paint.** `render.rs` chooses every glyph that is not the literal name of
@@ -119,10 +195,16 @@ patched font to draw them.
   state is.
 - `render.rs` — the line drawn for a row, and the styling of its pieces.
 - `session.rs` — the shape of the session, read out of what zellij reports. The
-  only place zellij's types meet the sidebar's.
+  only place zellij's types meet the sidebar's, and the only module the `plugin`
+  feature gates.
 - `tree.rs` — the rows a session is drawn as.
 - `agents.rs` — the agent sessions, their wire format, and the panes they sit in.
+- `options.rs` — what the layout asks for, read into types.
+- `command.rs` — a command line written as one string, read into its words.
 - `payload.rs` — reading an agent's hook body. Native only.
+- `titles.rs` — what a session calls itself, read from the agent's own files.
+  Native only.
+- `install.rs` — writing the hooks into each agent's config. Native only.
 - `main.rs` — the plugin: the two regions, the nav order over them, and the
   event handling.
 - `wrangler.rs` — the hook client.

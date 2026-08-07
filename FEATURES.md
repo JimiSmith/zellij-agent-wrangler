@@ -13,7 +13,8 @@ this repo.
 - [x] `q` closes the sidebar
 - [x] The sidebar exits when its tab has no real panes left
 - [ ] A sidebar draws the session its own tab belongs to
-- [ ] Configurable width, clamped to a min and a max
+- [ ] ~~Configurable width, clamped to a min and a max~~ (the layout's, not the
+      sidebar's)
 - [ ] ~~A resize of one sidebar is adopted by the others~~ (dropped)
 - [x] The sidebars drawing one session share a selection
 
@@ -34,12 +35,24 @@ placeholder.
 - [x] Tabs, with their panes as children
 - [x] A pane running an agent is drawn as that agent instead of as a pane
 - [x] A pane hosting two agents contributes two rows
-- [ ] Sections mode: the tree, then a block per agent, the same rows regrouped
+- [x] Sections mode: the tree, then a block per agent, the same rows regrouped
 - [x] A pane's title follows the command and the directory running in it
-- [ ] Agent labels update live
+- [x] Agent labels update live
 - [x] Agent label from the working-directory basename
-- [ ] Agent label from the session title, when it has one
-- [ ] Teammates labelled `@name - title`
+- [x] Agent label from the session title, when it has one
+- [x] Teammates labelled `@name - title`
+
+A session's title is in neither agent's hook body, so the client reads it off
+disk: Claude's from the end of the transcript the body names, Copilot's from the
+workspace file it keeps per session. That is also what makes a label live
+without anything watching anything - an agent fires hooks throughout its turn,
+and every one of them carries the whole record, so a title taken on mid-session
+arrives on the next event of any kind.
+
+What the client reports is what a session is *called by* rather than what its
+row says: the directory, the title, and the teammate name. Composing those into
+a label is the sidebar's, which is why the label option changes every row at
+once with no agent reporting itself again.
 
 ## Drawing
 
@@ -59,7 +72,7 @@ placeholder.
 - [x] A click goes to the row it lands on
 - [x] `Enter` focuses the selected tab, pane or agent
 - [x] An agent's row takes you to the pane the agent is in
-- [ ] `Enter` on a notification opens it
+- [x] `Enter` on a notification opens it
 - [ ] The selection falls back sanely when the row it was on is gone
 
 ## The agent registry
@@ -97,7 +110,7 @@ answer.
 ## Notifications
 
 - [ ] ~~Terminal bell when an agent needs attention~~ (dropped)
-- [ ] Desktop notification for the same event
+- [x] Desktop notification for the same event
 - [x] Notification area at the foot: newest first, one entry per session, capped
 - [x] An entry is a title over its wrapped message, admitted only if it fits whole
 - [x] The area never grows past a quarter of the pane
@@ -116,6 +129,14 @@ so opening dismisses exactly the calls raised from the pane landed on, and a cal
 raised by the pane already focused is answered in the same pass that recorded it
 and never draws.
 
+The desktop notification is the one thing here that leaves the terminal, and it
+leaves it by running a command rather than by writing an escape: zellij passes
+none through. It carries what an entry carries, the agent's name over where it
+is, and it is raised for every call whichever pane is focused, because being in
+a pane says nothing about whether the terminal is on screen at all. The area
+answers to focus and the notification does not, and that is the difference
+between the two.
+
 The bell was dropped. A plugin cannot ring one, and reaching a terminal from the
 hook client turned out to need a search up the process tree for an ancestor
 still attached to one, which is far more machinery than a beep is worth.
@@ -126,7 +147,7 @@ still attached to one, which is far more machinery than a beep is worth.
 - [x] Merge into Claude's shared settings without touching other hooks, with a backup
 - [x] Write Copilot's dedicated config outright
 - [x] Idempotent, with `--uninstall`, upgrading a command written under the other name
-- [ ] Install on load, behind an option
+- [x] Install on load, behind an option
 
 A hook command is claimed only when the program it runs is named
 `zellij-wrangler`, or `wrangler` from a path holding `zellij-agent-wrangler`.
@@ -137,21 +158,45 @@ rather than installed again beside itself.
 
 ## Options
 
-- [ ] Every user-facing option the original exposes, as plugin configuration:
-      width, min/max width, label mode, sections, hook progress, desktop
-      notification, notification area, auto-install hooks
+- [x] Every user-facing option the original exposes that means anything here, as
+      plugin configuration: label mode, sections, turn state, notification area,
+      desktop notification, installing the hooks on load
+
+Width is the layout's. A plugin cannot size its own pane, and the pane the
+sidebar is in is declared where every other pane of the tab is declared, so a
+width option would be a second place to say the same thing and the losing one.
+The two the original has for clamping a drag follow it.
+
+A desktop notification is raised by running a command, since zellij passes no
+escape through to the terminal. It is raised by the one sidebar in the tab the
+user is in, which is how every sidebar hearing the same call produces one
+notification; the same rule installs the hooks once. Both are the only things
+the sidebar asks to run commands for, so a sidebar with neither turned on never
+asks for the permission.
 
 ## Distribution
 
-- [ ] A published wasm and a documented one-line install
-- [ ] Keep the hook client and the plugin in step across an update
-- [ ] Split the crate so the hook client does not link `zellij-tile`
+- [x] A published wasm and a documented one-line install
+- [x] Keep the hook client and the plugin in step across an update
+- [x] Split the crate so the hook client does not link `zellij-tile`
 
-The client reads its stdin and runs one command, and links 250 crates to do it:
-the library reads zellij's types in one module, which off wasm brings in curl,
-openssl, rusqlite and the rest of `zellij-utils`. Making `zellij-tile` optional
-behind a feature, with that module gated on it, leaves the client on
-`serde_json` alone. The crate builds for `x86_64-pc-windows-gnu` either way.
+The client reads its stdin and runs one command, and used to link 250 crates to
+do it: the library reads zellij's types in one module, which off wasm brings in
+curl, openssl and the rest of `zellij-utils`. That module is behind the `plugin`
+feature and the client is built without it, which leaves it on `serde_json`
+alone: 9 crates.
+
+Both halves are released together and named for the same tag, and the install
+script prints the layout block pinned to the release it just installed. Naming
+the wasm for its version is not decoration: zellij caches a downloaded plugin
+under the last segment of its url and returns early if that file already exists,
+so two releases both called `zellij-agent-wrangler.wasm` would be one file and
+an update would never arrive.
+
+Every record carries the format it is written in, so a client of another version
+is reported rather than ignored: without it an out-of-date client's records
+would simply fail to parse, and the only symptom would be agents that never
+appear.
 
 ## Checkpoints
 
@@ -174,7 +219,7 @@ instrumenting to tell whether it works.
 - [x] **6. Notifications.** The area fills on attention, opening an entry lands
       on the agent's pane and dismisses the right entries. Bell and desktop
       notification beside it.
-- [ ] **7. The rest.** Options, sections mode, label modes, hook install,
+- [x] **7. The rest.** Options, sections mode, label modes, hook install,
       distribution.
 
 Checkpoints 1 to 3 need no agent running, so they can be tested in any session.

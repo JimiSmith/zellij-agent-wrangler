@@ -14,7 +14,17 @@ layout {
         }
         pane split_direction="vertical" {
             pane size=32 borderless=true {
-                plugin location="PLUGIN_LOCATION"
+                plugin location="PLUGIN_LOCATION" {
+                    // Every option, at its default. Both templates carry the
+                    // same block: a tab opened later is configured by the one
+                    // it is built from.
+                    label "name"
+                    sections false
+                    turn_state true
+                    notifications true
+                    desktop_notification "off"
+                    install_hooks "off"
+                }
             }
             children
         }
@@ -28,7 +38,17 @@ layout {
         }
         pane split_direction="vertical" {
             pane size=32 borderless=true {
-                plugin location="PLUGIN_LOCATION"
+                plugin location="PLUGIN_LOCATION" {
+                    // Every option, at its default. Both templates carry the
+                    // same block: a tab opened later is configured by the one
+                    // it is built from.
+                    label "name"
+                    sections false
+                    turn_state true
+                    notifications true
+                    desktop_notification "off"
+                    install_hooks "off"
+                }
             }
             pane
         }

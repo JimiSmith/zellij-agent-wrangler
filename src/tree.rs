@@ -7,14 +7,34 @@
 
 use crate::agents::{Agent, Turn};
 use crate::model::{Branch, Indicator, Placement, Row, RowContent, RowKey};
+use crate::options::Options;
 
-/// The marker an agent's row carries at its right edge.
-fn indicator(turn: Turn) -> Indicator {
-    match turn {
-        Turn::Idle => Indicator::None,
-        Turn::Working => Indicator::Working,
-        Turn::Attention => Indicator::Attention,
+/// The marker an agent's row carries at its right edge, which is nothing at all
+/// when the sidebar has been asked not to say whose turn it is.
+fn indicator(agent: &Agent, options: &Options) -> Indicator {
+    match (options.turn_state, agent.turn) {
+        (false, _) | (_, Turn::Idle) => Indicator::None,
+        (_, Turn::Working) => Indicator::Working,
+        (_, Turn::Attention) => Indicator::Attention,
     }
+}
+
+/// The row one agent draws, wherever it is drawn.
+fn agent_row(
+    agent: &Agent,
+    index: String,
+    branch: Branch,
+    placement: Placement,
+    options: &Options,
+) -> Row {
+    Row::new(RowContent::Agent {
+        index,
+        label: agent.label(options.label),
+        branch,
+        placement,
+        color: None,
+    })
+    .with(indicator(agent, options))
 }
 
 /// A pane, and the agent sessions running in it.
@@ -97,25 +117,34 @@ fn children(tab: &Tab) -> Vec<Child<'_>> {
         .collect()
 }
 
-/// The rows for one tab: the tab itself, then a child per pane or agent.
-fn tab_rows(tab: &Tab) -> Vec<Row> {
-    let mut rows = vec![Row::new(RowContent::Window {
+/// The row a tab draws for itself.
+fn window_row(tab: &Tab) -> Row {
+    Row::new(RowContent::Window {
         index: (tab.position + 1).to_string(),
         name: tab.name.clone(),
         placement: tab_placement(tab.active),
         color: None,
     })
-    .at(RowKey::Tab(tab.position))];
+}
+
+/// The branch a child at `position` carries, given the position of the last one.
+fn branch_at(position: usize, last: usize) -> Branch {
+    if position == last {
+        Branch::Last
+    } else {
+        Branch::More
+    }
+}
+
+/// The rows for one tab: the tab itself, then a child per pane or agent.
+fn tab_rows(tab: &Tab, options: &Options) -> Vec<Row> {
+    let mut rows = vec![window_row(tab).at(RowKey::Tab(tab.position))];
 
     let children = children(tab);
     let last = children.len().saturating_sub(1);
     for (position, child) in children.iter().enumerate() {
         let index = (position + 1).to_string();
-        let branch = if position == last {
-            Branch::Last
-        } else {
-            Branch::More
-        };
+        let branch = branch_at(position, last);
         rows.push(match child {
             Child::Pane(pane) => Row::new(RowContent::Pane {
                 index,
@@ -127,48 +156,127 @@ fn tab_rows(tab: &Tab) -> Vec<Row> {
             .at(RowKey::Pane(pane.id)),
             // An agent's placement is its pane's: the agent is where the pane
             // is, and pointing at it takes you to that pane.
-            Child::Agent(pane, agent) => Row::new(RowContent::Agent {
+            Child::Agent(pane, agent) => agent_row(
+                agent,
                 index,
-                label: agent.label.clone(),
                 branch,
-                placement: pane_placement(tab.active, pane.focused),
-                color: None,
-            })
-            .at(RowKey::Agent(agent.session.clone()))
-            .with(indicator(agent.turn)),
+                pane_placement(tab.active, pane.focused),
+                options,
+            )
+            .at(RowKey::Agent(agent.session.clone())),
         });
     }
     rows
 }
 
-/// The tree, in the order it is drawn and navigated.
-pub fn build_tree(tabs: &[Tab]) -> Vec<Row> {
-    tabs.iter().flat_map(tab_rows).collect()
+/// Every agent a session is running, in the order their blocks are drawn.
+fn kinds(tabs: &[Tab]) -> Vec<&str> {
+    let mut kinds: Vec<&str> = tabs
+        .iter()
+        .flat_map(|tab| tab.panes.iter())
+        .flat_map(|pane| pane.agents.iter())
+        .map(|agent| agent.agent.as_str())
+        .collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    kinds
+}
+
+/// One agent's block: the same sessions the tree holds, gathered under the tabs
+/// they are in and with everything else left out.
+///
+/// A tab's row appears here as a heading for the sessions beneath it and points
+/// at nothing: the tab itself is one row up in the tree, and one thing worth
+/// selecting twice would be two rows the selection has to tell apart.
+fn kind_rows(tabs: &[Tab], kind: &str, options: &Options) -> Vec<Row> {
+    let mut rows = vec![Row::new(RowContent::Header {
+        text: kind.to_string(),
+    })];
+    for tab in tabs {
+        let agents: Vec<(&Pane, &Agent)> = tab
+            .panes
+            .iter()
+            .flat_map(|pane| pane.agents.iter().map(move |agent| (pane, agent)))
+            .filter(|(_, agent)| agent.agent == kind)
+            .collect();
+        if agents.is_empty() {
+            continue;
+        }
+        rows.push(window_row(tab));
+        let last = agents.len() - 1;
+        for (position, (pane, agent)) in agents.iter().enumerate() {
+            rows.push(
+                agent_row(
+                    agent,
+                    (position + 1).to_string(),
+                    branch_at(position, last),
+                    pane_placement(tab.active, pane.focused),
+                    options,
+                )
+                .at(RowKey::Section(agent.session.clone())),
+            );
+        }
+    }
+    rows
+}
+
+/// The rows the sidebar draws, in the order they are drawn and navigated.
+///
+/// In sections mode the same sessions are drawn twice, once where they are and
+/// once under what they are, so both blocks carry a heading saying which is
+/// which. Grouping is all the option changes: a tab, a pane and an agent are
+/// drawn exactly the same wherever they appear.
+pub fn build_tree(tabs: &[Tab], options: &Options) -> Vec<Row> {
+    let tree = tabs.iter().flat_map(|tab| tab_rows(tab, options));
+    if !options.sections {
+        return tree.collect();
+    }
+    let mut rows = vec![Row::new(RowContent::Header {
+        text: "tabs".to_string(),
+    })];
+    rows.extend(tree);
+    for kind in kinds(tabs) {
+        rows.extend(kind_rows(tabs, kind, options));
+    }
+    rows
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use crate::agents::Meta;
     use crate::model::SessionId;
+    use crate::options::Label;
 
     fn pane(id: u32, title: &str, focused: bool) -> Pane {
         Pane::new(id, title, focused)
     }
 
-    fn hosting(mut pane: Pane, labels: &[&str]) -> Pane {
+    fn hosting(pane: Pane, labels: &[&str]) -> Pane {
+        running(pane, "claude", labels)
+    }
+
+    fn running(mut pane: Pane, kind: &str, labels: &[&str]) -> Pane {
         pane.agents = labels
             .iter()
             .map(|label| {
                 Agent::new(
                     SessionId::new(label).unwrap(),
-                    "claude",
-                    label,
+                    kind,
+                    Meta {
+                        dir: label.to_string(),
+                        ..Meta::default()
+                    },
                     Some(pane.id),
                 )
             })
             .collect();
         pane
+    }
+
+    fn tree(tabs: &[Tab]) -> Vec<Row> {
+        build_tree(tabs, &Options::default())
     }
 
     fn tab(position: usize, name: &str, active: bool, panes: Vec<Pane>) -> Tab {
@@ -205,7 +313,7 @@ mod tests {
 
     #[test]
     fn a_tab_is_followed_by_its_panes() {
-        let rows = build_tree(&session());
+        let rows = tree(&session());
         let keys: Vec<Option<RowKey>> = rows.iter().map(|row| row.key.clone()).collect();
         assert_eq!(
             keys,
@@ -222,7 +330,7 @@ mod tests {
     #[test]
     fn only_the_active_tab_and_its_focused_pane_are_here() {
         assert_eq!(
-            placements(&build_tree(&session())),
+            placements(&tree(&session())),
             vec![
                 Placement::Here,      // the active tab
                 Placement::Focused,   // its other pane
@@ -235,7 +343,7 @@ mod tests {
 
     #[test]
     fn the_last_pane_of_a_tab_closes_the_tree() {
-        let rows = build_tree(&session());
+        let rows = tree(&session());
         let branches: Vec<Branch> = rows
             .iter()
             .filter_map(|row| match &row.content {
@@ -248,7 +356,7 @@ mod tests {
 
     #[test]
     fn rows_are_labelled_with_their_one_based_position() {
-        let rows = build_tree(&session());
+        let rows = tree(&session());
         assert_eq!(indices(&rows), vec!["1", "1", "2", "2", "1"]);
     }
 
@@ -266,7 +374,7 @@ mod tests {
     #[test]
     fn a_pane_hosting_an_agent_is_drawn_as_that_agent() {
         let panes = vec![hosting(pane(1, "bash", true), &["wrangler"])];
-        let rows = build_tree(&[tab(0, "editor", true, panes)]);
+        let rows = tree(&[tab(0, "editor", true, panes)]);
         assert_eq!(
             rows[1].content,
             RowContent::Agent {
@@ -283,7 +391,7 @@ mod tests {
     #[test]
     fn a_pane_hosting_two_agents_contributes_two_rows() {
         let panes = vec![hosting(pane(1, "bash", false), &["one", "two"])];
-        let rows = build_tree(&[tab(0, "editor", true, panes)]);
+        let rows = tree(&[tab(0, "editor", true, panes)]);
         assert_eq!(rows.len(), 3);
         assert_eq!(
             rows.iter()
@@ -306,7 +414,7 @@ mod tests {
             hosting(pane(2, "bash", false), &["one", "two"]),
             pane(3, "cargo", false),
         ];
-        let rows = build_tree(&[tab(0, "editor", true, panes)]);
+        let rows = tree(&[tab(0, "editor", true, panes)]);
         assert_eq!(indices(&rows), vec!["1", "1", "2", "3", "4"]);
     }
 
@@ -316,7 +424,7 @@ mod tests {
             pane(1, "nvim", false),
             hosting(pane(2, "bash", false), &["one"]),
         ];
-        let rows = build_tree(&[tab(0, "editor", true, panes)]);
+        let rows = tree(&[tab(0, "editor", true, panes)]);
         assert_eq!(
             rows.iter()
                 .skip(1)
@@ -338,28 +446,167 @@ mod tests {
         ] {
             let mut pane = hosting(pane(1, "bash", false), &["one"]);
             pane.agents[0].turn = turn;
-            let rows = build_tree(&[tab(0, "editor", true, vec![pane])]);
+            let rows = tree(&[tab(0, "editor", true, vec![pane])]);
             assert_eq!(rows[1].indicator, marker, "{turn:?}");
         }
     }
 
     #[test]
     fn a_pane_row_never_carries_a_marker() {
-        let rows = build_tree(&session());
+        let rows = tree(&session());
         assert!(rows.iter().all(|row| row.indicator == Indicator::None));
     }
 
     #[test]
     fn an_agent_sits_where_its_pane_sits() {
         let panes = vec![hosting(pane(1, "bash", true), &["one"])];
-        let rows = build_tree(&[tab(0, "editor", false, panes)]);
+        let rows = tree(&[tab(0, "editor", false, panes)]);
         assert_eq!(placements(&rows), vec![Placement::Unfocused; 2]);
     }
 
     #[test]
     fn a_tab_with_no_panes_still_draws_its_own_row() {
-        let rows = build_tree(&[tab(0, "empty", false, vec![])]);
+        let rows = tree(&[tab(0, "empty", false, vec![])]);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].key, Some(RowKey::Tab(0)));
+    }
+
+    #[test]
+    fn a_marker_is_not_drawn_at_all_when_the_turn_is_not_wanted() {
+        let mut pane = hosting(pane(1, "bash", false), &["one"]);
+        pane.agents[0].turn = Turn::Attention;
+        let options = Options {
+            turn_state: false,
+            ..Options::default()
+        };
+        let rows = build_tree(&[tab(0, "editor", true, vec![pane])], &options);
+        assert_eq!(rows[1].indicator, Indicator::None);
+    }
+
+    #[test]
+    fn an_agent_row_is_called_what_the_label_option_asks_for() {
+        let mut pane = hosting(pane(1, "bash", false), &["one"]);
+        pane.agents[0].meta.title = "the zellij port".to_string();
+        let tabs = [tab(0, "editor", true, vec![pane])];
+        let label = |mode| {
+            let options = Options {
+                label: mode,
+                ..Options::default()
+            };
+            match &build_tree(&tabs, &options)[1].content {
+                RowContent::Agent { label, .. } => label.clone(),
+                other => panic!("unexpected row: {other:?}"),
+            }
+        };
+        assert_eq!(label(Label::Name), "the zellij port");
+        assert_eq!(label(Label::Dir), "one");
+    }
+
+    fn sectioned() -> Vec<Tab> {
+        vec![
+            tab(
+                0,
+                "editor",
+                true,
+                vec![
+                    pane(1, "nvim", false),
+                    running(pane(2, "bash", true), "claude", &["a"]),
+                ],
+            ),
+            tab(
+                1,
+                "notes",
+                false,
+                vec![running(pane(3, "bash", false), "copilot", &["b"])],
+            ),
+        ]
+    }
+
+    fn sections(tabs: &[Tab]) -> Vec<Row> {
+        build_tree(
+            tabs,
+            &Options {
+                sections: true,
+                ..Options::default()
+            },
+        )
+    }
+
+    #[test]
+    fn sections_draw_the_tree_first_and_a_block_per_agent_after_it() {
+        let rows = sections(&sectioned());
+        let headings: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match &row.content {
+                RowContent::Header { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headings, vec!["tabs", "claude", "copilot"]);
+        // The tree is what it was, heading aside.
+        assert_eq!(rows[1..6], tree(&sectioned())[..]);
+    }
+
+    #[test]
+    fn a_block_holds_its_own_agents_under_the_tabs_they_are_in() {
+        let rows = sections(&sectioned());
+        let keys: Vec<Option<RowKey>> = rows.iter().map(|row| row.key.clone()).collect();
+        assert_eq!(
+            keys[6..],
+            [
+                None, // CLAUDE
+                None, // its tab
+                Some(RowKey::Section(SessionId::new("a").unwrap())),
+                None, // COPILOT
+                None, // its tab
+                Some(RowKey::Section(SessionId::new("b").unwrap())),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tab_holding_none_of_an_agents_sessions_is_left_out_of_its_block() {
+        let rows = sections(&sectioned());
+        let names: Vec<&str> = rows
+            .iter()
+            .skip(6)
+            .filter_map(|row| match &row.content {
+                RowContent::Window { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["editor", "notes"]);
+    }
+
+    #[test]
+    fn a_session_drawn_twice_is_drawn_the_same_both_times() {
+        // The option groups and nothing else. What differs is what position
+        // means: a session is the second child of its tab and the first of its
+        // block, and its index says where it is in the list it is drawn in.
+        let rows = sections(&sectioned());
+        let (tree_row, section_row) = (&rows[3], &rows[8]);
+        let same = |row: &Row| match &row.content {
+            RowContent::Agent {
+                label,
+                branch,
+                placement,
+                ..
+            } => (label.clone(), *branch, *placement, row.indicator),
+            other => panic!("unexpected row: {other:?}"),
+        };
+        assert_eq!(same(tree_row), same(section_row));
+        assert_ne!(tree_row.key, section_row.key);
+    }
+
+    #[test]
+    fn nothing_is_added_by_sections_when_no_agent_is_running() {
+        let rows = sections(&session());
+        assert_eq!(
+            rows[0].content,
+            RowContent::Header {
+                text: "tabs".into()
+            }
+        );
+        assert_eq!(rows[1..], tree(&session())[..]);
     }
 }
