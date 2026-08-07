@@ -8,6 +8,7 @@ pub mod command;
 pub mod model;
 pub mod options;
 pub mod render;
+pub mod selection;
 pub mod tree;
 
 /// The only module that depends on `zellij-tile`, and so the only one behind

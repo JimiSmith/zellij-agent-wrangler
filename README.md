@@ -122,6 +122,18 @@ arrow) or to quit (`Ctrl+q`).
 `j`/`k` and the arrow keys move the selection; a click goes to the row it lands
 on, as does `Enter`. `q` turns the sidebar off for the whole session.
 
+A click only reaches the sidebar when the sidebar already has focus. Zellij
+spends the first click on focusing the pane, so clicking a row from a terminal
+pane moves the focus onto the sidebar and does nothing else, and the click after
+it works. Turn that off in your own zellij config:
+
+```kdl
+mouse_click_through true
+```
+
+The plugin does not set it for you: it decides how every pane in every session
+behaves, not just this one.
+
 The sidebars of a session share their selection, so they read as one sidebar
 that follows you.
 
@@ -162,7 +174,10 @@ same wherever they appear.
 
 `desktop_notification` and `install_hooks` are the only two things the sidebar
 runs a command for, and they are the reason it would ask for zellij's
-`RunCommands` permission; with both off it never does. Turned on, one sidebar
+`RunCommands` permission; with both off it never does. Turning one on asks you
+for it, and turning it off again gives the grant back: zellij caches the last
+set a plugin asked for rather than every set it has been given, so switching
+back and forth asks each time. Turned on, one sidebar
 acts and the others stand down - whichever is in the tab you are in, which every
 sidebar works out the same way. The notification takes the agent's name and
 `<tab> · <label>` as its last two arguments, which is what `notify-send` wants.

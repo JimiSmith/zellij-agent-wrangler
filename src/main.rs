@@ -23,6 +23,7 @@ use zellij_agent_wrangler::agents::{
 use zellij_agent_wrangler::model::{Notification, Row, RowContent, RowKey, SessionId};
 use zellij_agent_wrangler::options::Options;
 use zellij_agent_wrangler::render::{notification_body_field, notification_rows, paint, wrap};
+use zellij_agent_wrangler::selection;
 use zellij_agent_wrangler::session::{self, Focus};
 use zellij_agent_wrangler::tree;
 
@@ -255,14 +256,11 @@ impl State {
         }
     }
 
-    /// The selection, falling back to the first row when what it was on has
-    /// gone (or when nothing has been selected yet).
+    /// The selection: what this sidebar holds, resolved against everything it
+    /// can currently point at.
     fn selection(&self) -> Option<RowKey> {
-        let keys = || self.rows.iter().filter_map(|row| row.key.as_ref());
-        match &self.selected {
-            Some(selected) if keys().any(|key| key == selected) => Some(selected.clone()),
-            _ => keys().next().cloned(),
-        }
+        let keys = selection::keys(&self.rows, &self.registry, &self.options);
+        selection::selected(&keys, self.selected.as_ref())
     }
 
     /// The agents calling for the user, as the area lists them: newest first,

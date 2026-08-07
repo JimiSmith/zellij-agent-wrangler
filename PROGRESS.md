@@ -172,6 +172,13 @@ cannot say where *this* client is when several are attached.
 animated indicator at 16fps cost 19% of a core. Turn state is two static glyphs
 for that reason, and the plugin subscribes to no clock.
 
+**The first click on an unfocused pane never reaches it.** Zellij spends it on
+focusing the pane, so a plugin gets no `Mouse` event at all and the click after
+it is the one that acts. `mouse_click_through` turns that off and is `false` by
+default (`input/options.rs`). It is a session-wide setting rather than anything
+a layout can say about one pane, so a sidebar that wants one-click rows has to
+ask the user for it.
+
 **Sessions start in locked mode**, which passes keys through to the focused pane
 rather than swallowing them, so the sidebar works while locked. `zellij --layout
 X --session Y` attaches instead of creating; `--new-session-with-layout` creates.
@@ -192,10 +199,12 @@ the crossing. Measured, not reasoned about.
 
 **Asking for a permission that was not asked for before asks the user again.**
 The cache in `~/.cache/zellij/permissions.kdl` holds the set that was granted
-against the plugin's path, so a build that adds `RunCommands` prompts on a
-machine that had already answered. That is the price of the options that run
-commands, and it is why the sidebar asks for that one only when an option uses
-it.
+against the plugin's path, and it holds the *last* such set rather than their
+union: a run that asks for less overwrites what a run asking for more was
+granted. So turning an option that runs commands on prompts, turning it off
+quietly drops the grant, and turning it on again prompts a second time. That is
+the price of those options, and it is why the sidebar asks for `RunCommands`
+only when one of them is in use.
 
 **A plugin cannot ring the terminal bell.** A plugin pane owns a `Grid` and its
 output is parsed by it, so a printed `\x07` does set `ring_bell` — but `has_bell`
