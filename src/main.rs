@@ -93,25 +93,19 @@ struct State {
     /// It stays set: the client that reported is installed, and will keep
     /// reporting until it is replaced.
     mismatched: bool,
+    /// Whether this sidebar's own pane holds the focus, and so whether a key
+    /// pressed now would reach it.
+    focused: bool,
 }
 
 register_plugin!(State);
 
 /// Ask zellij where this plugin's client is, which is one synchronous round
 /// trip and the only reading the sidebar does outside its subscriptions.
-///
-/// A focused plugin pane (the sidebar itself, most often) leaves the tab known
-/// and no pane focused, so pointing at another tab does not move the gutter off
-/// the tab you are in.
 fn focus() -> Option<Focus> {
-    match get_focused_pane_info() {
-        Ok((tab, PaneId::Terminal(pane))) => Some(Focus {
-            tab,
-            pane: Some(pane),
-        }),
-        Ok((tab, PaneId::Plugin(_))) => Some(Focus { tab, pane: None }),
-        Err(_) => None,
-    }
+    get_focused_pane_info()
+        .ok()
+        .map(|(tab, pane)| Focus { tab, pane })
 }
 
 /// What the sidebar says when the hook client reporting to it was built against
@@ -166,7 +160,7 @@ impl State {
         // Being at an agent's pane answers what it was asking for, and it is
         // answered here because arriving is not an event of its own: it shows
         // up as whichever change moved the focus.
-        if let Some(pane) = focus.and_then(|focus| focus.pane) {
+        if let Some(pane) = focus.and_then(|focus| focus.listed()) {
             self.registry.seen(pane);
         }
         let mut resolved = session::session(&self.tabs, &self.panes, focus);
@@ -174,8 +168,12 @@ impl State {
         self.install_hooks();
         agents::place(&mut resolved, &self.registry);
         let rows = tree::build_tree(&resolved, &self.options);
-        let changed = rows != self.rows;
+        // Whether the keys are coming here is drawn as well as the rows are, so
+        // it is a change to what the pane shows even when no row moved.
+        let focused = focus.map(|focus| focus.is_plugin(self.plugin_id)) == Some(true);
+        let changed = rows != self.rows || focused != self.focused;
         self.rows = rows;
+        self.focused = focused;
         changed
     }
 
@@ -596,7 +594,10 @@ impl ZellijPlugin for State {
 
         let lines = self.lines(cols, rows);
         self.painted = lines.iter().map(|row| row.key.clone()).collect();
-        let selected = self.selection();
+        // The bar says where a keystroke would land, so a sidebar the keys are
+        // not reaching draws none: the gutter is what says where you are, and
+        // it keeps saying so from every tab.
+        let selected = self.focused.then(|| self.selection()).flatten();
         let painted: Vec<String> = lines
             .iter()
             .map(|row| paint(row, cols, row.key.is_some() && row.key == selected))

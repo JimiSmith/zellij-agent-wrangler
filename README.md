@@ -122,6 +122,12 @@ arrow) or to quit (`Ctrl+q`).
 `j`/`k` and the arrow keys move the selection; a click goes to the row it lands
 on, as does `Enter`. `q` turns the sidebar off for the whole session.
 
+The selection bar is drawn only by the sidebar your keys would actually reach,
+so at most one of them shows one and an unfocused sidebar shows none. Where you
+are is the `▌` gutter, and that keeps saying so from every tab. The selection
+itself is not lost meanwhile: it comes back where it was the moment the sidebar
+takes focus.
+
 A click only reaches the sidebar when the sidebar already has focus. Zellij
 spends the first click on focusing the pane, so clicking a row from a terminal
 pane moves the focus onto the sidebar and does nothing else, and the click after

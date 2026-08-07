@@ -62,6 +62,7 @@ once with no agent reporting itself again.
 - [x] A child's color rides on its icon alone; a tab row colors its whole line
 - [x] Intensity says placement: bold where you are, dim for a tab you are not in
 - [x] The selection bar spans the width and drops the color and dimming it covers
+- [x] Only the sidebar the keys would reach draws a selection bar at all
 - [x] Rows fitted to the pane width, padded or cut from the right
 - [ ] Agent color from the session's own color, matched to the Claude theme
 - [ ] Pane color from the pane's border color

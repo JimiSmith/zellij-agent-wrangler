@@ -4,7 +4,7 @@
 //! arrives is every pane of every tab, the sidebar's own pane and the UI bars
 //! among them, in no particular order.
 
-use zellij_tile::prelude::{PaneInfo, PaneManifest, TabInfo};
+use zellij_tile::prelude::{PaneId, PaneInfo, PaneManifest, TabInfo};
 
 use crate::tree::{Pane, Tab};
 
@@ -53,13 +53,32 @@ pub fn tab_of_pane(manifest: &PaneManifest, pane_id: u32) -> Option<usize> {
     })
 }
 
-/// Where the user is: the tab they are in, and the pane within it when that pane
-/// is one the sidebar lists (a focused plugin pane, the sidebar itself included,
-/// leaves the tab known and no pane focused).
+/// Where the user is: the tab they are in, and the pane holding the focus in it.
+///
+/// Something is always focused, and it is as often a plugin pane as a terminal
+/// one - the sidebar itself, most of all. Carrying zellij's own id keeps those
+/// two apart, where an id alone could not: zellij numbers plugin panes and
+/// terminal panes in separate sequences, so the same number means two panes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Focus {
     pub tab: usize,
-    pub pane: Option<u32>,
+    pub pane: PaneId,
+}
+
+impl Focus {
+    /// The focused pane, when it is one the sidebar lists. A plugin pane is not.
+    pub fn listed(self) -> Option<u32> {
+        match self.pane {
+            PaneId::Terminal(id) => Some(id),
+            PaneId::Plugin(_) => None,
+        }
+    }
+
+    /// Whether the focus is on the plugin pane with this id, which is how a
+    /// sidebar tells whether a keystroke would reach it.
+    pub fn is_plugin(self, plugin_id: u32) -> bool {
+        self.pane == PaneId::Plugin(plugin_id)
+    }
 }
 
 /// The session as the tree needs it: every tab in position order, each carrying
@@ -87,7 +106,7 @@ pub fn session(tabs: &[TabInfo], manifest: &PaneManifest, focus: Option<Focus>) 
                 .unwrap_or_default();
             if let Some(focus) = focus {
                 for pane in &mut panes {
-                    pane.focused = active && focus.pane == Some(pane.id);
+                    pane.focused = active && focus.listed() == Some(pane.id);
                 }
             }
             Tab {
@@ -234,7 +253,7 @@ mod tests {
         stale.is_focused = false;
         let focus = Focus {
             tab: 0,
-            pane: Some(1),
+            pane: PaneId::Terminal(1),
         };
         let session = session(
             &[tab(0, "one")],
@@ -248,7 +267,10 @@ mod tests {
     #[test]
     fn a_focused_plugin_pane_leaves_the_tab_active_and_no_pane_focused() {
         let panes = vec![pane(1, "bash", 0, 0)];
-        let focus = Focus { tab: 0, pane: None };
+        let focus = Focus {
+            tab: 0,
+            pane: PaneId::Plugin(1),
+        };
         let session = session(&[tab(0, "one")], &manifest(vec![(0, panes)]), Some(focus));
         assert!(session[0].active);
         assert!(!session[0].panes[0].focused);
@@ -260,7 +282,7 @@ mod tests {
         claims_focus.is_focused = true;
         let focus = Focus {
             tab: 1,
-            pane: Some(9),
+            pane: PaneId::Terminal(9),
         };
         let session = session(
             &[tab(0, "one")],
@@ -269,6 +291,25 @@ mod tests {
         );
         assert!(!session[0].active);
         assert!(!session[0].panes[0].focused);
+    }
+
+    #[test]
+    fn a_focused_plugin_pane_is_told_from_a_terminal_pane_numbered_the_same() {
+        // Zellij counts the two kinds separately, so the number alone says
+        // nothing about which pane holds the focus.
+        let mine = Focus {
+            tab: 0,
+            pane: PaneId::Plugin(7),
+        };
+        let theirs = Focus {
+            tab: 0,
+            pane: PaneId::Terminal(7),
+        };
+        assert!(mine.is_plugin(7));
+        assert!(!mine.is_plugin(8));
+        assert!(!theirs.is_plugin(7));
+        assert_eq!(mine.listed(), None);
+        assert_eq!(theirs.listed(), Some(7));
     }
 
     #[test]

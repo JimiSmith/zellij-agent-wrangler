@@ -168,6 +168,13 @@ and which one is stale alternates. Neither is authoritative on its own around a
 tab switch. Both are otherwise better than the per-pane `is_focused` flag, which
 cannot say where *this* client is when several are attached.
 
+What it answers with is a `PaneId`, so it says whether a plugin pane holds the
+focus and which one, and a sidebar can ask whether the focus is its own. Keeping
+that id rather than reducing it to "some pane, or none" is what lets the
+selection bar be drawn by the one sidebar a keystroke would reach: the number
+alone could not, since zellij counts plugin panes and terminal panes in separate
+sequences and the same number is two different panes.
+
 **Rendering is all-or-nothing.** Every render reprints the whole pane, so an
 animated indicator at 16fps cost 19% of a core. Turn state is two static glyphs
 for that reason, and the plugin subscribes to no clock.
