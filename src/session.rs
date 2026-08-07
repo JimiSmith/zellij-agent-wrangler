@@ -86,6 +86,30 @@ impl Focus {
     pub fn is_plugin(self, plugin_id: u32) -> bool {
         self.pane == PaneId::Plugin(plugin_id)
     }
+
+    /// Where the user is, as one line of text: which is how it travels between
+    /// the sidebars, only one of which can read it for itself.
+    pub fn encode(self) -> String {
+        let (kind, id) = match self.pane {
+            PaneId::Terminal(id) => ("terminal", id),
+            PaneId::Plugin(id) => ("plugin", id),
+        };
+        format!("{}:{kind}:{id}", self.tab)
+    }
+
+    /// What `encode` wrote, or `None` for anything else.
+    pub fn decode(text: &str) -> Option<Self> {
+        let mut fields = text.split(':');
+        let tab = fields.next()?.parse().ok()?;
+        let kind = fields.next()?;
+        let id = fields.next()?.parse().ok()?;
+        let pane = match kind {
+            "terminal" => PaneId::Terminal(id),
+            "plugin" => PaneId::Plugin(id),
+            _ => return None,
+        };
+        Some(Focus { tab, pane })
+    }
 }
 
 /// The session as the tree needs it: every tab in position order, each carrying
@@ -298,6 +322,36 @@ mod tests {
         );
         assert!(!session[0].active);
         assert!(!session[0].panes[0].focused);
+    }
+
+    #[test]
+    fn where_the_user_is_survives_the_round_trip() {
+        for focus in [
+            Focus {
+                tab: 0,
+                pane: PaneId::Terminal(3),
+            },
+            Focus {
+                tab: 12,
+                pane: PaneId::Plugin(3),
+            },
+        ] {
+            assert_eq!(Focus::decode(&focus.encode()), Some(focus));
+        }
+    }
+
+    #[test]
+    fn anything_else_decodes_to_nothing() {
+        for text in [
+            "",
+            "0",
+            "0:terminal",
+            "x:terminal:1",
+            "0:screen:1",
+            "0:plugin:x",
+        ] {
+            assert_eq!(Focus::decode(text), None, "{text}");
+        }
     }
 
     #[test]

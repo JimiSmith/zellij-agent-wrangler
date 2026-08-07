@@ -38,6 +38,15 @@ const SELECTION_MESSAGE: &str = "wrangler:selection";
 /// The message that turns the sidebar off for the whole session.
 const OFF_MESSAGE: &str = "wrangler:off";
 
+/// The message carrying where the user is.
+///
+/// Only the sidebar whose tab is on screen is sent the events that move the
+/// focus; the rest hold whatever it was when their own tab was last looked at,
+/// which is by definition the moment before the user left. Where the user is is
+/// a fact about the session rather than about a pane, so the one sidebar that
+/// can read it tells the others rather than each of them guessing.
+const FOCUS_MESSAGE: &str = "wrangler:focus";
+
 /// The message saying the agent hooks have been installed, so that the sidebars
 /// asked to install them do it once between them rather than once each.
 const INSTALLED_MESSAGE: &str = "wrangler:hooks-installed";
@@ -57,6 +66,12 @@ struct State {
     /// The tree as it was last resolved, which is what the selection and the
     /// paint both read.
     rows: Vec<Row>,
+    /// The calls as the foot last listed them.
+    ///
+    /// They are held beside the tree rather than read at paint time because
+    /// they are drawn from the registry rather than from the tree: a tree that
+    /// has not moved is no proof that nothing has.
+    notices: Vec<Notification>,
     /// The agent sessions running in this zellij session.
     ///
     /// Every sidebar holds the whole set, because an agent's hooks report to all
@@ -148,31 +163,49 @@ impl State {
 
     /// Ask zellij where the user is, then rebuild. Only safe on an event: see
     /// `focus`.
+    ///
+    /// A sidebar is only sent events while its own tab is on screen, so this is
+    /// the one reading that is worth passing on: every other sidebar is either
+    /// hearing nothing or about to be told.
     fn resolve_asking(&mut self) -> bool {
-        self.focus = focus();
+        if let Some(fresh) = focus().filter(|fresh| Some(*fresh) != self.focus) {
+            self.focus = Some(fresh);
+            pipe_message_to_plugin(
+                MessageToPlugin::new(FOCUS_MESSAGE).with_payload(fresh.encode()),
+            );
+        }
+        self.answer();
         self.resolve()
+    }
+
+    /// Answer the calls raised from the pane the user is in.
+    ///
+    /// Arriving at an agent's pane is not an event of its own: it is whichever
+    /// change moved the focus, which is why this is read off where the user is
+    /// rather than raised anywhere.
+    fn answer(&mut self) -> bool {
+        match self.focus.and_then(|focus| focus.listed()) {
+            Some(pane) => self.registry.seen(pane),
+            None => false,
+        }
     }
 
     /// Rebuild the tree from the tabs and panes last reported, and say whether
     /// what would be drawn changed.
     fn resolve(&mut self) -> bool {
         let focus = self.focus;
-        // Being at an agent's pane answers what it was asking for, and it is
-        // answered here because arriving is not an event of its own: it shows
-        // up as whichever change moved the focus.
-        if let Some(pane) = focus.and_then(|focus| focus.listed()) {
-            self.registry.seen(pane);
-        }
         let mut resolved = session::session(&self.tabs, &self.panes, focus);
         self.leave_if_alone(&resolved);
         self.install_hooks();
         agents::place(&mut resolved, &self.registry);
         let rows = tree::build_tree(&resolved, &self.options);
+        let notices = self.notifications();
         // Whether the keys are coming here is drawn as well as the rows are, so
         // it is a change to what the pane shows even when no row moved.
         let focused = focus.map(|focus| focus.is_plugin(self.plugin_id)) == Some(true);
-        let changed = rows != self.rows || focused != self.focused;
+        let changed = rows != self.rows || notices != self.notices || focused != self.focused;
         self.rows = rows;
+        self.notices = notices;
         self.focused = focused;
         changed
     }
@@ -309,8 +342,8 @@ impl State {
         let mut rows = vec![Row::new(RowContent::Header {
             text: NOTIFICATIONS_HEADING.to_string(),
         })];
-        for entry in self.notifications() {
-            let entry = notification_rows(&entry, width);
+        for entry in &self.notices {
+            let entry = notification_rows(entry, width);
             if rows.len() + entry.len() > cap {
                 break;
             }
@@ -442,9 +475,12 @@ impl State {
             }
             _ => false,
         };
+        // A call raised by the pane the user is already in is answered in the
+        // same pass that recorded it, and so never draws.
+        let answered = self.answer();
         // A record only reaches the tree through the pane it names, so a change
         // to the registry is not yet a change to what is drawn.
-        changed && self.resolve()
+        (changed || answered) && self.resolve()
     }
 }
 
@@ -561,6 +597,16 @@ impl ZellijPlugin for State {
                 self.installed = true;
                 false
             }
+            // Taken as read rather than checked, and not passed on: it was sent
+            // by the one sidebar that could see it, which has told everyone.
+            FOCUS_MESSAGE => match message.payload.as_deref().and_then(Focus::decode) {
+                Some(focus) => {
+                    self.focus = Some(focus);
+                    self.answer();
+                    self.resolve()
+                }
+                None => false,
+            },
             SELECTION_MESSAGE => match message.payload.as_deref().and_then(RowKey::decode) {
                 Some(key) => {
                     self.selected = Some(key);

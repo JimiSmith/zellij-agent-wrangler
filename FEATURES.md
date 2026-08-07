@@ -104,10 +104,10 @@ pane that has gone leaves no row behind.
 - [x] Attention clears when you focus the agent's pane
 
 Whose turn it is rides on the record, so a sidebar that opens later learns it
-with everything else. Nothing is sent between sidebars to clear attention:
-arriving at an agent's pane is not an event of its own, it is whichever change
-moved the focus, and every sidebar reads that the same way and reaches the same
-answer.
+with everything else. A call is answered by arriving at the agent's pane, which
+is not an event of its own: it is whichever change moved the focus. Only the
+sidebar whose tab is on screen is sent those changes, so where the user is is
+sent between them, and every sidebar answers off the same reading.
 
 ## Notifications
 

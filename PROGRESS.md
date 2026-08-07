@@ -70,7 +70,9 @@ of them contradict what looks reasonable from the outside.
 **Plugins are frozen when their tab is not visible.** A plugin whose tab has
 fallen behind stops receiving `PaneUpdate` and `TabUpdate`. Its manifest keeps
 whatever it last held, which can be arbitrarily stale. Any design where a
-background instance is responsible for noticing something is unsound.
+background instance is responsible for noticing something is unsound - including
+noticing that it is no longer the one in front of the user, which is the shape
+this trap takes when the stale thing is the focus rather than the panes.
 
 **Pipe messages are not subject to that.** `pipe_messages` in
 `plugins/wasm_bridge.rs` walks every running plugin with no visibility filter,
@@ -224,15 +226,31 @@ trait, so nothing ever reads it. There is no bell command or action either.
 
 ## Decisions
 
+**Where the user is travels; nobody guesses at it.** A sidebar is sent events
+only while its own tab is on screen, so at most one of them can read the focus
+at any moment, and the rest hold whatever it was when their tab was last looked
+at - which is, by definition, the moment before the user left. So the one that
+can read it tells the others, exactly as the selection travels.
+
+That was originally left to each sidebar to work out, on the reasoning that they
+all read the same focus and would reach the same answer. They do not: a sidebar
+that is hearing nothing reads nothing. Two things fell out of it. A call
+answered by going to the agent's pane stayed unanswered in the sidebar that sent
+you there - moving the focus off its own tab is exactly what stops it hearing
+what happened next, so the one sidebar that could not see the answer was always
+the one that caused it. And every sidebar left behind still believed it was the
+one in the tab you are in, which is the rule that decides who acts: three tabs
+raised three desktop notifications for one call.
+
 **One sidebar acts for all of them: the one in the tab you are in.** Every
 sidebar hears every pipe, so anything that must happen once needs a rule they
-all read the same way and only one answers to. Being where the user is is that
-rule, and it needs nothing sent between them: exactly one tab is active, and the
-sidebar in it is the one whose idea of the focus is current. It is what raises
-one desktop notification per call rather than one per tab, and what installs the
-hooks once. Installing also broadcasts that it has happened, because that one is
-not idempotent in the way that matters: two processes writing one settings file
-is a race whatever each of them writes.
+all read the same way and only one answers to. With the focus shared, being
+where the user is is that rule: exactly one tab is active, so exactly one
+sidebar is in it. It is what raises one desktop notification per call rather
+than one per tab, and what installs the hooks once. Installing also broadcasts
+that it has happened, because that one is not idempotent in the way that
+matters: two processes writing one settings file is a race whatever each of them
+writes.
 
 **What a session is called by travels; what its row says does not.** The client
 reports the directory, the title and the teammate name; composing a label out of
