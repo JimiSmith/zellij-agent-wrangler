@@ -72,6 +72,7 @@ once with no agent reporting itself again.
 - [x] `j`/`k` and the arrows move the selection, tree and notification area as one order
 - [x] A click goes to the row it lands on
 - [x] `Enter` focuses the selected tab, pane or agent
+- [x] A tab's row takes you to the first pane that tab lists
 - [x] An agent's row takes you to the pane the agent is in
 - [x] `Enter` on a notification opens it
 - [ ] The selection falls back sanely when the row it was on is gone

@@ -189,7 +189,11 @@ ask the user for it.
 **Sessions start in locked mode**, which passes keys through to the focused pane
 rather than swallowing them, so the sidebar works while locked. `zellij --layout
 X --session Y` attaches instead of creating; `--new-session-with-layout` creates.
-Closing a pane leaves the focus on the sidebar, not on the surviving terminal.
+Closing a pane leaves the focus on the sidebar, not on the surviving terminal,
+and switching to a tab restores whatever it was left on - which, once that has
+happened, is that tab's sidebar. A row that points at a tab therefore points at
+its first pane instead: a pane brings its tab with it, so it is the same one
+move and it lands somewhere.
 
 **A plugin cannot make a host call while handling a message from the command
 line.** `zellij pipe` waits for the plugin to finish, and a synchronous request

@@ -122,6 +122,10 @@ arrow) or to quit (`Ctrl+q`).
 `j`/`k` and the arrow keys move the selection; a click goes to the row it lands
 on, as does `Enter`. `q` turns the sidebar off for the whole session.
 
+A tab's row takes you to the first pane that tab lists rather than to the tab
+itself. Going to a tab lands wherever that tab was last left, which is as often
+as not that tab's own sidebar, and arriving at a sidebar is arriving nowhere.
+
 The selection bar is drawn only by the sidebar your keys would actually reach,
 so at most one of them shows one and an unfocused sidebar shows none. Where you
 are is the `▌` gutter, and that keeps saying so from every tab. The selection

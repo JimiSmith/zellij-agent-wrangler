@@ -346,15 +346,23 @@ impl State {
     /// Go to what the selected row points at.
     ///
     /// A pane brings its tab with it, so selecting a pane of another tab is one
-    /// move rather than two. A tab alone lands wherever that tab was left. An
-    /// agent is wherever its pane is, and only a placed agent has a row to be
-    /// selected on.
+    /// move rather than two. An agent is wherever its pane is, and only a placed
+    /// agent has a row to be selected on.
+    ///
+    /// A tab goes to the first pane it lists rather than to the tab itself.
+    /// Going to a tab lands wherever that tab was last left, which is as often
+    /// as not that tab's own sidebar - and arriving at a sidebar is arriving
+    /// nowhere. Its first pane is somewhere.
     fn activate(&self) {
         match self.selection() {
             Some(RowKey::Pane(id)) => focus_pane_with_id(PaneId::Terminal(id), false, false),
-            // Tabs are numbered from one here and from zero everywhere else the
-            // sidebar handles them.
-            Some(RowKey::Tab(position)) => switch_tab_to(position as u32 + 1),
+            Some(RowKey::Tab(position)) => match session::first_pane(&self.panes, position) {
+                Some(id) => focus_pane_with_id(PaneId::Terminal(id), false, false),
+                // A tab with nothing the sidebar lists is still a tab to go to.
+                // Tabs are numbered from one here and from zero everywhere else
+                // the sidebar handles them.
+                None => switch_tab_to(position as u32 + 1),
+            },
             // Opening an entry goes where the agent is now. Arriving is what
             // answers it, along with every other call raised from that pane.
             Some(RowKey::Agent(session))

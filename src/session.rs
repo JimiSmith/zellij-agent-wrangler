@@ -42,6 +42,13 @@ pub fn tab_of_plugin(manifest: &PaneManifest, plugin_id: u32) -> Option<usize> {
     })
 }
 
+/// The first pane a tab lists, in the order the sidebar draws them. `None` for a
+/// tab holding nothing but the panes the sidebar leaves out.
+pub fn first_pane(manifest: &PaneManifest, tab: usize) -> Option<u32> {
+    let panes = manifest.panes.get(&tab)?;
+    panes_of(panes).first().map(|pane| pane.id)
+}
+
 /// Which tab a terminal pane is in, found by its id. `None` until the manifest
 /// has caught up with the pane's existence.
 pub fn tab_of_pane(manifest: &PaneManifest, pane_id: u32) -> Option<usize> {
@@ -291,6 +298,23 @@ mod tests {
         );
         assert!(!session[0].active);
         assert!(!session[0].panes[0].focused);
+    }
+
+    #[test]
+    fn the_first_pane_of_a_tab_is_the_first_one_drawn() {
+        let ui = PaneInfo {
+            id: 1,
+            is_plugin: true,
+            is_selectable: true,
+            ..Default::default()
+        };
+        let panes = vec![ui, pane(2, "bottom", 10, 0), pane(3, "top", 0, 0)];
+        let manifest = manifest(vec![(0, panes), (1, vec![])]);
+        assert_eq!(first_pane(&manifest, 0), Some(3));
+        // A tab holding nothing the sidebar lists, and a tab it has not been
+        // told about, both have no pane to go to.
+        assert_eq!(first_pane(&manifest, 1), None);
+        assert_eq!(first_pane(&manifest, 9), None);
     }
 
     #[test]
