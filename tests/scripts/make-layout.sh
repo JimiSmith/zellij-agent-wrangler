@@ -7,8 +7,15 @@
 # plugin's pane and does not render a plugin at all while its request is
 # pending, so a run that did not answer them in advance would be asserting on a
 # sidebar that has not been allowed to read anything.
+#
+# The notifier is off unless one is named, since a run that raised a real
+# desktop notification would interrupt whoever is running the tests. Every
+# template is given the same one: the sidebars of a session are one client, and
+# the last of them to register is what that client is taken to want, so a layout
+# whose templates disagree would settle it by the order its tabs were opened.
 set -eu
 out=$1
+notifier=${2:-off}
 root=$(cd "$(dirname "$0")/../.." && pwd)
 wasm="$root/target/wasm32-wasip1/debug/zellij-agent-wrangler.wasm"
 
@@ -16,7 +23,7 @@ mkdir -p "$(dirname "$out")" "$root/tests/out/cache/zellij"
 
 sed -e "s#PLUGIN_LOCATION#file:$wasm#" \
     -e "s#CLIENT_LOCATION#$root/tests/scripts/wrangler-probe.sh#" \
-    -e "s#desktop_notification \"on\"#desktop_notification \"off\"#" \
+    -e "s#desktop_notification \"[^\"]*\"#desktop_notification \"$notifier\"#" \
     "$root/dev.kdl" >"$out"
 
 printf '%s\n' '{"type":"custom-title","customTitle":"QUARRYMARK"}' \

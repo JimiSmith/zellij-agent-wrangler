@@ -20,7 +20,7 @@ use agent_wrangler_core::agent::{self, Agent, Turn, AGENTS_MESSAGE};
 use agent_wrangler_core::registry::Registry;
 
 use zellij_agent_wrangler::agents;
-use zellij_agent_wrangler::calls::{self, Answered};
+use zellij_agent_wrangler::calls::Answered;
 use zellij_agent_wrangler::model::{Notification, Row, RowContent, RowKey};
 use zellij_agent_wrangler::options::Options;
 use zellij_agent_wrangler::render::{notification_body_field, notification_rows, paint, wrap};
@@ -239,11 +239,16 @@ impl State {
         changed
     }
 
-    /// Ask for this zellij session's agents to be sent here.
+    /// Ask for this zellij session's agents to be sent here, and say what a call
+    /// for the user should be announced with.
     ///
     /// Side effect: runs the client, which is what carries the request. It is
     /// asked once per sidebar, on whichever of the session name and the
     /// permission to run anything arrives second.
+    ///
+    /// The notifier is named rather than used. Every sidebar of every session
+    /// holds the same calls, so a sidebar that raised its own notification would
+    /// raise one per sidebar for a call that happened once.
     fn register(&mut self) {
         let Some(name) = self.session_name.clone() else {
             return;
@@ -252,10 +257,18 @@ impl State {
             return;
         }
         self.registered = true;
-        run_command(
-            &[self.options.client(), "register", "zellij", &name],
-            BTreeMap::new(),
-        );
+        let mut command = vec![self.options.client(), "register", "zellij", &name];
+        let notifier = self
+            .options
+            .desktop
+            .as_ref()
+            .map(|notifier| notifier.words())
+            .unwrap_or_default();
+        if !notifier.is_empty() {
+            command.push("--notify");
+            command.extend(notifier.iter().map(String::as_str));
+        }
+        run_command(&command, BTreeMap::new());
     }
 
     /// Rebuild the tree from the tabs and panes last reported, and say whether
@@ -314,26 +327,6 @@ impl State {
         self.installed = true;
         run_command(&[&client, "install-hooks"], BTreeMap::new());
         pipe_message_to_plugin(MessageToPlugin::new(INSTALLED_MESSAGE));
-    }
-
-    /// Raise a desktop notification for a call an agent has just made.
-    ///
-    /// Side effect: runs the command the options name, with the agent's name
-    /// and where it is as its last two arguments.
-    ///
-    /// It is raised for every call, whichever pane is focused, because a
-    /// notification is for the user who is not looking at the terminal at all
-    /// and pane focus says nothing about that.
-    fn raise(&self, agent: &Agent) {
-        let Some(notifier) = &self.options.desktop else {
-            return;
-        };
-        if !self.allowed() || !self.is_where_the_user_is() {
-            return;
-        }
-        let command = notifier.command(&agent.agent, &self.where_it_is(agent));
-        let command: Vec<&str> = command.iter().map(String::as_str).collect();
-        run_command(&command, BTreeMap::new());
     }
 
     /// Close this sidebar when the tab holding it has nothing else left.
@@ -525,15 +518,9 @@ impl State {
         if format != agent::FORMAT {
             return mismatch;
         }
-        let held = self.registry.clone();
         let mine = agents::ours(records, self.session_name.as_deref().unwrap_or_default());
         let mut changed = self.registry.adopt(&mine);
         changed |= self.suppress();
-        // Every call that is new since the last state was read, which is the
-        // only thing here that says one has just been raised.
-        for agent in calls::raised(&held, &self.registry) {
-            self.raise(agent);
-        }
         // A call raised by the pane the user is already in is answered in the
         // same pass that took it in, and so never draws.
         changed |= self.answer();

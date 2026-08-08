@@ -46,8 +46,20 @@ jobs:
       - run: cargo clippy -p agent-wrangler -p agent-wrangler-core --all-targets --locked -- -D warnings
       - run: cargo test -p agent-wrangler -p agent-wrangler-core --locked
 
+  # The same, for macOS. Asking a process when it started is answered by a
+  # different kernel interface on each system, so the one written here for macOS
+  # is compiled and run nowhere else: without this it would first be built by the
+  # job that attaches the asset, which is after the release exists.
+  check-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add clippy
+      - run: cargo clippy -p agent-wrangler -p agent-wrangler-core --all-targets --locked -- -D warnings
+      - run: cargo test -p agent-wrangler -p agent-wrangler-core --locked
+
   release:
-    needs: [check, check-windows]
+    needs: [check, check-windows, check-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

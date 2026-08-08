@@ -8,17 +8,19 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, FALSE, INVALID_HANDLE_VALUE, STILL_ACTIVE,
+    CloseHandle, ERROR_ACCESS_DENIED, FALSE, FILETIME, INVALID_HANDLE_VALUE, STILL_ACTIVE,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::Threading::{
-    GetExitCodeProcess, OpenProcess, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    GetExitCodeProcess, GetProcessTimes, OpenProcess, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
+    DETACHED_PROCESS, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-use super::Process;
+use agent_wrangler_core::agent::Started;
+
+use super::Row;
 
 /// Start a program that outlives the process that started it.
 ///
@@ -82,6 +84,48 @@ fn still_running(exit_code: u32) -> bool {
     exit_code == STILL_ACTIVE as u32
 }
 
+/// When a process started, or `None` for one this cannot ask about.
+///
+/// Side effect: opens the process for the length of the call. The creation time
+/// comes back as a `FILETIME`, which is a count of hundred-nanosecond intervals
+/// split across two words; the two are folded back into the one number they
+/// stand for and left in those units, since nothing reads the figure and only
+/// ever compares it with another reading of the same process.
+pub fn started(pid: u32) -> Option<Started> {
+    if pid == 0 {
+        return None;
+    }
+    // SAFETY: as in `pid_alive`, this only reads kernel state and returns either
+    // a handle this owns or null, with the narrowest rights that answer the
+    // question.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
+    if process.is_null() {
+        return None;
+    }
+
+    let mut creation = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: `process` is a live handle this just opened, and all four out
+    // parameters are records owned here that outlive the call. The API writes
+    // every one of them, so all four are passed even though one is wanted.
+    let read =
+        unsafe { GetProcessTimes(process, &mut creation, &mut exited, &mut kernel, &mut user) };
+    // SAFETY: `process` came from `OpenProcess` above and is not used again.
+    unsafe { CloseHandle(process) };
+
+    match read == FALSE {
+        true => None,
+        false => Some(Started(moment(creation))),
+    }
+}
+
+/// The one number a `FILETIME`'s two words stand for.
+fn moment(time: FILETIME) -> u64 {
+    ((time.dwHighDateTime as u64) << 32) | time.dwLowDateTime as u64
+}
+
 /// Every process, its parent and what it is running, as one snapshot.
 ///
 /// Side effect: takes a ToolHelp snapshot, which walks the whole process list at
@@ -98,7 +142,7 @@ fn still_running(exit_code: u32) -> bool {
 /// reparented, and Windows reuses pids, so a long enough climb can arrive at a
 /// process that merely inherited the number. Climbing by name over a bounded
 /// number of hops is what keeps that from mattering.
-pub fn processes() -> HashMap<u32, Process> {
+pub fn processes() -> HashMap<u32, Row> {
     // SAFETY: `TH32CS_SNAPPROCESS` with pid 0 asks for the process list, which
     // takes no buffer from this and returns either a handle this owns or
     // `INVALID_HANDLE_VALUE`.
@@ -121,7 +165,7 @@ pub fn processes() -> HashMap<u32, Process> {
     while more != FALSE {
         table.insert(
             entry.th32ProcessID,
-            Process {
+            Row {
                 ppid: entry.th32ParentProcessID,
                 name: image_name(&entry.szExeFile),
             },
@@ -167,6 +211,29 @@ mod tests {
         // which is what pins the comparison to the constant rather than a range.
         assert!(!still_running(258));
         assert!(!still_running(260));
+    }
+
+    #[test]
+    fn the_two_words_of_a_moment_make_one_number() {
+        assert_eq!(
+            moment(FILETIME {
+                dwHighDateTime: 0x01DB_0000,
+                dwLowDateTime: 0x1234_5678,
+            }),
+            0x01DB_0000_1234_5678
+        );
+        assert_eq!(moment(FILETIME::default()), 0);
+    }
+
+    #[test]
+    fn this_process_started_at_a_moment_it_keeps_reporting() {
+        // Whatever the number is, it is the same number every time it is asked
+        // for, which is the whole of what telling one process from another
+        // needs of it.
+        let mine = started(std::process::id()).expect("this process has a start time");
+        assert_eq!(started(std::process::id()), Some(mine));
+        // Pid 0 is the idle process, which is nothing an agent could be.
+        assert_eq!(started(0), None);
     }
 
     /// A field as the snapshot leaves it: the name, a NUL, then whatever was

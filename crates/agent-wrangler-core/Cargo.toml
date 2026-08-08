@@ -6,10 +6,12 @@ description = "What an agent session is, told apart from whatever draws it"
 
 # The multiplexer plugins are wasm and want the types alone. Reading an agent's
 # files is what the feature turns on, and with it the JSON that parsing them
-# needs.
+# needs, both for the files themselves and for naming a record's process in the
+# messages that carry one.
 [features]
 default = ["native"]
-native = ["dep:serde_json"]
+native = ["dep:serde", "dep:serde_json"]
 
 [dependencies]
+serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true, features = ["preserve_order"] }

@@ -57,8 +57,8 @@ impl Registry {
             if agent.origin.is_empty() {
                 agent.origin = known.origin.clone();
             }
-            if agent.pid.is_none() {
-                agent.pid = known.pid;
+            if agent.process.is_none() {
+                agent.process = known.process;
             }
         }
         self.sessions.insert(agent.session.clone(), agent.clone()) != Some(agent)

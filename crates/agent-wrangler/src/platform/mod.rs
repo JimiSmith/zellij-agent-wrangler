@@ -1,25 +1,28 @@
 //! The process primitives this needs, chosen at compile time.
 //!
-//! Each supported system provides the same three functions, and the rest of the
+//! Each supported system provides the same four functions, and the rest of the
 //! crate calls the re-exported ones with no `cfg` of its own. A build for a
 //! system with no module here fails to find them, which is the intended answer:
 //! a missing port should not silently become a daemon that cannot tell a live
 //! agent from a dead one.
 //!
-//! What is derived from those three, climbing the process table to find the
-//! agent a hook belongs to, is written once here for all of them.
+//! What is derived from those four, climbing the process table to find the
+//! agent a hook belongs to and dating what it finds, is written once here for
+//! all of them.
 
 use std::collections::HashMap;
+
+use agent_wrangler_core::agent::Process;
 
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{pid_alive, processes, spawn_detached};
+pub use unix::{pid_alive, processes, spawn_detached, started};
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{pid_alive, processes, spawn_detached};
+pub use windows::{pid_alive, processes, spawn_detached, started};
 
 /// One row of the process table: who started this process, and what it is
 /// running.
@@ -28,7 +31,7 @@ pub use windows::{pid_alive, processes, spawn_detached};
 /// on some and a path on others. Nothing here normalizes it, because what counts
 /// as a match is the caller's question.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Process {
+pub struct Row {
     pub ppid: u32,
     pub name: String,
 }
@@ -58,12 +61,7 @@ const SHELLS: &[&str] = &[
 /// list of. What both rules have in common is that they do not count steps,
 /// because how many shells sit between a hook and its agent varies with how the
 /// hook was invoked.
-pub fn agent_process(
-    pid: u32,
-    agent: &str,
-    table: &HashMap<u32, Process>,
-    hops: u32,
-) -> Option<u32> {
+pub fn agent_process(pid: u32, agent: &str, table: &HashMap<u32, Row>, hops: u32) -> Option<u32> {
     let line = ancestors(pid, table, hops);
     let named = |ancestor: &&u32| {
         table
@@ -82,6 +80,48 @@ pub fn agent_process(
                 .unwrap_or(false)
         })
         .copied()
+}
+
+/// The process of the agent that invoked a hook, dated at the moment it is
+/// found.
+///
+/// Side effect: asks the system when that process started, which is a second
+/// reading and so a second moment. A process that ends between the two is named
+/// undated rather than not named at all: knowing which process an agent was is
+/// worth having even where nothing can later tell it from its successor.
+pub fn agent_running(
+    pid: u32,
+    agent: &str,
+    table: &HashMap<u32, Row>,
+    hops: u32,
+) -> Option<Process> {
+    let found = agent_process(pid, agent, table, hops)?;
+    Some(Process {
+        pid: found,
+        started: started(found),
+    })
+}
+
+/// Whether the process a record names is still the process it named.
+///
+/// Two questions rather than one. Whether anything is running under that number
+/// at all, and whether what is running under it began when this did: a number is
+/// handed out again once its process has gone, so asking only the first question
+/// eventually asks a stranger, and a stranger that is running answers that the
+/// agent is.
+///
+/// Where either end could not be dated the number stands on its own, which is
+/// the error worth making: an agent counted live too long is a row that goes
+/// stale, an agent counted dead while it works is a row that vanishes under
+/// someone.
+pub fn running(process: &Process) -> bool {
+    if !pid_alive(process.pid) {
+        return false;
+    }
+    match (process.started, started(process.pid)) {
+        (Some(then), Some(now)) => then == now,
+        _ => true,
+    }
 }
 
 /// Whether an image name is that program: the last path component, with any
@@ -113,7 +153,7 @@ fn stem(image: &str) -> &str {
 /// Stops at the root, at a pid with no known parent, and after `hops` steps, so
 /// a cycle in a truncated or racing snapshot cannot spin. The starting pid is
 /// not yielded.
-pub fn ancestors(pid: u32, table: &HashMap<u32, Process>, hops: u32) -> Vec<u32> {
+pub fn ancestors(pid: u32, table: &HashMap<u32, Row>, hops: u32) -> Vec<u32> {
     let mut seen = Vec::new();
     let mut current = pid;
     for _ in 0..hops {
@@ -133,12 +173,12 @@ pub fn ancestors(pid: u32, table: &HashMap<u32, Process>, hops: u32) -> Vec<u32>
 mod tests {
     use super::*;
 
-    fn tree(rows: &[(u32, u32, &str)]) -> HashMap<u32, Process> {
+    fn tree(rows: &[(u32, u32, &str)]) -> HashMap<u32, Row> {
         rows.iter()
             .map(|(pid, ppid, name)| {
                 (
                     *pid,
-                    Process {
+                    Row {
                         ppid: *ppid,
                         name: name.to_string(),
                     },
@@ -264,6 +304,45 @@ mod tests {
         // Pid 0 is the scheduler on unix and the idle process on Windows;
         // neither is a process a hook could have descended from.
         assert!(!pid_alive(0));
+    }
+
+    #[test]
+    fn a_process_is_itself_and_not_whatever_held_its_number_before() {
+        // The whole point of dating a process: the number alone would answer
+        // this the same way for a stranger that inherited it.
+        let mine = Process {
+            pid: std::process::id(),
+            started: started(std::process::id()),
+        };
+        assert!(mine.started.is_some(), "this process can be dated");
+        assert!(running(&mine));
+        assert!(!running(&Process {
+            started: Some(agent_wrangler_core::agent::Started(1)),
+            ..mine
+        }));
+    }
+
+    #[test]
+    fn a_process_nothing_could_date_is_answered_by_its_number_alone() {
+        assert!(running(&Process {
+            pid: std::process::id(),
+            started: None,
+        }));
+        assert!(!running(&Process {
+            pid: 0,
+            started: None,
+        }));
+    }
+
+    #[test]
+    fn the_agent_a_hook_belongs_to_comes_back_dated() {
+        // The pid is this process's own ancestry rather than a real agent's,
+        // which is enough to say that what is found is dated as it is found.
+        let table = processes();
+        let me = std::process::id();
+        if let Some(process) = agent_running(me, "nothing-runs-under-this-name", &table, 8) {
+            assert!(process.started.is_some(), "a live ancestor can be dated");
+        }
     }
 
     #[test]

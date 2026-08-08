@@ -9,6 +9,7 @@
 //! the daemon answers its own socket while it is stuck, so nothing else could
 //! take over from a daemon that froze holding it.
 
+pub mod notify;
 pub mod persist;
 pub mod sink;
 pub mod state;
@@ -24,8 +25,9 @@ use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{GenericNamespaced, Listener, ListenerOptions, Stream};
 
 use agent_wrangler_core::agent::FORMAT;
+use agent_wrangler_core::notify::Notifier;
 
-use crate::daemon::state::{look, read_hook, Real, State};
+use crate::daemon::state::{look, read_hook, Call, Client, Real, State};
 use crate::paths;
 use crate::proto::{read_message, write_message, Inbound, Outbound, Sink};
 
@@ -91,16 +93,16 @@ fn bind() -> std::io::Result<Bound> {
 /// no lock held, and takes it only to read what to send and to note who could
 /// not be reached.
 fn publish(shared: &Arc<Mutex<State>>, dir: &Path) {
-    let (payload, sinks, saved) = {
+    let (payload, clients, saved) = {
         let state = held(shared);
-        (state.payload(), state.sinks(), state.snapshot())
+        (state.payload(), state.clients(), state.snapshot())
     };
-    persist::save(dir, &saved, &sinks);
-    let answers: Vec<(Sink, bool)> = sinks
+    persist::save(dir, &saved, &clients);
+    let answers: Vec<(Sink, bool)> = clients
         .into_iter()
-        .map(|sink| {
-            let sent = sink::deliver(&sink, &payload).sent();
-            (sink, sent)
+        .map(|client| {
+            let sent = sink::deliver(&client.sink, &payload).sent();
+            (client.sink, sent)
         })
         .collect();
     let mut state = held(shared);
@@ -129,11 +131,25 @@ fn deliver_one(shared: &Arc<Mutex<State>>, to: &Sink) {
 
 /// Write out the state and who is listening to it, without telling anyone.
 fn record(shared: &Arc<Mutex<State>>, dir: &Path) {
-    let (saved, sinks) = {
+    let (saved, clients) = {
         let state = held(shared);
-        (state.snapshot(), state.sinks())
+        (state.snapshot(), state.clients())
     };
-    persist::save(dir, &saved, &sinks);
+    persist::save(dir, &saved, &clients);
+}
+
+/// Say a call out loud, wherever the user is.
+///
+/// Side effect: runs a program per notifier registered, and waits for each. It
+/// is done here rather than by the clients because every client is handed the
+/// same call: one that raised its own would raise it once per client, and the
+/// count would go up with every sidebar the user opened.
+///
+/// Called with no lock held, and takes it only to read what to run.
+fn announce(shared: &Arc<Mutex<State>>, call: &Call) {
+    for notifier in held(shared).notifiers() {
+        notify::raise(&notifier, call);
+    }
 }
 
 /// Read one connection to its end, applying what it says.
@@ -157,12 +173,22 @@ fn serve(stream: Stream, shared: &Arc<Mutex<State>>, dir: &Path) -> bool {
                 // answering takes as long as it takes, and every other event on
                 // the machine carries on meanwhile.
                 let reading = read_hook(&hook, &Real);
-                if held(shared).apply_hook(&hook, reading) {
+                let applied = held(shared).apply_hook(&hook, reading);
+                if applied.changed() {
                     publish(shared, dir);
                 }
+                // Drawn first and announced after: what is on screen is worth
+                // more than what is said out loud, and a notifier that hangs
+                // would otherwise hold up the state that says the same thing.
+                if let Some(call) = applied.call() {
+                    announce(shared, call);
+                }
             }
-            Inbound::Register { sink, .. } => {
-                held(shared).register(sink.clone());
+            Inbound::Register { sink, notify, .. } => {
+                held(shared).register(Client {
+                    sink: sink.clone(),
+                    notify: Notifier::new(notify),
+                });
                 // A client that has just registered has nothing yet, so it is
                 // told the state whether or not anything changed.
                 deliver_one(shared, &sink);
@@ -214,10 +240,10 @@ pub fn run() -> std::io::Result<()> {
 
     let dir = paths::state_dir();
     let mut initial = State::default();
-    let (sessions, sinks) = persist::load(&dir);
+    let (sessions, clients) = persist::load(&dir);
     initial.restore(sessions, &Real);
-    for sink in sinks {
-        initial.register(sink);
+    for client in clients {
+        initial.register(client);
     }
     let shared = Arc::new(Mutex::new(initial));
     let stop = Arc::new(AtomicBool::new(false));
@@ -291,6 +317,6 @@ mod tests {
         assert!(shared.is_poisoned());
         // A daemon that refused to carry on here would be alive, reachable, and
         // permanently unable to answer anything.
-        assert!(held(&shared).sinks().is_empty());
+        assert!(held(&shared).clients().is_empty());
     }
 }

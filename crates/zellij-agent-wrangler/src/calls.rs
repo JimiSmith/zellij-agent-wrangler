@@ -1,33 +1,16 @@
-//! The calls agents make for the user: which of them are new, and which of them
-//! the user has already turned up to.
+//! The calls agents make for the user, and which of them the user has already
+//! turned up to.
 //!
 //! A call is a fact about an agent the user has not got to yet, and the sidebar
-//! is told that fact rather than deciding it. Two things follow from being told
-//! rather than knowing. A call is new only by comparison with what was held a
-//! moment ago, since nothing about the record itself says it has just been
-//! raised. And an answer given here takes a round trip to come back, so what
-//! arrives in the meantime still says the agent is asking.
+//! is told that fact rather than deciding it. What follows from being told
+//! rather than knowing is that an answer given here takes a round trip to come
+//! back, so the state that arrives in the meantime still says the agent is
+//! asking.
 
 use std::collections::BTreeSet;
 
-use agent_wrangler_core::agent::{Agent, SessionId, Turn};
+use agent_wrangler_core::agent::{Agent, SessionId};
 use agent_wrangler_core::registry::Registry;
-
-/// The calls in `after` that were not being made in `before`: an agent that was
-/// not asking, or that is asking again over a call already raised.
-///
-/// A call is told apart by when it was raised rather than by whose it is, so an
-/// agent that calls, is answered, and calls again has called twice.
-pub fn raised<'a>(before: &Registry, after: &'a Registry) -> Vec<&'a Agent> {
-    after
-        .calling()
-        .into_iter()
-        .filter(|agent| match before.get(&agent.session) {
-            Some(held) => held.turn != Turn::Attention || held.raised != agent.raised,
-            None => true,
-        })
-        .collect()
-}
 
 /// The calls the user has already turned up to, each by which call it was.
 ///
@@ -72,6 +55,8 @@ impl Answered {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_wrangler_core::agent::Turn;
+
     use crate::agents::tests::{agent, at_pane, session};
 
     /// A registry holding one agent per call described: whose it is, whether it
@@ -94,26 +79,6 @@ mod tests {
             .into_iter()
             .map(|agent| agent.session.clone())
             .collect()
-    }
-
-    #[test]
-    fn a_call_nobody_was_making_a_moment_ago_is_new() {
-        let before = registry(&[("one", Turn::Working, 0)]);
-        let after = registry(&[("one", Turn::Attention, 5), ("two", Turn::Attention, 6)]);
-        let new: Vec<&str> = raised(&before, &after)
-            .iter()
-            .map(|agent| agent.session.as_str())
-            .collect();
-        assert_eq!(new, vec!["two", "one"]);
-    }
-
-    #[test]
-    fn a_call_that_was_already_being_made_is_not_new() {
-        let held = registry(&[("one", Turn::Attention, 5)]);
-        assert!(raised(&held, &held).is_empty());
-        // The same agent asking again is asking a second time, not still.
-        let again = registry(&[("one", Turn::Attention, 9)]);
-        assert_eq!(raised(&held, &again).len(), 1);
     }
 
     #[test]

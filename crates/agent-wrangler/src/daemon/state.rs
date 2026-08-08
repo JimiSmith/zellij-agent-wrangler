@@ -7,7 +7,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use agent_wrangler_core::agent::{self, Agent, Meta, SessionId, Turn};
+use agent_wrangler_core::agent::{self, Agent, Meta, Process, SessionId, Turn};
+use agent_wrangler_core::label::{label, Label};
+use agent_wrangler_core::notify::Notifier;
 use agent_wrangler_core::origin::Origin;
 use agent_wrangler_core::payload::dir;
 use agent_wrangler_core::registry::Registry;
@@ -35,8 +37,8 @@ pub trait World {
     fn meta(&self, agent: &str, transcript: &str, session: &str) -> Meta;
     /// When a file last changed, or `None` for one that is not there.
     fn mtime(&self, path: &str) -> Option<u64>;
-    /// Whether a process is still running.
-    fn alive(&self, pid: u32) -> bool;
+    /// Whether a process is still running, and still the one that was meant.
+    fn alive(&self, process: &Process) -> bool;
 }
 
 /// The real one: an agent's files, the filesystem, and this machine's processes.
@@ -64,8 +66,8 @@ impl World for Real {
             .map(|since| since.as_millis() as u64)
     }
 
-    fn alive(&self, pid: u32) -> bool {
-        crate::platform::pid_alive(pid)
+    fn alive(&self, process: &Process) -> bool {
+        crate::platform::running(process)
     }
 }
 
@@ -97,6 +99,19 @@ pub fn event(agent: &str, name: &str, recoverable: Option<bool>) -> Event {
     }
 }
 
+/// One client: where to reach it, and what it would have a call for the user
+/// announced with.
+///
+/// A client says what to announce with rather than announcing anything itself.
+/// Every client is handed the same state, so a client that raised its own
+/// notifications would raise each call as many times as there are clients
+/// holding it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Client {
+    pub sink: Sink,
+    pub notify: Option<Notifier>,
+}
+
 /// Every agent session the daemon holds, and every client it delivers to.
 #[derive(Debug, Default)]
 pub struct State {
@@ -105,7 +120,7 @@ pub struct State {
     sources: BTreeMap<SessionId, Source>,
     /// Where to deliver, newest last. A client that registers twice is one
     /// client, so the same sink is never held twice.
-    sinks: Vec<Sink>,
+    clients: Vec<Client>,
     /// How many deliveries in a row each client has refused.
     misses: BTreeMap<Sink, u32>,
 }
@@ -132,13 +147,63 @@ pub struct Reading {
     mtime: Option<u64>,
 }
 
+/// A call for the user, in the words an announcement is made of.
+///
+/// It says which agent is asking and which of its sessions, and nothing about
+/// where that session is: where an agent is drawn is the business of whatever
+/// draws it, and one that is in no multiplexer at all still calls.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Call {
+    pub agent: String,
+    pub label: String,
+}
+
+/// What taking an event in came to.
+///
+/// A call is a change as well as an announcement, so the two cannot be reported
+/// separately without letting a call be announced that nothing was told about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Applied {
+    /// The event said nothing that is not already held.
+    Nothing,
+    /// What is held changed, so every client is owed the state.
+    Changed,
+    /// The change was an agent asking for the user, which is worth saying out
+    /// loud as well as drawing.
+    Called(Call),
+}
+
+impl Applied {
+    /// What a change is when nothing about it is worth announcing.
+    fn told(changed: bool) -> Self {
+        match changed {
+            true => Applied::Changed,
+            false => Applied::Nothing,
+        }
+    }
+
+    /// Whether a client would draw anything differently for this.
+    pub fn changed(&self) -> bool {
+        !matches!(self, Applied::Nothing)
+    }
+
+    /// The call to announce, for the one event that is news wherever the user
+    /// is.
+    pub fn call(&self) -> Option<&Call> {
+        match self {
+            Applied::Called(call) => Some(call),
+            _ => None,
+        }
+    }
+}
+
 /// What the next look should cover.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Plan {
     /// Session, agent kind, transcript path.
     pub watch: Vec<(SessionId, String, String)>,
     /// Session and the process said to be running it.
-    pub pids: Vec<(SessionId, u32)>,
+    pub processes: Vec<(SessionId, Process)>,
 }
 
 /// What the look found.
@@ -155,9 +220,9 @@ pub struct Look {
 pub fn look(plan: &Plan, world: &dyn World, since: &BTreeMap<SessionId, Option<u64>>) -> Look {
     Look {
         dead: plan
-            .pids
+            .processes
             .iter()
-            .filter(|(_, pid)| !world.alive(*pid))
+            .filter(|(_, process)| !world.alive(process))
             .map(|(session, _)| session.clone())
             .collect(),
         moved: plan
@@ -187,16 +252,15 @@ pub fn read_hook(hook: &Hook, world: &dyn World) -> Reading {
 }
 
 impl State {
-    /// Take in what a hook reported, given what its files already said. `true`
-    /// when this changed anything a client would draw.
-    pub fn apply_hook(&mut self, hook: &Hook, reading: Reading) -> bool {
+    /// Take in what a hook reported, given what its files already said.
+    pub fn apply_hook(&mut self, hook: &Hook, reading: Reading) -> Applied {
         let Some(session) = SessionId::new(&hook.session_id) else {
-            return false;
+            return Applied::Nothing;
         };
         let event = event(&hook.agent, &hook.event, hook.recoverable);
         if event == Event::End {
             self.sources.remove(&session);
-            return self.registry.end(&session);
+            return Applied::told(self.registry.end(&session));
         }
 
         let meta = Meta {
@@ -215,7 +279,7 @@ impl State {
             _ => 0,
         };
         let record = Agent {
-            pid: hook.pid,
+            process: hook.process,
             turn,
             raised,
             ..Agent::new(
@@ -227,7 +291,7 @@ impl State {
         };
 
         self.sources.insert(
-            session,
+            session.clone(),
             Source {
                 agent: hook.agent.clone(),
                 transcript: hook.transcript.clone(),
@@ -235,9 +299,27 @@ impl State {
             },
         );
 
-        match event {
+        let changed = match event {
             Event::Announce => self.registry.start(record),
             _ => self.registry.report(record),
+        };
+
+        // A call is announced from what was filed rather than from what
+        // arrived, because a hook reports only what it could find: the title a
+        // session took two events ago is part of what it is called now.
+        //
+        // A hook that told nobody anything new is a call nobody has to hear
+        // about, which is what keeps an agent restating where it is from
+        // announcing itself over and over.
+        match (changed, turn) {
+            (true, Turn::Attention) => match self.registry.get(&session) {
+                Some(filed) => Applied::Called(Call {
+                    agent: filed.agent.clone(),
+                    label: label(filed, Label::Name),
+                }),
+                None => Applied::Changed,
+            },
+            (changed, _) => Applied::told(changed),
         }
     }
 
@@ -248,7 +330,7 @@ impl State {
     /// tests that are about what a hook does rather than about when it is safe
     /// to do it.
     #[cfg(test)]
-    pub fn on_hook(&mut self, hook: &Hook, world: &dyn World) -> bool {
+    pub fn on_hook(&mut self, hook: &Hook, world: &dyn World) -> Applied {
         self.apply_hook(hook, read_hook(hook, world))
     }
 
@@ -261,11 +343,16 @@ impl State {
     }
 
     /// Deliver to this client from now on. A client that says so twice is still
-    /// one client.
-    pub fn register(&mut self, sink: Sink) {
-        self.misses.remove(&sink);
-        if !self.sinks.contains(&sink) {
-            self.sinks.push(sink);
+    /// one client, and says afresh what it would have a call announced with.
+    pub fn register(&mut self, client: Client) {
+        self.misses.remove(&client.sink);
+        match self
+            .clients
+            .iter_mut()
+            .find(|held| held.sink == client.sink)
+        {
+            Some(held) => *held = client,
+            None => self.clients.push(client),
         }
     }
 
@@ -277,7 +364,7 @@ impl State {
         if *misses < REFUSALS {
             return false;
         }
-        self.sinks.retain(|held| held != sink);
+        self.clients.retain(|held| &held.sink != sink);
         self.misses.remove(sink);
         true
     }
@@ -288,8 +375,28 @@ impl State {
         self.misses.remove(sink);
     }
 
-    pub fn sinks(&self) -> Vec<Sink> {
-        self.sinks.clone()
+    pub fn clients(&self) -> Vec<Client> {
+        self.clients.clone()
+    }
+
+    /// What a call for the user is announced with, once each.
+    ///
+    /// A notifier is the user's rather than any one client's: two clients asking
+    /// for the same one describe one desktop to tell, and telling it twice is
+    /// the same notification twice. Two asking for different ones are two
+    /// places to tell, and each is told.
+    pub fn notifiers(&self) -> Vec<Notifier> {
+        let mut notifiers: Vec<Notifier> = Vec::new();
+        for notifier in self
+            .clients
+            .iter()
+            .filter_map(|client| client.notify.as_ref())
+        {
+            if !notifiers.contains(notifier) {
+                notifiers.push(notifier.clone());
+            }
+        }
+        notifiers
     }
 
     /// What every client is sent: the whole state, every time, as a message
@@ -324,10 +431,14 @@ impl State {
                     )
                 })
                 .collect(),
-            pids: self
+            processes: self
                 .registry
                 .iter()
-                .filter_map(|agent| agent.pid.map(|pid| (agent.session.clone(), pid)))
+                .filter_map(|agent| {
+                    agent
+                        .process
+                        .map(|process| (agent.session.clone(), process))
+                })
                 .collect(),
         }
     }
@@ -418,8 +529,8 @@ impl State {
             let agent_wrangler_core::agent::Record::Known(agent) = Agent::decode(&line) else {
                 continue;
             };
-            match agent.pid {
-                Some(pid) if world.alive(pid) => {}
+            match agent.process {
+                Some(process) if world.alive(&process) => {}
                 _ => continue,
             }
             self.sources.insert(agent.session.clone(), source);
@@ -432,15 +543,19 @@ impl State {
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use std::collections::HashSet;
+
+    use agent_wrangler_core::agent::Started;
 
     /// A world with no files and no processes: what a transcript would say, when
-    /// it last changed, and which pids are running, all said outright.
+    /// it last changed, and what is running under each pid, all said outright.
+    ///
+    /// A pid maps to the process currently holding it, so handing one number to
+    /// another process is something the tests can say happened.
     #[derive(Default)]
     struct Fake {
         meta: RefCell<BTreeMap<String, Meta>>,
         mtime: RefCell<BTreeMap<String, u64>>,
-        alive: RefCell<HashSet<u32>>,
+        alive: RefCell<BTreeMap<u32, Option<Started>>>,
     }
 
     impl Fake {
@@ -451,8 +566,8 @@ mod tests {
                 .insert(transcript.to_string(), mtime);
         }
 
-        fn running(&self, pid: u32) {
-            self.alive.borrow_mut().insert(pid);
+        fn running(&self, process: Process) {
+            self.alive.borrow_mut().insert(process.pid, process.started);
         }
 
         fn killed(&self, pid: u32) {
@@ -473,10 +588,16 @@ mod tests {
             self.mtime.borrow().get(path).copied()
         }
 
-        fn alive(&self, pid: u32) -> bool {
-            self.alive.borrow().contains(&pid)
+        fn alive(&self, process: &Process) -> bool {
+            self.alive.borrow().get(&process.pid) == Some(&process.started)
         }
     }
+
+    /// The process the hooks in these tests report themselves as.
+    const AGENT: Process = Process {
+        pid: 4242,
+        started: Some(Started(918_273)),
+    };
 
     fn titled(title: &str) -> Meta {
         Meta {
@@ -499,13 +620,26 @@ mod tests {
                 _ => None,
             })
             .encode(),
-            pid: Some(4242),
+            process: Some(AGENT),
             at: 1000,
         }
     }
 
     fn session(text: &str) -> SessionId {
         SessionId::new(text).unwrap()
+    }
+
+    fn notifier(program: &str) -> Option<Notifier> {
+        Notifier::new(vec![program.to_string()])
+    }
+
+    fn client(session: &str, notify: Option<Notifier>) -> Client {
+        Client {
+            sink: Sink::Zellij {
+                session: session.to_string(),
+            },
+            notify,
+        }
     }
 
     #[test]
@@ -550,12 +684,12 @@ mod tests {
         let world = Fake::default();
         world.says("/t/one.jsonl", titled("the port"), 1);
         let mut state = State::default();
-        assert!(state.on_hook(&hook("start"), &world));
+        assert!(state.on_hook(&hook("start"), &world).changed());
         let held = state.registry().get(&session("one")).unwrap();
         assert_eq!(held.meta.title, "the port");
         assert_eq!(held.meta.dir, "wrangler");
         assert_eq!(held.origin.get("ZELLIJ_PANE_ID"), Some("7"));
-        assert_eq!(held.pid, Some(4242));
+        assert_eq!(held.process, Some(AGENT));
     }
 
     #[test]
@@ -564,7 +698,7 @@ mod tests {
         let mut state = State::default();
         let mut nameless = hook("start");
         nameless.session_id = String::new();
-        assert!(!state.on_hook(&nameless, &world));
+        assert!(!state.on_hook(&nameless, &world).changed());
         assert!(state.registry().is_empty());
     }
 
@@ -573,7 +707,7 @@ mod tests {
         let world = Fake::default();
         let mut state = State::default();
         state.on_hook(&hook("start"), &world);
-        assert!(state.on_hook(&hook("end"), &world));
+        assert!(state.on_hook(&hook("end"), &world).changed());
         assert!(state.registry().is_empty());
     }
 
@@ -606,61 +740,176 @@ mod tests {
     #[test]
     fn a_client_registering_twice_is_still_one_client() {
         let mut state = State::default();
-        let sink = Sink::Zellij {
-            session: "proto".to_string(),
-        };
-        state.register(sink.clone());
-        state.register(sink.clone());
-        assert_eq!(state.sinks(), vec![sink]);
+        let one = client("proto", None);
+        state.register(one.clone());
+        state.register(one.clone());
+        assert_eq!(state.clients(), vec![one]);
+    }
+
+    #[test]
+    fn a_client_registering_again_says_afresh_what_to_announce_with() {
+        // A sidebar that was reloaded with the option turned off is the same
+        // client saying something different, not a second one.
+        let mut state = State::default();
+        state.register(client("proto", notifier("notify-send")));
+        assert_eq!(state.notifiers(), vec![notifier("notify-send").unwrap()]);
+        state.register(client("proto", None));
+        assert!(state.notifiers().is_empty());
+    }
+
+    #[test]
+    fn a_call_is_announced_once_however_many_clients_ask_for_the_same_thing() {
+        // The reason a client is not left to raise its own: every one of them
+        // holds the same call, and the user has one desktop.
+        let mut state = State::default();
+        state.register(client("one", notifier("notify-send")));
+        state.register(client("two", notifier("notify-send")));
+        assert_eq!(state.notifiers(), vec![notifier("notify-send").unwrap()]);
+    }
+
+    #[test]
+    fn clients_asking_for_different_things_are_each_told() {
+        let mut state = State::default();
+        state.register(client("one", notifier("notify-send")));
+        state.register(client("two", notifier("/opt/announce")));
+        state.register(client("three", None));
+        assert_eq!(
+            state.notifiers(),
+            vec![
+                notifier("notify-send").unwrap(),
+                notifier("/opt/announce").unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_client_given_up_on_takes_its_notifier_with_it() {
+        let mut state = State::default();
+        state.register(client("proto", notifier("notify-send")));
+        for _ in 1..REFUSALS {
+            state.missed(&client("proto", None).sink);
+        }
+        assert!(state.missed(&client("proto", None).sink));
+        assert!(state.notifiers().is_empty());
     }
 
     #[test]
     fn a_client_is_given_up_on_only_after_refusing_repeatedly() {
         let mut state = State::default();
-        let sink = Sink::Zellij {
-            session: "proto".to_string(),
-        };
-        state.register(sink.clone());
+        let one = client("proto", None);
+        state.register(one.clone());
         for _ in 1..REFUSALS {
-            assert!(!state.missed(&sink));
-            assert_eq!(state.sinks(), vec![sink.clone()]);
+            assert!(!state.missed(&one.sink));
+            assert_eq!(state.clients(), vec![one.clone()]);
         }
-        assert!(state.missed(&sink));
-        assert!(state.sinks().is_empty());
+        assert!(state.missed(&one.sink));
+        assert!(state.clients().is_empty());
     }
 
     #[test]
     fn reaching_a_client_forgives_the_times_it_was_missed() {
         let mut state = State::default();
-        let sink = Sink::Zellij {
-            session: "proto".to_string(),
-        };
-        state.register(sink.clone());
+        let one = client("proto", None);
+        state.register(one.clone());
         for _ in 1..REFUSALS {
-            state.missed(&sink);
+            state.missed(&one.sink);
         }
-        state.reached(&sink);
+        state.reached(&one.sink);
         // The count starts again, so a client that answers now and then is
         // never retired by refusals spread over hours.
         for _ in 1..REFUSALS {
-            assert!(!state.missed(&sink));
+            assert!(!state.missed(&one.sink));
         }
-        assert_eq!(state.sinks(), vec![sink]);
+        assert_eq!(state.clients(), vec![one]);
     }
 
     #[test]
     fn registering_again_forgives_the_times_a_client_was_missed() {
         let mut state = State::default();
-        let sink = Sink::Zellij {
-            session: "proto".to_string(),
-        };
-        state.register(sink.clone());
+        let one = client("proto", None);
+        state.register(one.clone());
         for _ in 1..REFUSALS {
-            state.missed(&sink);
+            state.missed(&one.sink);
         }
-        state.register(sink.clone());
-        assert!(!state.missed(&sink));
-        assert_eq!(state.sinks(), vec![sink]);
+        state.register(one.clone());
+        assert!(!state.missed(&one.sink));
+        assert_eq!(state.clients(), vec![one]);
+    }
+
+    #[test]
+    fn an_agent_asking_for_the_user_is_a_call_to_announce() {
+        let world = Fake::default();
+        world.says("/t/one.jsonl", titled("the port"), 1);
+        let mut state = State::default();
+        assert_eq!(
+            state.on_hook(&hook("needsAttention"), &world).call(),
+            Some(&Call {
+                agent: "claude".to_string(),
+                label: "the port".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_call_is_announced_by_what_the_session_is_called_now() {
+        // A hook carries what it could find at the time, and a title found two
+        // events ago is still what the session is called.
+        let world = Fake::default();
+        world.says("/t/one.jsonl", titled("the port"), 1);
+        let mut state = State::default();
+        state.on_hook(&hook("start"), &world);
+        world.says("/t/one.jsonl", Meta::default(), 2);
+        let applied = state.on_hook(&hook("needsAttention"), &world);
+        assert_eq!(
+            applied.call().map(|call| call.label.as_str()),
+            Some("the port")
+        );
+    }
+
+    #[test]
+    fn an_untitled_session_is_announced_by_where_it_is_working() {
+        let world = Fake::default();
+        let mut state = State::default();
+        let applied = state.on_hook(&hook("needsAttention"), &world);
+        assert_eq!(
+            applied.call().map(|call| call.label.as_str()),
+            Some("wrangler")
+        );
+    }
+
+    #[test]
+    fn nothing_but_a_call_for_the_user_is_announced() {
+        let world = Fake::default();
+        let mut state = State::default();
+        for event in ["start", "working", "end"] {
+            assert_eq!(state.on_hook(&hook(event), &world).call(), None, "{event}");
+        }
+    }
+
+    #[test]
+    fn a_hook_that_says_nothing_new_announces_nothing() {
+        // An agent restating a call it is already making is the same call, and
+        // hearing about it twice is being told twice.
+        let world = Fake::default();
+        let mut state = State::default();
+        assert!(state
+            .on_hook(&hook("needsAttention"), &world)
+            .call()
+            .is_some());
+        let again = state.on_hook(&hook("needsAttention"), &world);
+        assert_eq!(again, Applied::Nothing);
+    }
+
+    #[test]
+    fn asking_again_after_being_answered_is_another_call() {
+        let world = Fake::default();
+        let mut state = State::default();
+        state.on_hook(&hook("needsAttention"), &world);
+        state.on_seen("one");
+        assert!(state
+            .on_hook(&hook("needsAttention"), &world)
+            .call()
+            .is_some());
     }
 
     #[test]
@@ -669,7 +918,7 @@ mod tests {
         // color, without any hook firing at all.
         let world = Fake::default();
         world.says("/t/one.jsonl", Meta::default(), 1);
-        world.running(4242);
+        world.running(AGENT);
         let mut state = State::default();
         state.on_hook(&hook("start"), &world);
         assert_eq!(
@@ -691,7 +940,7 @@ mod tests {
     fn watching_keeps_the_directory_no_transcript_mentions() {
         let world = Fake::default();
         world.says("/t/one.jsonl", Meta::default(), 1);
-        world.running(4242);
+        world.running(AGENT);
         let mut state = State::default();
         state.on_hook(&hook("start"), &world);
         world.says("/t/one.jsonl", titled("named"), 2);
@@ -706,12 +955,32 @@ mod tests {
     fn an_agent_that_was_killed_without_saying_so_is_reaped() {
         let world = Fake::default();
         world.says("/t/one.jsonl", titled("the port"), 1);
-        world.running(4242);
+        world.running(AGENT);
         let mut state = State::default();
         state.on_hook(&hook("start"), &world);
         assert!(!state.poll(&world));
 
         world.killed(4242);
+        assert!(state.poll(&world));
+        assert!(state.registry().is_empty());
+    }
+
+    #[test]
+    fn a_number_handed_on_to_another_process_does_not_vouch_for_the_agent() {
+        // A pid outlives nothing: the system gives the same number to whatever
+        // starts next, and a record that asked only after the number would be
+        // told a stranger was its agent.
+        let world = Fake::default();
+        world.says("/t/one.jsonl", titled("the port"), 1);
+        world.running(AGENT);
+        let mut state = State::default();
+        state.on_hook(&hook("start"), &world);
+        assert!(!state.poll(&world));
+
+        world.running(Process {
+            pid: AGENT.pid,
+            started: Some(Started(999_999)),
+        });
         assert!(state.poll(&world));
         assert!(state.registry().is_empty());
     }
@@ -724,7 +993,7 @@ mod tests {
         world.says("/t/one.jsonl", titled("the port"), 1);
         let mut state = State::default();
         let mut anonymous = hook("start");
-        anonymous.pid = None;
+        anonymous.process = None;
         state.on_hook(&anonymous, &world);
         assert!(!state.poll(&world));
         assert!(!state.registry().is_empty());
@@ -734,12 +1003,15 @@ mod tests {
     fn a_restart_keeps_only_what_is_still_running() {
         let world = Fake::default();
         world.says("/t/one.jsonl", titled("the port"), 1);
-        world.running(4242);
+        world.running(AGENT);
         let mut before = State::default();
         before.on_hook(&hook("start"), &world);
         let mut second = hook("start");
         second.session_id = "two".to_string();
-        second.pid = Some(99);
+        second.process = Some(Process {
+            pid: 99,
+            started: None,
+        });
         before.on_hook(&second, &world);
         let saved = before.snapshot();
         assert_eq!(saved.len(), 2);
@@ -756,7 +1028,7 @@ mod tests {
     fn what_a_restart_keeps_is_still_watched() {
         let world = Fake::default();
         world.says("/t/one.jsonl", titled("the port"), 1);
-        world.running(4242);
+        world.running(AGENT);
         let mut before = State::default();
         before.on_hook(&hook("start"), &world);
 

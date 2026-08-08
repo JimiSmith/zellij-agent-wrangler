@@ -11,6 +11,8 @@ use std::io::{self, BufRead, Write};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use agent_wrangler_core::agent::Process;
+
 /// What an agent's lifecycle hook reports.
 ///
 /// The hook says what it saw and nothing about what it means: the transcript is
@@ -33,8 +35,9 @@ pub struct Hook {
     /// The location variables the hook captured, already encoded as one run of
     /// values.
     pub origin: String,
-    /// The agent's own process, found by climbing the hook's ancestry.
-    pub pid: Option<u32>,
+    /// The agent's own process, found by climbing the hook's ancestry and dated
+    /// there, since only the machine the hook ran on can date it.
+    pub process: Option<Process>,
     /// When the hook ran, which is what orders one call for the user against
     /// another.
     pub at: u64,
@@ -67,7 +70,18 @@ pub enum Inbound {
     },
     /// A client asked to be delivered to from now on, and to be told the state
     /// as it currently stands.
-    Register { format: u32, sink: Sink },
+    Register {
+        format: u32,
+        sink: Sink,
+        /// What this client would have a call for the user announced with, as
+        /// the words to run. Empty for a client that wants none.
+        ///
+        /// A client says what to announce with rather than announcing it: every
+        /// client holds the same state and would otherwise raise the same call
+        /// as many times as there are clients.
+        #[serde(default)]
+        notify: Vec<String>,
+    },
     /// The user reached a session that was calling for them.
     Seen { session: String },
     /// Say the state on this connection and nothing more. What the command line
@@ -138,7 +152,10 @@ mod tests {
             transcript: "/home/u/.claude/t.jsonl".to_string(),
             recoverable: None,
             origin: "0\u{1f}proto\u{1f}7\u{1f}\u{1f}".to_string(),
-            pid: Some(4242),
+            process: Some(Process {
+                pid: 4242,
+                started: Some(agent_wrangler_core::agent::Started(918_273)),
+            }),
             at: 1_700_000_000_000,
         }
     }
@@ -163,12 +180,14 @@ mod tests {
             sink: Sink::Zellij {
                 session: "proto".to_string(),
             },
+            notify: vec!["notify-send".to_string(), "--urgency".to_string()],
         });
         round_trip(Inbound::Register {
             format: 3,
             sink: Sink::Pipe {
                 path: "/tmp/w.pipe".to_string(),
             },
+            notify: Vec::new(),
         });
         round_trip(Inbound::Seen {
             session: "9f3c-1a".to_string(),
@@ -203,6 +222,25 @@ mod tests {
             })
         );
         assert_eq!(read_message::<_, Inbound>(&mut reader).unwrap(), None);
+    }
+
+    #[test]
+    fn a_client_that_names_no_notifier_still_registers() {
+        // The field is what a client says about announcing calls, and a message
+        // written without it is a client that wants none rather than a message
+        // that cannot be read.
+        let line = r#"{"kind":"register","format":3,"sink":{"kind":"zellij","session":"proto"}}"#;
+        let mut reader = line.as_bytes();
+        assert_eq!(
+            read_message::<_, Inbound>(&mut reader).unwrap(),
+            Some(Inbound::Register {
+                format: 3,
+                sink: Sink::Zellij {
+                    session: "proto".to_string()
+                },
+                notify: Vec::new(),
+            })
+        );
     }
 
     #[test]

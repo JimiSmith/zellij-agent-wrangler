@@ -16,7 +16,7 @@ if [ -z "$line" ]; then
     "$root/target/debug/agent-wrangler" agents >&2
     exit 1
 fi
-turn=$(printf '%s' "$line" | cut -f5)
+turn=$(printf '%s' "$line" | cut -f6)
 if [ "$turn" != "$want_turn" ]; then
     echo "$want_session is $turn, wanted $want_turn" >&2
     exit 1

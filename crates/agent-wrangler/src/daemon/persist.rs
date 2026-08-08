@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::daemon::state::Source;
+use agent_wrangler_core::notify::Notifier;
+
+use crate::daemon::state::{Client, Source};
 use crate::proto::Sink;
 
 /// Counts the writes this process has made, so no two of them name the same
@@ -31,6 +33,19 @@ struct Saved {
     source: Source,
 }
 
+/// One client as it is kept: where to reach it, and what it asked to have a
+/// call announced with.
+///
+/// The notifier is kept as the words it runs rather than as the notifier
+/// itself, since what is stored is text either way and words are what a client
+/// said in the first place.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Listening {
+    sink: Sink,
+    #[serde(default)]
+    notify: Vec<String>,
+}
+
 /// Everything kept between one run and the next.
 ///
 /// The clients are kept as well as the sessions, because a client registers
@@ -42,7 +57,7 @@ struct Kept {
     #[serde(default)]
     sessions: Vec<Saved>,
     #[serde(default)]
-    sinks: Vec<Sink>,
+    clients: Vec<Listening>,
 }
 
 fn file(dir: &Path) -> PathBuf {
@@ -53,7 +68,7 @@ fn file(dir: &Path) -> PathBuf {
 ///
 /// Side effect: creates the state directory if it is not there, writes a
 /// temporary file beside the real one and renames over it.
-pub fn save(dir: &Path, sessions: &[(String, Source)], sinks: &[Sink]) {
+pub fn save(dir: &Path, sessions: &[(String, Source)], clients: &[Client]) {
     let kept = Kept {
         sessions: sessions
             .iter()
@@ -62,7 +77,17 @@ pub fn save(dir: &Path, sessions: &[(String, Source)], sinks: &[Sink]) {
                 source: source.clone(),
             })
             .collect(),
-        sinks: sinks.to_vec(),
+        clients: clients
+            .iter()
+            .map(|client| Listening {
+                sink: client.sink.clone(),
+                notify: client
+                    .notify
+                    .as_ref()
+                    .map(Notifier::words)
+                    .unwrap_or_default(),
+            })
+            .collect(),
     };
     let Ok(text) = serde_json::to_string(&kept) else {
         return;
@@ -98,7 +123,7 @@ pub fn save(dir: &Path, sessions: &[(String, Source)], sinks: &[Sink]) {
 
 /// Read back what `save` wrote. Nothing at all for a first run, an unreadable
 /// file, or one written by something else.
-pub fn load(dir: &Path) -> (Vec<(String, Source)>, Vec<Sink>) {
+pub fn load(dir: &Path) -> (Vec<(String, Source)>, Vec<Client>) {
     let Ok(text) = fs::read_to_string(file(dir)) else {
         return (Vec::new(), Vec::new());
     };
@@ -108,7 +133,13 @@ pub fn load(dir: &Path) -> (Vec<(String, Source)>, Vec<Sink>) {
             .into_iter()
             .map(|saved| (saved.record, saved.source))
             .collect(),
-        kept.sinks,
+        kept.clients
+            .into_iter()
+            .map(|listening| Client {
+                sink: listening.sink,
+                notify: Notifier::new(listening.notify),
+            })
+            .collect(),
     )
 }
 
@@ -146,11 +177,22 @@ mod tests {
             ("3\tone\tclaude".to_string(), source("/t/one.jsonl")),
             ("3\ttwo\tcopilot".to_string(), source("/t/two.jsonl")),
         ];
-        let sinks = vec![Sink::Zellij {
-            session: "proto".to_string(),
-        }];
-        save(&dir, &sessions, &sinks);
-        assert_eq!(load(&dir), (sessions, sinks));
+        let clients = vec![
+            Client {
+                sink: Sink::Zellij {
+                    session: "proto".to_string(),
+                },
+                notify: Notifier::new(vec!["notify-send".to_string(), "-u".to_string()]),
+            },
+            Client {
+                sink: Sink::Pipe {
+                    path: "/tmp/w.pipe".to_string(),
+                },
+                notify: None,
+            },
+        ];
+        save(&dir, &sessions, &clients);
+        assert_eq!(load(&dir), (sessions, clients));
         let _ = fs::remove_dir_all(&dir);
     }
 

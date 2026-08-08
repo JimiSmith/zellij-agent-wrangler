@@ -1,0 +1,59 @@
+# One call for the user raises one desktop notification, however many sidebars
+# are holding that call.
+#
+# A second tab is opened so that the session has two sidebars, since a sidebar
+# raising its own notification is only visible as a count: both of them draw the
+# same row and say the same words, and the difference is how many times the
+# notifier ran.
+#
+# The notifier writes a line to a file instead of reaching the desktop, so the
+# run stays silent and countable. The calls are reported from the host naming a
+# pane rather than typed into one, because what is being counted has nothing to
+# do with where the agent is: the daemon is what announces, and it has never
+# heard of panes.
+
+env: ZELLIJ_CONFIG_DIR=$PWD/tests/zellij-config
+env: TERM=xterm-256color
+env: XDG_STATE_HOME=$PWD/tests/out/state
+env: XDG_CACHE_HOME=$PWD/tests/out/cache
+
+sh?: tests/scripts/reset.sh wrangler-test-notify
+sh?: rm -f tests/out/raised.log
+
+sh: cargo build --target wasm32-wasip1 -p zellij-agent-wrangler
+sh: cargo build -p agent-wrangler
+sh: tests/scripts/make-layout.sh tests/out/notify.kdl $PWD/tests/scripts/record-notification.sh
+
+spawn: zellij --session wrangler-test-notify --new-session-with-layout tests/out/notify.kdl
+
+wait: notes @ 25
+
+# A second tab, built from the same template and so carrying a sidebar of its
+# own. Ctrl-t is the stock tab mode and n opens one.
+keys: <C-t>
+keys: n
+sleep: 2
+
+sh: tests/scripts/expect-raised.sh 0
+
+sh: tests/scripts/raise-call.sh notify-one wrangler-test-notify 1 needsAttention
+sleep: 2
+
+# One call, two sidebars, one notification.
+sh: tests/scripts/expect-raised.sh 1
+
+# A second call from the same session is a second notification, so what the
+# count above measures is calls and not a notifier that only ever runs once.
+sh: tests/scripts/raise-call.sh notify-one wrangler-test-notify 1 needsAttention
+sleep: 2
+sh: tests/scripts/expect-raised.sh 2
+
+# An agent going back to work is not something to announce.
+sh: tests/scripts/raise-call.sh notify-one wrangler-test-notify 1 working
+sleep: 2
+sh: tests/scripts/expect-raised.sh 2
+
+dump: notification_once
+
+keys: <C-q>
+sleep: 1

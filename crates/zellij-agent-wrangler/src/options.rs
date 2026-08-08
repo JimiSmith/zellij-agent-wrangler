@@ -9,62 +9,24 @@
 use std::collections::BTreeMap;
 
 use agent_wrangler_core::command::words;
-
-/// What an agent's row is called.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Label {
-    /// The title the session gave itself, falling back to its directory until
-    /// it has one.
-    #[default]
-    Name,
-    /// The working directory, whatever the session calls itself.
-    Dir,
-}
-
-impl Label {
-    fn read(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "name" => Some(Label::Name),
-            "dir" => Some(Label::Dir),
-            _ => None,
-        }
-    }
-}
-
-/// The words a desktop notification is raised by. The title and the body are
-/// appended to them, which is the shape `notify-send` and its like take.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Notifier(Vec<String>);
+pub use agent_wrangler_core::label::Label;
+use agent_wrangler_core::notify::Notifier;
 
 /// What a desktop notification is raised by when the option only says to raise
 /// one.
 const NOTIFY: &str = "notify-send";
 
-impl Notifier {
-    /// The notifier an option value asks for: nothing for the words meaning
-    /// off, the default for those meaning on, and anything else read as the
-    /// command line to run.
-    ///
-    /// A command is quoted the way a shell would quote it, so a notifier living
-    /// at a path with a space in it can be named.
-    fn read(value: &str) -> Option<Self> {
-        match truth(value) {
-            Some(false) => None,
-            Some(true) => Some(Notifier(vec![NOTIFY.to_string()])),
-            None => match words(value).as_slice() {
-                [] => None,
-                command => Some(Notifier(command.to_vec())),
-            },
-        }
-    }
-
-    /// The whole command line for one notification: what to run, then the title
-    /// and the body.
-    pub fn command(&self, title: &str, body: &str) -> Vec<String> {
-        let mut command = self.0.clone();
-        command.push(title.to_string());
-        command.push(body.to_string());
-        command
+/// The notifier an option value asks for: nothing for the words meaning off,
+/// the default for those meaning on, and anything else read as the command line
+/// to run.
+///
+/// A command is quoted the way a shell would quote it, so a notifier living at
+/// a path with a space in it can be named.
+fn notifier(value: &str) -> Option<Notifier> {
+    match truth(value) {
+        Some(false) => None,
+        Some(true) => Notifier::new(vec![NOTIFY.to_string()]),
+        None => Notifier::new(words(value)),
     }
 }
 
@@ -88,7 +50,10 @@ pub struct Options {
     pub turn_state: bool,
     /// Whether the calls for the user are listed at the foot of the pane.
     pub notifications: bool,
-    /// What to raise a desktop notification with, if anything.
+    /// What to have a desktop notification raised with, if anything. The
+    /// sidebar names it rather than running it: it is one of many holding the
+    /// same calls, and each of them raising its own would be one notification
+    /// per sidebar.
     pub desktop: Option<Notifier>,
     /// The hook client to install the agent hooks with on load, if any. Named
     /// rather than found, because a plugin has no way to look for it.
@@ -132,7 +97,7 @@ impl Options {
             notifications: flag("notifications", default.notifications),
             desktop: configuration
                 .get("desktop_notification")
-                .and_then(|value| Notifier::read(value)),
+                .and_then(|value| notifier(value)),
             install_hooks: configuration.get("install_hooks").and_then(|value| {
                 match truth(value) {
                     Some(false) => None,
@@ -201,27 +166,26 @@ mod tests {
         assert_eq!(read(&[]).desktop, None);
         assert_eq!(read(&[("desktop_notification", "off")]).desktop, None);
         assert_eq!(
-            read(&[("desktop_notification", "on")])
-                .desktop
-                .unwrap()
-                .command("claude", "vim · api"),
-            ["notify-send", "claude", "vim · api"]
+            read(&[("desktop_notification", "on")]).desktop.unwrap(),
+            Notifier::new(vec!["notify-send".to_string()]).unwrap()
         );
     }
 
     #[test]
-    fn a_notifier_of_its_own_takes_the_title_and_the_body_after_its_arguments() {
+    fn a_notifier_of_its_own_is_read_as_the_words_it_runs() {
+        // A path with a space in it is one word, which is what the quoting is
+        // for and what naming the words rather than the line preserves.
         let options = read(&[("desktop_notification", "'/opt/my notifier' --urgency low")]);
         assert_eq!(
-            options.desktop.unwrap().command("claude", "vim · api"),
-            [
-                "/opt/my notifier",
-                "--urgency",
-                "low",
-                "claude",
-                "vim · api"
-            ]
+            options.desktop.unwrap().words(),
+            ["/opt/my notifier", "--urgency", "low"]
         );
+    }
+
+    #[test]
+    fn a_value_naming_nothing_to_run_asks_for_no_notification() {
+        assert_eq!(read(&[("desktop_notification", "   ")]).desktop, None);
+        assert_eq!(read(&[("desktop_notification", "''")]).desktop, None);
     }
 
     #[test]

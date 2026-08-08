@@ -9,7 +9,7 @@
 use std::io::Read;
 use std::process::ExitCode;
 
-use agent_wrangler_core::agent::FORMAT;
+use agent_wrangler_core::agent::{Process, FORMAT};
 use agent_wrangler_core::origin::Origin;
 use agent_wrangler_core::payload::Payload;
 
@@ -50,9 +50,9 @@ fn read_stdin() -> String {
 /// Side effect: reads the machine's process table. `None` when the agent is not
 /// in this process's ancestry at all, which is a record nothing can later check
 /// the liveness of.
-fn agent_pid(agent: &str) -> Option<u32> {
+fn agent_process(agent: &str) -> Option<Process> {
     let table = platform::processes();
-    platform::agent_process(std::process::id(), agent, &table, HOPS)
+    platform::agent_running(std::process::id(), agent, &table, HOPS)
 }
 
 /// Report one event to the daemon.
@@ -82,7 +82,7 @@ fn hook(agent: &str, event: &str) {
             transcript: payload.transcript_path,
             recoverable: payload.recoverable,
             origin: origin.encode(),
-            pid: agent_pid(agent),
+            process: agent_process(agent),
             at: now(),
         },
     };
@@ -102,9 +102,23 @@ fn sink(kind: &str, id: &str) -> Option<Sink> {
     }
 }
 
+/// What a registering client says a call should be announced with: everything
+/// after `--notify`, as the words to run.
+///
+/// The words arrive already separated rather than as one line to be split,
+/// because whoever wrote them has already had to decide where a program's path
+/// ends and its arguments begin. Nothing after a `--notify` that is not there
+/// is nothing to announce with.
+fn notify(args: &[String]) -> Vec<String> {
+    match args.first().map(String::as_str) {
+        Some("--notify") => args[1..].to_vec(),
+        _ => Vec::new(),
+    }
+}
+
 const USAGE: &str = "usage: agent-wrangler hook <agent> <start|end|working|needsAttention|error>
        agent-wrangler daemon
-       agent-wrangler register <zellij|pipe> <session|path>
+       agent-wrangler register <zellij|pipe> <session|path> [--notify <command> [argument...]]
        agent-wrangler seen <session>
        agent-wrangler agents
        agent-wrangler install-hooks [all|claude|copilot] [--uninstall]
@@ -137,6 +151,7 @@ fn main() -> ExitCode {
             let _ = client::tell(&Inbound::Register {
                 format: FORMAT,
                 sink,
+                notify: notify(&args[3..]),
             });
             ExitCode::SUCCESS
         }
@@ -212,5 +227,30 @@ mod tests {
     fn a_kind_of_client_this_cannot_reach_is_not_registered() {
         assert_eq!(sink("carrier-pigeon", "coop"), None);
         assert_eq!(sink("", ""), None);
+    }
+
+    fn words(args: &[&str]) -> Vec<String> {
+        notify(
+            &args
+                .iter()
+                .map(|arg| arg.to_string())
+                .collect::<Vec<String>>(),
+        )
+    }
+
+    #[test]
+    fn everything_after_the_flag_is_what_to_announce_with() {
+        assert_eq!(
+            words(&["--notify", "notify-send", "--urgency", "low"]),
+            ["notify-send", "--urgency", "low"]
+        );
+    }
+
+    #[test]
+    fn a_client_that_asks_for_nothing_announces_nothing() {
+        assert!(words(&[]).is_empty());
+        assert!(words(&["--notify"]).is_empty());
+        // Words with no flag in front of them are not a notifier by accident.
+        assert!(words(&["notify-send"]).is_empty());
     }
 }

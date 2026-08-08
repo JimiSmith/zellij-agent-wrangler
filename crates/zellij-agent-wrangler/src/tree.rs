@@ -250,7 +250,7 @@ mod tests {
     use agent_wrangler_core::agent::{Meta, SessionId};
 
     use crate::agents::tests::at_pane;
-    use crate::options::Label;
+    use agent_wrangler_core::label::Label;
 
     fn pane(id: u32, title: &str, focused: bool) -> Pane {
         Pane::new(id, title, focused)

@@ -19,7 +19,7 @@ pub(crate) const RECORD: char = '\n';
 /// separately, so one of them can be older than the other. Saying which shape a
 /// record is written in is what turns that into something the reader can report
 /// rather than a run of records it silently makes nothing of.
-pub const FORMAT: u32 = 3;
+pub const FORMAT: u32 = 4;
 
 /// The message every record travels in.
 ///
@@ -142,11 +142,45 @@ pub struct Meta {
     pub title: String,
 }
 
+/// When a process started, as the system that runs it counts time.
+///
+/// The number means nothing anywhere else: it is ticks since boot on Linux,
+/// microseconds since the epoch on macOS, and hundred-nanosecond intervals since
+/// 1601 on Windows. Nothing reads it. It is only ever compared with another one
+/// taken the same way on the same machine, which is all that telling one process
+/// from another takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "native", derive(serde::Serialize, serde::Deserialize))]
+pub struct Started(pub u64);
+
+/// The process an agent is running as: which one, and when it began.
+///
+/// A pid on its own does not name a process for long. The system hands the same
+/// number out again once the process holding it has gone, so a record that
+/// remembers only the number comes to point at whatever inherited it, and asking
+/// after that stranger answers that the agent is still running. When it started
+/// is what tells the two apart, since the pair is never handed out twice.
+///
+/// `started` is `None` where the system would not say, which leaves the number
+/// on its own and the record exactly as credulous as it was before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "native", derive(serde::Serialize, serde::Deserialize))]
+pub struct Process {
+    pub pid: u32,
+    pub started: Option<Started>,
+}
+
 /// What a line turned out to be.
 ///
 /// A record written in another format is told from a line that is not a record
 /// at all, because the two mean different things: the first says the two ends of
 /// the wire are out of step with each other, and the second says nothing.
+///
+/// The variants are of very different sizes, and the record is deliberately not
+/// boxed: one is produced per line of every state message and matched where it
+/// is produced, so putting it behind a pointer would buy nothing back for an
+/// allocation per record.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Record {
     Known(Agent),
@@ -165,7 +199,7 @@ pub struct Agent {
     /// The agent's own process, as its hook found it by climbing its ancestry.
     /// `None` for a hook that could not say, which is a record nothing can check
     /// the liveness of.
-    pub pid: Option<u32>,
+    pub process: Option<Process>,
     pub turn: Turn,
     /// When the agent last called for the user, as the clock read at the time.
     /// It is taken once, where the call happens, so everything downstream orders
@@ -193,7 +227,7 @@ impl Agent {
                 title: field(&meta.title),
             },
             origin,
-            pid: None,
+            process: None,
             turn: Turn::default(),
             raised: 0,
         }
@@ -202,10 +236,23 @@ impl Agent {
     /// The record as one line: the format, then everything about the session,
     /// with the title last because it is the one field allowed to hold anything
     /// at all.
+    ///
+    /// A process is written as its two halves rather than as one field, so a
+    /// record naming a process nothing could date reads the same as one from
+    /// before there was a second half to name.
     pub fn encode(&self) -> String {
-        let pid = self.pid.map(|id| id.to_string()).unwrap_or_default();
+        let (pid, started) = match self.process {
+            Some(process) => (
+                process.pid.to_string(),
+                process
+                    .started
+                    .map(|started| started.0.to_string())
+                    .unwrap_or_default(),
+            ),
+            None => (String::new(), String::new()),
+        };
         format!(
-            "{FORMAT}{FIELD}{}{FIELD}{}{FIELD}{pid}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}",
+            "{FORMAT}{FIELD}{}{FIELD}{}{FIELD}{pid}{FIELD}{started}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}",
             self.session.as_str(),
             self.agent,
             self.turn.encode(),
@@ -224,7 +271,7 @@ impl Agent {
     /// field character would still parse; it cannot, because the constructor
     /// takes that character out.
     pub fn decode(line: &str) -> Record {
-        let mut fields = line.splitn(11, FIELD);
+        let mut fields = line.splitn(12, FIELD);
         match fields.next().and_then(|format| format.parse::<u32>().ok()) {
             Some(FORMAT) => {}
             Some(other) => return Record::Foreign(other),
@@ -241,6 +288,7 @@ impl Agent {
         let session = SessionId::new(fields.next()?)?;
         let agent = fields.next()?;
         let pid = fields.next()?;
+        let started = fields.next()?;
         let turn = Turn::decode(fields.next()?)?;
         let raised = fields.next()?.parse().ok()?;
         let dir = fields.next()?.to_string();
@@ -248,12 +296,21 @@ impl Agent {
         let color = fields.next()?.to_string();
         let origin = Origin::decode(fields.next()?);
         let title = fields.next()?.to_string();
-        let pid = match pid.is_empty() {
+        // When a process started says nothing without which process it was, so
+        // a record that names no process is read as naming none whatever else
+        // that field holds.
+        let process = match pid.is_empty() {
             true => None,
-            false => Some(pid.parse().ok()?),
+            false => Some(Process {
+                pid: pid.parse().ok()?,
+                started: match started.is_empty() {
+                    true => None,
+                    false => Some(Started(started.parse().ok()?)),
+                },
+            }),
         };
         Some(Agent {
-            pid,
+            process,
             turn,
             raised,
             ..Agent::new(
@@ -359,15 +416,43 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_pid_survives_the_round_trip_and_so_does_having_none() {
+    fn a_process_survives_the_round_trip_and_so_does_having_none() {
         let with = Agent {
-            pid: Some(4242),
+            process: Some(Process {
+                pid: 4242,
+                started: Some(Started(918_273)),
+            }),
             ..agent("one", 3)
         };
         assert_eq!(Agent::decode(&with.encode()), Record::Known(with));
         let without = agent("two", 3);
-        assert_eq!(without.pid, None);
+        assert_eq!(without.process, None);
         assert_eq!(Agent::decode(&without.encode()), Record::Known(without));
+    }
+
+    #[test]
+    fn a_process_nothing_could_date_keeps_its_number() {
+        // The system need not say when a process started, and a record that
+        // could not find out still names the process it found.
+        let undated = Agent {
+            process: Some(Process {
+                pid: 4242,
+                started: None,
+            }),
+            ..agent("one", 3)
+        };
+        assert_eq!(Agent::decode(&undated.encode()), Record::Known(undated));
+    }
+
+    #[test]
+    fn a_start_time_without_a_process_is_no_process() {
+        // Nothing writes this, and a record that arrived saying it would name a
+        // moment with nothing to attach it to.
+        let orphan = "4\tone\tclaude\t\t918273\tidle\t0\tdir\t\t\t\t";
+        let Record::Known(read) = Agent::decode(orphan) else {
+            panic!("not a record");
+        };
+        assert_eq!(read.process, None);
     }
 
     #[test]
@@ -400,9 +485,10 @@ pub(crate) mod tests {
         for line in [
             "",
             "one",
-            "3\tone\tclaude",
-            "3\tone\tclaude\t\tidle\t0\tdir",
-            "3\tone\tclaude\tx\tidle\t0\tdir\t\t\t\ttitle",
+            "4\tone\tclaude",
+            "4\tone\tclaude\t\t\tidle\t0\tdir",
+            "4\tone\tclaude\tx\t\tidle\t0\tdir\t\t\t\ttitle",
+            "4\tone\tclaude\t42\tnot-a-moment\tidle\t0\tdir\t\t\t\ttitle",
         ] {
             assert_eq!(Agent::decode(line), Record::None, "{line}");
         }
@@ -419,7 +505,7 @@ pub(crate) mod tests {
     #[test]
     fn a_record_with_no_turn_it_recognises_decodes_to_nothing() {
         assert_eq!(
-            Agent::decode("3\tone\tclaude\t\tdozing\t0\tdir\t\t\t\t"),
+            Agent::decode("4\tone\tclaude\t\t\tdozing\t0\tdir\t\t\t\t"),
             Record::None
         );
     }

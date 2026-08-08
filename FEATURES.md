@@ -104,7 +104,9 @@ The color name is the fact; how to draw it is the sidebar's.
 - [x] Delivers to registered clients, one sink kind per multiplexer
 - [x] Answers a call for the user when a client says it was reached
 - [x] Builds and runs on Linux, macOS and Windows
-- [ ] Desktop notifications raised by the daemon rather than by each client
+- [x] Reaps a session whose process number has been handed to something else
+- [x] Raises the desktop notification itself, once per call, however many
+      clients are holding it
 
 The daemon and the hook are the same executable, and a hook starts the daemon by
 running its own path, so those two can never be at different versions. The one
@@ -178,11 +180,18 @@ and never draws.
 
 The desktop notification is the one thing here that leaves the terminal, and it
 leaves it by running a command rather than by writing an escape: zellij passes
-none through. It carries what an entry carries, the agent's name over where it
-is, and it is raised for every call whichever pane is focused, because being in
-a pane says nothing about whether the terminal is on screen at all. The area
-answers to focus and the notification does not, and that is the difference
-between the two.
+none through. It is raised by the daemon, which the sidebar tells what to raise
+it with when it registers. The daemon sees each call once however many sidebars
+are holding it, where a sidebar raising its own would raise one per sidebar; two
+clients naming the same command are one desktop and get one notification, and
+two naming different ones get one each.
+
+What it says is the agent's name over what that session is called, which is less
+than the entry at the foot says: the entry names the tab as well, and a tab is
+not something the daemon has ever heard of. It is raised for every call whichever
+pane is focused, because being in a pane says nothing about whether the terminal
+is on screen at all. The area answers to focus and the notification does not, and
+that is the difference between the two.
 
 The bell was dropped. A plugin cannot ring one, and reaching a terminal from the
 hook client turned out to need a search up the process tree for an ancestor
@@ -215,11 +224,10 @@ width option would be a second place to say the same thing and the losing one.
 The two the original has for clamping a drag follow it.
 
 A desktop notification is raised by running a command, since zellij passes no
-escape through to the terminal. It is raised by the one sidebar in the tab the
-user is in, which is how every sidebar hearing the same call produces one
-notification; the same rule installs the hooks once. Both are the only things
-the sidebar asks to run commands for, so a sidebar with neither turned on never
-asks for the permission.
+escape through to the terminal. The sidebar names the command and the daemon
+runs it, which is what makes one call one notification. Installing the hooks is
+still done by the one sidebar in the tab the user is in, since that is a thing
+sidebars do to a file rather than a thing the daemon knows about.
 
 ## Distribution
 

@@ -6,6 +6,8 @@
 
 pub mod agent;
 pub mod command;
+pub mod label;
+pub mod notify;
 pub mod origin;
 pub mod registry;
 

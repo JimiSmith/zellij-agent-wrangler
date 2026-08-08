@@ -229,7 +229,11 @@ plugin location="..." {
 ```
 
 Put the same block in both templates: a tab opened later is built from
-`new_tab_template`, and takes its options from there.
+`new_tab_template`, and takes its options from there. `desktop_notification` is
+worth keeping the same in both for a further reason: the sidebars of a session
+are one client as far as the daemon is concerned, and the last of them to say
+what it wants is what that client wants, so templates that disagree settle it by
+the order the tabs were opened in.
 
 A value an option does not recognise leaves that option at its default, so a
 typo costs you the setting rather than the sidebar.
@@ -249,13 +253,22 @@ Both the install script and `dev.sh` write the path in for you.
 
 `desktop_notification` and `install_hooks` both run a command, but so does
 asking the daemon for the agents at all, so the sidebar asks for zellij's
-`RunCommands` permission whatever these are set to. Turned on, one sidebar
-acts and the others stand down - whichever is in the tab you are in, which every
-sidebar works out the same way. The notification takes the agent's name and
-`<tab> · <label>` as its last two arguments, which is what `notify-send` wants.
-It is raised for every call whatever pane is focused, since sitting in a pane
-says nothing about whether the terminal is on screen; the `●` and the entry at
-the foot still clear when you get to the agent.
+`RunCommands` permission whatever these are set to. `install_hooks` is done by
+one sidebar while the others stand down - whichever is in the tab you are in,
+which every sidebar works out the same way.
+
+`desktop_notification` is not run by the sidebar at all: the sidebar tells the
+daemon what to raise a notification with, and the daemon raises it. That is what
+makes one call one notification, however many sidebars and sessions are holding
+it. Two sessions naming the same command get one notification between them; two
+naming different commands get one each.
+
+The notification takes the agent's name and what the session is called as its
+last two arguments, which is what `notify-send` wants. It does not name the tab,
+where the entry at the foot does: the daemon has never heard of tabs. It is
+raised for every call whatever pane is focused, since sitting in a pane says
+nothing about whether the terminal is on screen; the `●` and the entry at the
+foot still clear when you get to the agent.
 
 `install_hooks "on"` runs `agent-wrangler` from your `PATH`. Name a path
 instead if it is not there.

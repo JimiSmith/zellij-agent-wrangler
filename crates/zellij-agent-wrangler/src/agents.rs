@@ -16,35 +16,18 @@ use agent_wrangler_core::agent::{Agent, Record};
 use agent_wrangler_core::registry::Registry;
 
 use crate::model::NamedColor;
-use crate::options::Label;
 use crate::tree::Tab;
+
+/// What a session is called is composed from the facts a record carries rather
+/// than decided here, and is re-exported so that a row and an announcement of
+/// the same session are spelled the same way.
+pub use agent_wrangler_core::label::label;
 
 /// The variable naming the zellij session an agent was raised in.
 const SESSION_VAR: &str = "ZELLIJ_SESSION_NAME";
 
 /// The variable naming the pane an agent was raised in.
 const PANE_VAR: &str = "ZELLIJ_PANE_ID";
-
-/// What this session's row says, spelled the way the sidebar was asked to spell
-/// it.
-///
-/// A teammate leads with its own name, so it is never mistaken for a session of
-/// its own. An untitled session falls back to where it is working, and one that
-/// cannot say even that falls back to what it is.
-pub fn label(agent: &Agent, mode: Label) -> String {
-    let dir = match agent.meta.dir.is_empty() {
-        true => agent.agent.as_str(),
-        false => agent.meta.dir.as_str(),
-    };
-    let title = agent.meta.title.as_str();
-    match (mode, agent.meta.name.as_str()) {
-        (Label::Name, "") if !title.is_empty() => title.to_string(),
-        (_, "") => dir.to_string(),
-        (Label::Name, name) if title.is_empty() => format!("@{name}"),
-        (Label::Name, name) => format!("@{name} - {title}"),
-        (Label::Dir, name) => format!("@{name} - {dir}"),
-    }
-}
 
 /// The color this session's icon is drawn in, or `None` for one the agent gives
 /// no color to.
@@ -157,10 +140,6 @@ pub(crate) mod tests {
         )
     }
 
-    fn labelled(dir: &str, name: &str, title: &str) -> Agent {
-        Agent::new(session("one"), "claude", meta(dir, name, title), at_pane(1))
-    }
-
     #[test]
     fn a_session_is_drawn_in_the_color_the_agent_gives_it() {
         // The two an agent names that a terminal does not are drawn in the
@@ -184,36 +163,6 @@ pub(crate) mod tests {
         assert_eq!(color(&colored("")), None);
         // A name this sidebar does not know is not a color to guess at.
         assert_eq!(color(&colored("chartreuse")), None);
-    }
-
-    #[test]
-    fn a_titled_session_is_called_by_its_title_and_an_untitled_one_by_its_directory() {
-        let titled = labelled("wrangler", "", "the zellij port");
-        assert_eq!(label(&titled, Label::Name), "the zellij port");
-        assert_eq!(label(&titled, Label::Dir), "wrangler");
-        let untitled = labelled("wrangler", "", "");
-        assert_eq!(label(&untitled, Label::Name), "wrangler");
-        assert_eq!(label(&untitled, Label::Dir), "wrangler");
-    }
-
-    #[test]
-    fn a_session_that_can_say_neither_is_called_by_what_it_is() {
-        let anonymous = labelled("", "", "");
-        assert_eq!(label(&anonymous, Label::Name), "claude");
-        assert_eq!(label(&anonymous, Label::Dir), "claude");
-    }
-
-    #[test]
-    fn a_teammate_leads_with_its_own_name_whatever_it_is_called_by() {
-        let teammate = labelled("wrangler", "scout", "reading the source");
-        assert_eq!(label(&teammate, Label::Name), "@scout - reading the source");
-        assert_eq!(label(&teammate, Label::Dir), "@scout - wrangler");
-        // A teammate with nothing to say for itself is still told apart from a
-        // session of its own.
-        assert_eq!(
-            label(&labelled("wrangler", "scout", ""), Label::Name),
-            "@scout"
-        );
     }
 
     fn tabs() -> Vec<Tab> {
