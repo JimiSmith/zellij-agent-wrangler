@@ -37,7 +37,7 @@ placeholder.
 - [x] A pane hosting two agents contributes two rows
 - [x] Sections mode: the tree, then a block per agent, the same rows regrouped
 - [x] A pane's title follows the command and the directory running in it
-- [x] Agent labels update live
+- [x] Agent labels update live, within a turn
 - [x] Agent label from the working-directory basename
 - [x] Agent label from the session title, when it has one
 - [x] Teammates labelled `@name - title`

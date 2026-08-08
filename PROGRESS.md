@@ -97,6 +97,18 @@ inherit the filesystem: the four mounts are all there is, so anything in the
 user's home directory - an agent's own settings, for one - can only reach the
 sidebar by being sent to it.
 
+**A hook is the only thing that makes the sidebar look again.** There is no
+clock anywhere in the port, by design, so what a session is called and what
+color it is are re-read exactly when an agent fires a hook - which it does
+throughout a turn and not at all between them. A slash command that changes one
+of them (`/color`) submits no prompt, runs no tool and ends no turn, so nothing
+fires and the row is stale until the next message. Measured on a session where
+the hooks ran at 08:10:00 and the color was set at 08:10:04.
+
+That is the one property the polling daemon had that this does not. Closing it
+would mean either something that re-reads on a clock, or an agent event that
+fires when a slash command runs.
+
 **A Claude transcript is written at both ends.** The color a session is given
 and the name a teammate goes by are recorded once, in the first records of the
 file; the title is written and rewritten throughout. A fixed window over the end
