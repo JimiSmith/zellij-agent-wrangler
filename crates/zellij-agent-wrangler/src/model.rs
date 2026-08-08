@@ -5,6 +5,8 @@
 //! points at. A row's strings are the literal names of things, and every glyph
 //! drawn around them is chosen when the row is painted.
 
+use agent_wrangler_core::agent::SessionId;
+
 /// A child's position in its tab: the last one closes the tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Branch {
@@ -105,39 +107,6 @@ impl Indicator {
             Indicator::Attention => Some(('●', Some(NamedColor::Yellow))),
             Indicator::Working => Some(('○', None)),
         }
-    }
-}
-
-/// The id an agent gives its own session, which is what the sidebar files that
-/// agent under.
-///
-/// The id travels inside delimited text, so the only constructor replaces every
-/// character that is not a letter, a digit, `.`, `_` or `-`, and refuses an id
-/// that has no such character to begin with. A `SessionId` that could split a
-/// field or a record cannot be built.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SessionId(String);
-
-impl SessionId {
-    pub fn new(text: &str) -> Option<Self> {
-        if text.is_empty() {
-            return None;
-        }
-        Some(SessionId(
-            text.chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect(),
-        ))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -295,12 +264,6 @@ mod tests {
         ] {
             assert_eq!(RowKey::decode(text), None, "{text}");
         }
-    }
-
-    #[test]
-    fn a_session_id_keeps_nothing_that_could_split_a_field() {
-        let id = SessionId::new("a/b\tc,d=e\nf").unwrap();
-        assert_eq!(id.as_str(), "a_b_c_d_e_f");
     }
 
     #[test]

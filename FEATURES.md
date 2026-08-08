@@ -162,11 +162,11 @@ still attached to one, which is far more machinery than a beep is worth.
 - [x] Install the hook invocations into each agent's config from a manifest
 - [x] Merge into Claude's shared settings without touching other hooks, with a backup
 - [x] Write Copilot's dedicated config outright
-- [x] Idempotent, with `--uninstall`, upgrading a command written under the other name
+- [x] Idempotent, with `--uninstall`
 - [x] Install on load, behind an option
 
 A hook command is claimed only when the program it runs is named
-`zellij-wrangler`, or `wrangler` from a path holding `zellij-agent-wrangler`.
+`agent-wrangler`.
 Matching the program rather than a word in the line is what lets another
 installer's hooks sit in the same file untouched. The command is read back with
 the quoting it was written with, so a path with a space in it is recognised

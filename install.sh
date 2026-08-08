@@ -10,7 +10,7 @@
 set -eu
 
 repo=JimiSmith/zellij-agent-wrangler
-bin=${ZELLIJ_WRANGLER_BIN:-$HOME/.local/bin}
+bin=${AGENT_WRANGLER_BIN:-$HOME/.local/bin}
 
 case "$(uname -s)/$(uname -m)" in
     Linux/x86_64) target=x86_64-unknown-linux-gnu ;;
@@ -19,8 +19,7 @@ case "$(uname -s)/$(uname -m)" in
     Darwin/x86_64) target=x86_64-apple-darwin ;;
     *)
         echo "no released client for $(uname -s)/$(uname -m)." >&2
-        echo "build one: cargo build --release --no-default-features \\" >&2
-        echo "               --features native --bin zellij-wrangler" >&2
+        echo "build one: cargo build --release -p agent-wrangler" >&2
         exit 1
         ;;
 esac
@@ -42,24 +41,24 @@ if [ -z "$version" ]; then
 fi
 [ -n "$version" ] || { echo "could not work out the latest version." >&2; exit 1; }
 
-client="zellij-wrangler-$version-$target"
+client="agent-wrangler-$version-$target"
 wasm="zellij-agent-wrangler-$version.wasm"
 
 mkdir -p "$bin"
 if [ "$have_gh" = yes ]; then
     gh release download "$version" --repo "$repo" --pattern "$client" \
-        --output "$bin/zellij-wrangler" --clobber
+        --output "$bin/agent-wrangler" --clobber
 else
-    curl -fsSL --output "$bin/zellij-wrangler" \
+    curl -fsSL --output "$bin/agent-wrangler" \
         "https://github.com/$repo/releases/download/$version/$client"
 fi
-chmod +x "$bin/zellij-wrangler"
+chmod +x "$bin/agent-wrangler"
 
-"$bin/zellij-wrangler" install-hooks
+"$bin/agent-wrangler" install-hooks
 
 cat <<BLOCK
 
-Installed $("$bin/zellij-wrangler" --version) to $bin.
+Installed $("$bin/agent-wrangler" --version) to $bin.
 
 Give every tab a sidebar by putting this in your zellij layout, inside both
 default_tab_template and new_tab_template:

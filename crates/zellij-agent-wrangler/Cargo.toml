@@ -1,0 +1,22 @@
+[package]
+name = "zellij-agent-wrangler"
+version.workspace = true
+edition.workspace = true
+description = "A zellij sidebar listing tabs, panes and agent sessions (prototype)"
+
+[lib]
+name = "zellij_agent_wrangler"
+path = "src/lib.rs"
+
+# The plugin calls zellij's host functions, which exist only inside the wasm
+# host, so it is built for that target and tested through the library.
+[[bin]]
+name = "zellij-agent-wrangler"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+zellij-tile = "0.44.3"
+# The types alone. Off wasm, reading an agent's files pulls in JSON that the
+# sidebar has no use for: it is handed records, it does not find them.
+agent-wrangler-core = { path = "../agent-wrangler-core", default-features = false }

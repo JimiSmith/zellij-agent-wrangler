@@ -19,8 +19,8 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup component add clippy rustfmt
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
 
   release:
     needs: check
@@ -44,7 +44,7 @@ jobs:
       - name: Build the plugin
         run: |
           cargo build --release --locked --target wasm32-wasip1 \
-            --no-default-features --features plugin --bin zellij-agent-wrangler
+            -p zellij-agent-wrangler
       - name: Attach it, named for this tag
         env:
           GH_TOKEN: ${{ github.token }}
@@ -75,11 +75,11 @@ jobs:
       - name: Build the hook client
         run: |
           cargo build --release --locked --target ${{ matrix.target }} \
-            --no-default-features --features native --bin zellij-wrangler
+            -p agent-wrangler
       - name: Attach it, named for this tag and its platform
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          asset="zellij-wrangler-$GITHUB_REF_NAME-${{ matrix.target }}"
-          cp "target/${{ matrix.target }}/release/zellij-wrangler" "$asset"
+          asset="agent-wrangler-$GITHUB_REF_NAME-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/agent-wrangler" "$asset"
           gh release upload "$GITHUB_REF_NAME" "$asset" --clobber

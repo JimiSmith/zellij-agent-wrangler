@@ -331,6 +331,23 @@ pane is gone is still held but drawn nowhere, so nothing has to prune the
 registry against the manifest — which matters, since a sidebar in a background
 tab holds a manifest that may be arbitrarily stale.
 
+**What an agent is, and what draws it, are separate crates.** `agent-wrangler-core`
+holds the record, the turn, what a session is called by, the transcript reads
+that find those, and the registry that files them. It names no pane, tab, window
+or row. What stayed behind in the plugin is everything that turns a fact into a
+row: the label spelling, the terminal color a color *name* is drawn in, and
+placing a record under the pane it reported itself from. That line is the same
+one the record format already drew, which is why the split moved no logic and
+changed no test: 137 tests before, 137 after. The hook client left with core and
+is now `agent-wrangler`, one binary that knows nothing about zellij except the
+pipe it currently delivers on.
+
+**A `pane: u32` still rides on the record.** It is the one multiplexer-shaped
+field in a crate that is supposed to have none. It stays for now because the
+wire format has not changed yet; it is replaced by the verbatim environment
+variables the hook captured when the daemon lands, and the plugin reads its own
+multiplexer's keys out of them.
+
 ## A note on method
 
 Two of the three detours in this port came from concluding "zellij cannot do

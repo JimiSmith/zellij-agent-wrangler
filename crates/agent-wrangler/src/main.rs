@@ -11,13 +11,13 @@
 use std::io::Read;
 use std::process::{Command, ExitCode, Stdio};
 
-use zellij_agent_wrangler::agents::{
-    Agent, Meta, Turn, ATTENTION_MESSAGE, END_MESSAGE, START_MESSAGE, WORKING_MESSAGE,
+use agent_wrangler_core::agent::{
+    Agent, Meta, SessionId, Turn, ATTENTION_MESSAGE, END_MESSAGE, START_MESSAGE, WORKING_MESSAGE,
 };
-use zellij_agent_wrangler::install;
-use zellij_agent_wrangler::model::SessionId;
-use zellij_agent_wrangler::payload::{dir, Payload};
-use zellij_agent_wrangler::titles;
+use agent_wrangler_core::payload::{dir, Payload};
+use agent_wrangler_core::titles;
+
+mod install;
 
 /// The pane the hook was invoked in, which zellij sets on every terminal pane
 /// it spawns and every process started in one inherits.
@@ -129,16 +129,16 @@ fn hook(agent: &str, event: &str) {
     pipe(message, &record.encode());
 }
 
-const USAGE: &str = "usage: zellij-wrangler hook <agent> <start|end|working|needsAttention|error>
-       zellij-wrangler install-hooks [all|claude|copilot] [--uninstall]
-       zellij-wrangler --version";
+const USAGE: &str = "usage: agent-wrangler hook <agent> <start|end|working|needsAttention|error>
+       agent-wrangler install-hooks [all|claude|copilot] [--uninstall]
+       agent-wrangler --version";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("hook") => {
             let Some(agent) = args.get(1) else {
-                eprintln!("zellij-wrangler hook: agent name required");
+                eprintln!("agent-wrangler hook: agent name required");
                 return ExitCode::from(2);
             };
             // A session outside zellij has no sidebar to tell, and running the
@@ -152,9 +152,9 @@ fn main() -> ExitCode {
         // version, is what has to match the sidebar this client reports to.
         Some("--version") | Some("-V") => {
             println!(
-                "zellij-wrangler {} (record format {})",
+                "agent-wrangler {} (record format {})",
                 env!("CARGO_PKG_VERSION"),
-                zellij_agent_wrangler::agents::FORMAT
+                agent_wrangler_core::agent::FORMAT
             );
             ExitCode::SUCCESS
         }

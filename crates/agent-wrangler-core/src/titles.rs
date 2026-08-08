@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::agents::Meta;
+use crate::agent::Meta;
 
 /// How much of a transcript's end is read. Reading a fixed amount keeps the cost
 /// of a hook the same however long the session has run.
@@ -198,7 +198,7 @@ mod tests {
 
     impl Scratch {
         fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("zellij-wrangler-{name}"));
+            let path = std::env::temp_dir().join(format!("agent-wrangler-{name}"));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).unwrap();
             Scratch(path)

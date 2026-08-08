@@ -6,9 +6,9 @@
 //! width. What there is to point at does not depend on the width, so it is
 //! worked out here for both regions at once.
 
-use crate::agents::Registry;
 use crate::model::{Row, RowKey};
 use crate::options::Options;
+use agent_wrangler_core::registry::Registry;
 
 /// Every key the sidebar can put on screen, in the order they are drawn: the
 /// tree's, then one for each call listed at the foot.
@@ -45,8 +45,8 @@ pub fn selected(keys: &[RowKey], held: Option<&RowKey>) -> Option<RowKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::{Agent, Meta, Turn};
-    use crate::model::{Placement, RowContent, SessionId};
+    use crate::model::{Placement, RowContent};
+    use agent_wrangler_core::agent::{Agent, Meta, SessionId, Turn};
 
     fn session(text: &str) -> SessionId {
         SessionId::new(text).unwrap()

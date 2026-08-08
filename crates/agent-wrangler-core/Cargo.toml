@@ -1,0 +1,15 @@
+[package]
+name = "agent-wrangler-core"
+version.workspace = true
+edition.workspace = true
+description = "What an agent session is, told apart from whatever draws it"
+
+# The multiplexer plugins are wasm and want the types alone. Reading an agent's
+# files is what the feature turns on, and with it the JSON that parsing them
+# needs.
+[features]
+default = ["native"]
+native = ["dep:serde_json"]
+
+[dependencies]
+serde_json = { version = "1", optional = true, features = ["preserve_order"] }

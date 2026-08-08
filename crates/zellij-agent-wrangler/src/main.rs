@@ -16,11 +16,13 @@ use std::collections::BTreeMap;
 
 use zellij_tile::prelude::*;
 
-use zellij_agent_wrangler::agents::{
-    self, Agent, Record, Registry, ATTENTION_MESSAGE, END_MESSAGE, START_MESSAGE, SYNC_MESSAGE,
-    SYNC_REQUEST_MESSAGE, WORKING_MESSAGE,
+use agent_wrangler_core::agent::{
+    Agent, Record, SessionId, ATTENTION_MESSAGE, END_MESSAGE, START_MESSAGE, WORKING_MESSAGE,
 };
-use zellij_agent_wrangler::model::{Notification, Row, RowContent, RowKey, SessionId};
+use agent_wrangler_core::registry::Registry;
+
+use zellij_agent_wrangler::agents::{self, SYNC_MESSAGE, SYNC_REQUEST_MESSAGE};
+use zellij_agent_wrangler::model::{Notification, Row, RowContent, RowKey};
 use zellij_agent_wrangler::options::Options;
 use zellij_agent_wrangler::render::{notification_body_field, notification_rows, paint, wrap};
 use zellij_agent_wrangler::selection;
@@ -308,7 +310,7 @@ impl State {
             .map(|agent| Notification {
                 session: agent.session.clone(),
                 agent: agent.agent.clone(),
-                color: agent.color(),
+                color: agents::color(agent),
                 message: self.where_it_is(agent),
             })
             .collect()
@@ -323,7 +325,7 @@ impl State {
             .and_then(|position| self.tabs.iter().find(|tab| tab.position == position))
             .map(|tab| tab.name.clone())
             .unwrap_or_default();
-        let label = agent.label(self.options.label);
+        let label = agents::label(agent, self.options.label);
         match (tab.is_empty(), label.is_empty()) {
             (true, _) => label,
             (false, true) => tab,

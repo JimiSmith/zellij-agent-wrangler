@@ -18,6 +18,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "agent-wrangler"
+version = "0.1.0"
+dependencies = [
+ "agent-wrangler-core",
+ "serde_json",
+]
+
+[[package]]
+name = "agent-wrangler-core"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2550,7 +2565,7 @@ dependencies = [
 name = "zellij-agent-wrangler"
 version = "0.1.0"
 dependencies = [
- "serde_json",
+ "agent-wrangler-core",
  "zellij-tile",
 ]
 

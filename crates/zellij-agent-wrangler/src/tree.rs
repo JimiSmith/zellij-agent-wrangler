@@ -5,7 +5,9 @@
 //! What is derived here is everything that follows from a thing's *position*:
 //! its placement, its branch, and the index it is labelled with.
 
-use crate::agents::{Agent, Turn};
+use agent_wrangler_core::agent::{Agent, Turn};
+
+use crate::agents;
 use crate::model::{Branch, Indicator, Placement, Row, RowContent, RowKey};
 use crate::options::Options;
 
@@ -29,10 +31,10 @@ fn agent_row(
 ) -> Row {
     Row::new(RowContent::Agent {
         index,
-        label: agent.label(options.label),
+        label: agents::label(agent, options.label),
         branch,
         placement,
-        color: agent.color(),
+        color: agents::color(agent),
     })
     .with(indicator(agent, options))
 }
@@ -245,8 +247,8 @@ pub fn build_tree(tabs: &[Tab], options: &Options) -> Vec<Row> {
 mod tests {
     use super::*;
 
-    use crate::agents::Meta;
-    use crate::model::SessionId;
+    use agent_wrangler_core::agent::{Meta, SessionId};
+
     use crate::options::Label;
 
     fn pane(id: u32, title: &str, focused: bool) -> Pane {

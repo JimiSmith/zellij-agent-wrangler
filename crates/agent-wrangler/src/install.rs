@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
-use crate::command::words;
+use agent_wrangler_core::command::words;
 
 /// Which of each agent's events call which action, embedded so the installed
 /// binary carries it.
@@ -27,10 +27,10 @@ const MANIFEST_JSON: &str = include_str!("../hooks-manifest.json");
 
 /// The name of the hook client, which is what identifies this project's hook
 /// commands.
-const CLIENT: &str = "zellij-wrangler";
+const CLIENT: &str = "agent-wrangler";
 
 /// The suffix of the copy taken before a shared config is rewritten.
-const BACKUP: &str = ".zellij-wrangler.bak";
+const BACKUP: &str = ".agent-wrangler.bak";
 
 /// Quote a string for a POSIX shell: unchanged when every character is safe,
 /// else wrapped in single quotes with embedded quotes escaped.
@@ -60,12 +60,11 @@ fn hook_command(exe: &str, agent: &str, action: &str) -> String {
 /// Whether a hook command is one this installer owns for `agent`, so that it is
 /// replaced rather than added beside.
 ///
-/// The command must run a program named `zellij-wrangler`, or one named
-/// `wrangler` from a path containing `zellij-agent-wrangler`, with `hook` and
-/// that agent as its first two arguments. The test is on the *name of the
-/// program being run* rather than on any word in the line, so a command that
-/// merely mentions a similar name, or runs a similarly named program from
-/// somewhere else, is not claimed.
+/// The command must run a program named `agent-wrangler`, with `hook` and that
+/// agent as its first two arguments. The test is on the *name of the program
+/// being run* rather than on any word in the line, so a command that merely
+/// mentions a similar name, or runs a similarly named program from somewhere
+/// else, is not claimed.
 fn is_ours(command: &str, agent: &str) -> bool {
     let words = words(command);
     let [exe, hook, named, ..] = words.as_slice() else {
@@ -74,8 +73,7 @@ fn is_ours(command: &str, agent: &str) -> bool {
     if hook != "hook" || named != agent {
         return false;
     }
-    let name = Path::new(exe).file_name().unwrap_or_default();
-    name == CLIENT || (name == "wrangler" && exe.contains("zellij-agent-wrangler"))
+    Path::new(exe).file_name().unwrap_or_default() == CLIENT
 }
 
 /// The `(matcher, actions)` groups one manifest event describes: a list of
@@ -328,7 +326,7 @@ fn exe_path() -> String {
         .unwrap_or_else(|| CLIENT.to_string())
 }
 
-pub const USAGE: &str = "usage: zellij-wrangler install-hooks [all|claude|copilot] [--uninstall]";
+pub const USAGE: &str = "usage: agent-wrangler install-hooks [all|claude|copilot] [--uninstall]";
 
 /// Install, or remove, the hooks for the agents named. Returns what happened,
 /// line by line, and whether all of it worked.
@@ -378,7 +376,7 @@ pub fn run(args: &[String]) -> (Vec<String>, bool) {
 mod tests {
     use super::*;
 
-    const EXE: &str = "/home/u/.local/bin/zellij-wrangler";
+    const EXE: &str = "/home/u/.local/bin/agent-wrangler";
 
     fn events() -> Value {
         json!({
@@ -402,11 +400,11 @@ mod tests {
     #[test]
     fn a_command_running_the_client_is_ours() {
         assert!(is_ours(
-            "/home/u/bin/zellij-wrangler hook claude start",
+            "/home/u/bin/agent-wrangler hook claude start",
             "claude"
         ));
         assert!(is_ours(
-            "'/home/my files/zellij-wrangler' hook claude start",
+            "'/home/my files/agent-wrangler' hook claude start",
             "claude"
         ));
     }
@@ -417,10 +415,10 @@ mod tests {
         // freshly written command is claimed on the next run rather than
         // installed a second time beside itself.
         for exe in [
-            "/home/u/bin/zellij-wrangler",
-            "/home/my files/zellij-wrangler",
-            "/home/o'brien/bin/zellij-wrangler",
-            "/home/u/Development/zellij-agent-wrangler/target/debug/wrangler",
+            "/home/u/bin/agent-wrangler",
+            "/home/my files/agent-wrangler",
+            "/home/o'brien/bin/agent-wrangler",
+            "/home/u/Development/zellij-agent-wrangler/target/debug/agent-wrangler",
         ] {
             let command = hook_command(exe, "claude", "start");
             assert!(is_ours(&command, "claude"), "{command}");
@@ -434,27 +432,17 @@ mod tests {
     }
 
     #[test]
-    fn the_other_accepted_program_name_is_ours() {
-        let other =
-            "/home/u/Development/zellij-agent-wrangler/target/debug/wrangler hook claude end";
-        assert!(is_ours(other, "claude"));
-    }
-
-    #[test]
     fn a_command_for_another_agent_is_not_ours_to_replace() {
-        assert!(!is_ours(
-            "/bin/zellij-wrangler hook copilot start",
-            "claude"
-        ));
+        assert!(!is_ours("/bin/agent-wrangler hook copilot start", "claude"));
     }
 
     #[test]
     fn anything_that_is_not_a_hook_invocation_is_not_ours() {
         for command in [
             "",
-            "zellij-wrangler",
-            "zellij-wrangler claude start",
-            "my-linter --fix zellij-wrangler/hook/claude",
+            "agent-wrangler",
+            "agent-wrangler claude start",
+            "my-linter --fix agent-wrangler/hook/claude",
         ] {
             assert!(!is_ours(command, "claude"), "{command}");
         }
@@ -548,10 +536,12 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_under_the_other_accepted_name_is_replaced_rather_than_doubled() {
+    fn an_entry_from_another_path_is_replaced_rather_than_doubled() {
+        // The installed path moves with the binary, and a command left by an
+        // earlier install is still this project's to replace.
         let mut settings = json!({"hooks": {"SessionStart": [
             {"hooks": [{"type": "command",
-                        "command": "/home/u/Development/zellij-agent-wrangler/target/debug/wrangler hook claude start"}]}
+                        "command": "/home/u/Development/zellij-agent-wrangler/target/debug/agent-wrangler hook claude start"}]}
         ]}});
         installed(&mut settings);
         let groups = settings["hooks"]["SessionStart"].as_array().unwrap();

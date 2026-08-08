@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::command::words;
+use agent_wrangler_core::command::words;
 
 /// What an agent's row is called.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -96,7 +96,7 @@ pub struct Options {
 }
 
 /// The hook client the install option names when it only says to install.
-const CLIENT: &str = "zellij-wrangler";
+const CLIENT: &str = "agent-wrangler";
 
 impl Default for Options {
     fn default() -> Self {
@@ -225,13 +225,13 @@ mod tests {
         assert_eq!(read(&[("install_hooks", "off")]).install_hooks, None);
         assert_eq!(
             read(&[("install_hooks", "on")]).install_hooks.as_deref(),
-            Some("zellij-wrangler")
+            Some("agent-wrangler")
         );
         assert_eq!(
-            read(&[("install_hooks", "/opt/bin/zellij-wrangler")])
+            read(&[("install_hooks", "/opt/bin/agent-wrangler")])
                 .install_hooks
                 .as_deref(),
-            Some("/opt/bin/zellij-wrangler")
+            Some("/opt/bin/agent-wrangler")
         );
     }
 

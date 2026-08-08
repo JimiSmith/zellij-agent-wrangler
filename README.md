@@ -56,11 +56,15 @@ rustup target add wasm32-wasip1
 cargo test               # everything that does not call zellij, on the host target
 ```
 
-Two things are built, each without the other's half of the crate: the plugin
-(`--features plugin`), and `zellij-wrangler`, the hook client the agents invoke
-(`--features native`). `dev.sh` prints the client's path. The split is what
-keeps zellij's own crate out of the client, which off wasm would bring in curl,
-openssl and the rest of `zellij-utils`: 9 crates rather than 250.
+Three crates. `agent-wrangler-core` holds what an agent session is and what it
+is called by, and names no pane, tab or row. `agent-wrangler` is the hook client
+the agents invoke; `dev.sh` prints its path. `zellij-agent-wrangler` is the
+plugin, which is the only one that depends on zellij's own crate: off wasm that
+brings in curl, openssl and the rest of `zellij-utils`, 9 crates rather than
+250, and the client is now a separate binary that never sees it.
+
+The client is named for what it wrangles rather than for what draws it, because
+nothing it does is particular to zellij.
 
 ## Agent rows
 
@@ -69,8 +73,8 @@ reports the pane it was invoked in. The install script does this for you; to do 
 binary:
 
 ```bash
-zellij-wrangler install-hooks            # or: claude, copilot
-zellij-wrangler install-hooks --uninstall
+agent-wrangler install-hooks            # or: claude, copilot
+agent-wrangler install-hooks --uninstall
 ```
 
 Or have the sidebar do it on load, with `install_hooks` below.
@@ -78,7 +82,7 @@ Or have the sidebar do it on load, with `install_hooks` below.
 It writes the absolute path of the binary you ran, so it works from wherever
 that is; run it again after moving the binary. Claude's hooks are merged into
 `~/.claude/settings.json`, keeping every other key, the order they are in, the
-file's permissions and a `.zellij-wrangler.bak` copy of what was there; only
+file's permissions and a `.agent-wrangler.bak` copy of what was there; only
 commands running *this* client are replaced, so hooks belonging to anything else
 survive both installing and uninstalling. Copilot's file is one this owns
 outright. Running install twice writes the same bytes.
@@ -202,7 +206,7 @@ It is raised for every call whatever pane is focused, since sitting in a pane
 says nothing about whether the terminal is on screen; the `●` and the entry at
 the foot still clear when you get to the agent.
 
-`install_hooks "on"` runs `zellij-wrangler` from your `PATH`. Name a path
+`install_hooks "on"` runs `agent-wrangler` from your `PATH`. Name a path
 instead if it is not there.
 
 ## What it demonstrates

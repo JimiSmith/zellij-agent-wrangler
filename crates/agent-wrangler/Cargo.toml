@@ -1,0 +1,15 @@
+[package]
+name = "agent-wrangler"
+version.workspace = true
+edition.workspace = true
+description = "The hook client the agents invoke, and the installer that wires them up"
+
+# Named for what it wrangles rather than for what draws it: the same binary
+# serves any multiplexer, because nothing it does depends on one.
+[[bin]]
+name = "agent-wrangler"
+path = "src/main.rs"
+
+[dependencies]
+agent-wrangler-core = { path = "../agent-wrangler-core" }
+serde_json = { version = "1", features = ["preserve_order"] }
