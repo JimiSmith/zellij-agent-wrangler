@@ -37,19 +37,21 @@ placeholder.
 - [x] A pane hosting two agents contributes two rows
 - [x] Sections mode: the tree, then a block per agent, the same rows regrouped
 - [x] A pane's title follows the command and the directory running in it
-- [x] Agent labels update live, within a turn
+- [x] Agent labels update live, within a turn, and between them
 - [x] Agent label from the working-directory basename
 - [x] Agent label from the session title, when it has one
 - [x] Teammates labelled `@name - title`
 
-A session's title is in neither agent's hook body, so the client reads it off
-disk: Claude's from the transcript the body names, Copilot's from the workspace
-file it keeps per session. Both ends of a transcript are read, because what is
-wanted is written at both: a session records its color and a teammate's name
-once, as it begins, and writes and rewrites its title for as long as it runs. That is also what makes a label live
-without anything watching anything - an agent fires hooks throughout its turn,
-and every one of them carries the whole record, so a title taken on mid-session
-arrives on the next event of any kind.
+A session's title is in neither agent's hook body, so it is read off disk:
+Claude's from the transcript the hook names, Copilot's from the workspace file
+it keeps per session. Only the tail is read; a color written once as the session
+began and long since scrolled out of the window is held rather than looked for
+again.
+
+The reading is the daemon's, not the hook's. A hook says where the transcript is
+and exits, and the daemon re-reads any transcript that has moved once a second.
+That is what makes a label live between turns as well as within one: `/color`
+fires no hook at all, and nothing that only listens to hooks can see it.
 
 What the client reports is what a session is *called by* rather than what its
 row says: the directory, the title, and the teammate name. Composing those into
@@ -91,26 +93,50 @@ The color name is the fact; how to draw it is the sidebar's.
 - [x] `Enter` on a notification opens it
 - [ ] The selection falls back sanely when the row it was on is gone
 
+## The daemon
+
+- [x] One per user, started by whichever hook first finds none running
+- [x] Holds agent state and nothing about panes, tabs or rows
+- [x] Location captured from a named few environment variables, stored verbatim
+- [x] Watches every transcript it holds, and re-reads one that has moved
+- [x] Reaps a session whose process has gone without saying so
+- [x] Persists across its own restart, keeping only what still has a live process
+- [x] Delivers to registered clients, one sink kind per multiplexer
+- [x] Answers a call for the user when a client says it was reached
+- [x] Builds and runs on Linux, macOS and Windows
+- [ ] Desktop notifications raised by the daemon rather than by each client
+
+The daemon and the hook are the same executable, and a hook starts the daemon by
+running its own path, so those two can never be at different versions. The one
+boundary left is the daemon and whatever draws it, and a state message names the
+format it is written in.
+
+A state message carries a header naming itself. Without one an empty state and
+an empty message are the same bytes, and anything that arrived truncated would
+read as an instruction to forget every agent there is.
+
 ## The agent registry
 
 - [x] A hook client the agents invoke, taking the payload on stdin
 - [x] `start` / `end` / `working` / `needsAttention` / `error`, snake and camel payloads
-- [x] Sessions held by every sidebar, and asked for by one that starts later
-- [ ] Sessions surviving a session with no sidebar running at all
+- [x] ~~Sessions held by every sidebar, and asked for by one that starts later~~ (the daemon holds them)
+- [x] Sessions surviving a session with no sidebar running at all
 - [ ] A recorded pane counts only when the agent's pid descends from the pane's
 - [ ] A pane-less session is matched by title against each pane's live title
 - [ ] A session is filed under every tab showing it, and dropped if shown nowhere
 - [ ] Title collisions broken by the recorded pane, then the cwd
 
-The hook client reports the pane it was invoked in from `$ZELLIJ_PANE_ID`, which
-zellij sets on every terminal pane it spawns and every process started in one
-inherits. That number is the same one the plugin sees as a terminal pane's `id`,
-so the two ends agree on a pane without anything in between.
+A hook captures `$ZELLIJ_PANE_ID` among the variables it takes, which zellij
+sets on every terminal pane it spawns and every process started in one inherits.
+That number is the same one the plugin sees as a terminal pane's `id`, so the
+two ends agree on a pane without anything in between, and nothing between them
+has to know what it means.
 
-It reaches the sidebars through `zellij pipe`, which is delivered to every
-running plugin of the session it was run from whatever tab that plugin is in. A
-record whose pane is not on screen is held but drawn nowhere, so an agent in a
-pane that has gone leaves no row behind.
+The daemon reaches the sidebars through `zellij pipe`, addressed to the session
+by name and to no plugin, so every sidebar of that session hears it whatever tab
+it is in. The state carries every agent on the machine and each sidebar keeps
+the ones raised in its own session. A record whose pane is not on screen is held
+but drawn nowhere, so an agent in a pane that has gone leaves no row behind.
 
 ## Turn state
 
@@ -122,6 +148,11 @@ with everything else. A call is answered by arriving at the agent's pane, which
 is not an event of its own: it is whichever change moved the focus. Only the
 sidebar whose tab is on screen is sent those changes, so where the user is is
 sent between them, and every sidebar answers off the same reading.
+
+Arriving somewhere is a fact only a client has, so answering a call travels back
+to the daemon. The sidebar also stops drawing that call itself, keyed on the
+session and the moment it was raised, so a state message already in flight
+cannot bring it back; a call raised again is a new moment, and draws.
 
 ## Notifications
 

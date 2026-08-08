@@ -57,14 +57,49 @@ cargo test               # everything that does not call zellij, on the host tar
 ```
 
 Three crates. `agent-wrangler-core` holds what an agent session is and what it
-is called by, and names no pane, tab or row. `agent-wrangler` is the hook client
-the agents invoke; `dev.sh` prints its path. `zellij-agent-wrangler` is the
-plugin, which is the only one that depends on zellij's own crate: off wasm that
-brings in curl, openssl and the rest of `zellij-utils`, 9 crates rather than
-250, and the client is now a separate binary that never sees it.
+is called by, and names no pane, tab or row. `agent-wrangler` is one binary
+holding the hook client, the daemon and the installer; `dev.sh` prints its path.
+`zellij-agent-wrangler` is the plugin, the only crate that depends on zellij's
+own: off wasm that brings in curl, openssl and the rest of `zellij-utils`, 9
+crates rather than 250, and nothing native ever sees it.
 
 The client is named for what it wrangles rather than for what draws it, because
 nothing it does is particular to zellij.
+
+## The daemon
+
+Agent state lives in a daemon, one per user, started by whichever hook first
+finds none running. It holds what the sessions are and nothing about where they
+are shown; the sidebar is what turns a record into a row.
+
+```bash
+agent-wrangler agents      # what the daemon holds, as it would send it
+```
+
+A hook says what it saw and exits: which agent, which event, the transcript's
+path, and a named few of its own environment variables, captured verbatim. The
+daemon does the reading. That keeps the hook off the critical path of the turn
+it runs inside, and it is what lets the daemon do the two things a plugin never
+could:
+
+- **Watch.** Every transcript it has been told about is looked at once a second,
+  and re-read when it has moved. A session that titles itself, or is given a
+  colour with `/color`, is drawn without any hook firing at all.
+- **Reap.** A session whose process has gone is dropped. An agent killed without
+  an `end` event used to leave a row nothing would ever take away.
+
+The daemon and the hook are the same executable, and a hook starts the daemon by
+running its own path, so the two can never be different builds. What can differ
+is the daemon and the plugin, and a state message names the format it is written
+in: a sidebar sent one it does not know says so at the top of the pane.
+
+Records survive the daemon being restarted, but only those naming a process
+still running: a live agent says so again on its next event of any kind, where a
+dead one would otherwise be drawn for good.
+
+State is kept under `$XDG_STATE_HOME/agent-wrangler` (`%LOCALAPPDATA%` on
+Windows). The daemon is reached over a local socket, which is a unix socket on
+unix and a named pipe on Windows.
 
 ## Agent rows
 
@@ -112,10 +147,12 @@ Each run kills the `wrangler-proto` session it opens last time, because a
 session holds the wasm it loaded at startup and attaching would run the build
 before last.
 
-**The first run comes up blank.** The sidebar needs zellij's
-`ReadApplicationState` and `ChangeApplicationState`, and zellij asks by drawing
-over the plugin's pane, but nothing paints the question until something else
-forces a redraw, and a plugin is not rendered at all while its request is
+**The first run comes up blank, and does so again after an upgrade that changes
+which permissions are asked for.** Zellij caches the answer against the exact
+set that was asked for, so adding one means being asked again. The sidebar needs
+zellij's `ReadApplicationState`, `ChangeApplicationState`, `RunCommands` and
+`MessageAndLaunchOtherPlugins`, and zellij asks by drawing over the plugin's
+pane, but nothing paints the question until something else forces a redraw, and a plugin is not rendered at all while its request is
 pending. Focus the sidebar (`Ctrl+g`, then `Ctrl+p` and `←`) and press `y`.
 Zellij caches the answer against the wasm's path in
 `~/.cache/zellij/permissions.kdl`, so this is once per machine rather than once
@@ -193,12 +230,9 @@ the agent running them (`CLAUDE`, `COPILOT`, ...) rather than under the tab
 they are in. It only groups: a tab, a pane and an agent are drawn exactly the
 same wherever they appear.
 
-`desktop_notification` and `install_hooks` are the only two things the sidebar
-runs a command for, and they are the reason it would ask for zellij's
-`RunCommands` permission; with both off it never does. Turning one on asks you
-for it, and turning it off again gives the grant back: zellij caches the last
-set a plugin asked for rather than every set it has been given, so switching
-back and forth asks each time. Turned on, one sidebar
+`desktop_notification` and `install_hooks` both run a command, but so does
+asking the daemon for the agents at all, so the sidebar asks for zellij's
+`RunCommands` permission whatever these are set to. Turned on, one sidebar
 acts and the others stand down - whichever is in the tab you are in, which every
 sidebar works out the same way. The notification takes the agent's name and
 `<tab> · <label>` as its last two arguments, which is what `notify-send` wants.

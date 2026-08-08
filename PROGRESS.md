@@ -20,6 +20,11 @@ desktop notification carries the same event out of the terminal. The layout
 configures all of it, sections mode included. Both halves are released together
 and installed by one script.
 
+Agent state lives in a daemon rather than in the sidebar: one per user, started
+by the first hook that finds none running, watching every transcript it holds
+and reaping sessions whose process has gone. It knows nothing about panes. The
+native half builds for Linux, macOS and Windows.
+
 Left in checkpoint 3: turning the sidebar back on after `q`, which needs a
 zellij key binding rather than plugin code. Width sync was dropped by decision,
 and so was the bell.
@@ -38,20 +43,23 @@ disk. That is why the plugin's own logic lives in `src/lib.rs` and the plugin in
 a wasm-only bin. Host functions do not link on the host target, so anything
 calling them cannot be unit tested.
 
-Two features separate the halves. `native` carries the hook client, the JSON it
-reads and the installer; `plugin` carries the one module that reads zellij's own
-types, and with it the `zellij-tile` dependency. Both are on by default so
-`cargo test` covers the whole crate, and each build turns off the half it does
-not want. Bare `cargo build` on the host is the one command that does not work:
-it tries to link the plugin bin, whose host functions exist only inside zellij.
+Three crates separate the halves. `agent-wrangler-core` is the facts, and builds
+for wasm as well as the host; `agent-wrangler` is the daemon, the hook and the
+installer, and never sees `zellij-tile`; `zellij-agent-wrangler` is the plugin.
+Bare `cargo build` on the host is the one command that does not work: it tries
+to link the plugin bin, whose host functions exist only inside zellij.
+
+`cargo check -p agent-wrangler --target x86_64-pc-windows-msvc` is how the
+Windows port is kept honest from a Linux machine. It needs no linker, so it
+catches everything except what only fails at run time.
 
 Everything else is checked by driving a real session. `zellij action
 dump-screen` returns nothing for plugin panes, so the only way to see what a
 sidebar drew is to run zellij on a pty, capture what the terminal received, and
-replay it into a character grid. Alongside that, `zellij --session X action
-dump-layout` answers structural questions (which tabs hold what) without any
-screen scraping, and `list-clients` says which pane holds the focus. The scripts
-doing this were session-scratch and are not in the repo.
+replay it into a character grid. That harness is now in `tests/`: `screen.py` is
+the grid, `drive.py` runs a script of steps against a pty, and
+`tests/scripts/agent_row.steps` drives the whole path end to end, from a hook
+typed into a real pane to the row it draws and the call it answers.
 
 Three traps in that harness, each of which produced a false result before it was
 noticed. A shell redirection written to discard a stream can fail to:
@@ -75,8 +83,9 @@ this trap takes when the stale thing is the focus rather than the panes.
 
 **Pipe messages are not subject to that.** `pipe_messages` in
 `plugins/wasm_bridge.rs` walks every running plugin with no visibility filter,
-so a sidebar in a tab nobody is looking at still hears one. This is what lets
-every sidebar hold the agent registry rather than one of them owning it.
+so a sidebar in a tab nobody is looking at still hears one. This is what lets a
+state message reach every sidebar of a session at once, whichever tab is in
+front.
 
 **A terminal pane's id is `$ZELLIJ_PANE_ID`.** Zellij sets it to the pane's
 `terminal_id` when it spawns the process (`os_input_output_unix.rs`), and that is
@@ -97,17 +106,16 @@ inherit the filesystem: the four mounts are all there is, so anything in the
 user's home directory - an agent's own settings, for one - can only reach the
 sidebar by being sent to it.
 
-**A hook is the only thing that makes the sidebar look again.** There is no
-clock anywhere in the port, by design, so what a session is called and what
-color it is are re-read exactly when an agent fires a hook - which it does
-throughout a turn and not at all between them. A slash command that changes one
-of them (`/color`) submits no prompt, runs no tool and ends no turn, so nothing
-fires and the row is stale until the next message. Measured on a session where
-the hooks ran at 08:10:00 and the color was set at 08:10:04.
+**A hook is not enough to keep a row current.** An agent fires hooks throughout
+a turn and not at all between them, and a slash command that changes what a
+session is called or what colour it is (`/color`) submits no prompt, runs no
+tool and ends no turn, so no hook fires at all. Measured on a session where the
+hooks ran at 08:10:00 and the colour was set at 08:10:04, and the row stayed
+stale until the next message.
 
-That is the one property the polling daemon had that this does not. Closing it
-would mean either something that re-reads on a clock, or an agent event that
-fires when a slash command runs.
+This is the gap the daemon exists to close, and it cannot be closed from inside
+a plugin: it needs something reading files on a clock, and a plugin can reach
+neither the transcript nor a clock it can trust.
 
 **A Claude transcript records different things at different times.** The color a
 session is given and the name a teammate goes by are written once, near the
@@ -317,14 +325,18 @@ captured by whatever invoked it, and it runs with no controlling terminal, so
 ancestor still attached to a pseudo-terminal, which works and is far too much
 apparatus for a beep. The notification area carries the same event.
 
-**The agent registry is held by every sidebar, not persisted.** A hook reaches
-all of them at once and each draws the whole session, so they agree without
-anyone owning the record; a sidebar opening later asks the others for what they
-have and any sidebar that has some answers. Nothing survives every sidebar being
-closed at once. Writing the records under `/tmp` would fix that, at the cost of
-files no process is responsible for removing: an agent killed without an `end`
-would leave one behind for good, where the held version simply forgets. That
-trade is worth revisiting only if the gap is actually felt.
+**The agent registry is a daemon's, and every sidebar is a copy of it.** The gap
+that decided this was liveness rather than persistence: an agent titles itself,
+or is given a colour by `/color`, with no hook firing at all, and nothing that
+only listens to hooks can ever see it. A daemon watching transcripts can. The
+same process solves the two things that came with it for free: a session
+survives every sidebar closing, and an agent killed without an `end` event is
+reaped rather than left as a row nothing will remove.
+
+Persistence made reaping compulsory rather than nice. A record brought back from
+disk names a process that may have died while nothing was running, so only
+records naming a live process are restored; a live agent says so again on its
+very next event, where a dead one would otherwise be drawn for good.
 
 **A record reaches the tree only through the pane it names.** An agent whose
 pane is gone is still held but drawn nowhere, so nothing has to prune the
@@ -347,6 +359,36 @@ field in a crate that is supposed to have none. It stays for now because the
 wire format has not changed yet; it is replaced by the verbatim environment
 variables the hook captured when the daemon lands, and the plugin reads its own
 multiplexer's keys out of them.
+
+**An empty message and an empty state are the same bytes, so one has to say so.**
+The daemon sends the whole state on every change, and a client takes it as the
+truth, so a message that arrives empty is an instruction to forget every agent
+there is. That is fine when the daemon means it and a disaster when it does not,
+and the two are indistinguishable. Every state message now leads with a line
+naming itself and the format its records are in; anything else is ignored. This
+was found the hard way, watching a row appear on screen and vanish a second
+later.
+
+**A hook finds its agent by name, then by not being a shell.** The pid is what
+makes reaping possible, and a hook is a descendant of the agent with a shell or
+two in between. Counting steps breaks the moment a shell is added or removed, so
+the nearest ancestor named for the agent wins; and because an agent installed
+through npm reports as `node`, or as `node-MainThread`, the fallback is the
+nearest ancestor that is not a shell. Both rules were written after watching the
+name-only version find nothing on this machine.
+
+**`zellij pipe` reaches a session from outside it, and a payload given as an
+argument survives intact.** This is the assumption the whole daemon rests on and
+it is not the one the hook client used to make. Two things worth knowing came
+out of testing it: a payload left empty makes the command read standard input
+instead, so a caller that means to send nothing must still redirect; and the
+standard-input form sends a further, empty message at end of stream.
+
+**Zellij ignores a relative `XDG_CACHE_HOME`.** It finds its directories through
+the XDG rules, which take only absolute paths, so a test that sets a relative one
+silently reads the developer's real configuration and permissions instead. A
+sidebar that comes up blank because the permission it now asks for was never
+granted looks exactly like a sidebar that is broken.
 
 ## A note on method
 

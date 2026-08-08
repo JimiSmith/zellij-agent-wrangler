@@ -13,7 +13,14 @@ cargo build --manifest-path "$root/Cargo.toml" --target wasm32-wasip1 \
     -p zellij-agent-wrangler
 cargo build --manifest-path "$root/Cargo.toml" -p agent-wrangler
 
-echo "hook client: $root/target/debug/agent-wrangler"
+client="$root/target/debug/agent-wrangler"
+echo "client: $client"
+
+# A daemon already running is one built before this build, and it is the daemon
+# every hook and every sidebar will reach. Stopping it leaves the next event to
+# start the one that was just built.
+ps -e -o pid=,args= | grep -F "$client daemon" | grep -v grep |
+    awk '{print $1}' | xargs -r kill 2>/dev/null || true
 
 layout="$(mktemp -d)/dev.kdl"
 sed "s#PLUGIN_LOCATION#file:$wasm#" "$root/dev.kdl" >"$layout"

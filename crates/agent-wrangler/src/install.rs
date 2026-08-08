@@ -212,10 +212,11 @@ fn dumps(value: &Value) -> String {
     text
 }
 
-/// Expand a leading `~` to the user's home.
+/// Expand a leading `~` to the user's home, by whichever name this system gives
+/// it. A path is left as it is when there is no home to expand against.
 fn expand_user(path: &str) -> PathBuf {
-    match path.strip_prefix("~/").zip(std::env::var_os("HOME")) {
-        Some((rest, home)) => PathBuf::from(home).join(rest),
+    match path.strip_prefix("~/").zip(crate::paths::home()) {
+        Some((rest, home)) => home.join(rest),
         None => PathBuf::from(path),
     }
 }

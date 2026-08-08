@@ -68,11 +68,19 @@ jobs:
             target: aarch64-apple-darwin
           - runner: macos-13
             target: x86_64-apple-darwin
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: .exe
     runs-on: ${{ matrix.runner }}
+    # The upload step is written for a POSIX shell, which the Windows runner
+    # also has; naming it keeps one script for every platform in the matrix.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - run: rustup target add ${{ matrix.target }}
-      - name: Build the hook client
+      - name: Build the client and the daemon
         run: |
           cargo build --release --locked --target ${{ matrix.target }} \
             -p agent-wrangler
@@ -80,6 +88,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          asset="agent-wrangler-$GITHUB_REF_NAME-${{ matrix.target }}"
-          cp "target/${{ matrix.target }}/release/agent-wrangler" "$asset"
+          asset="agent-wrangler-$GITHUB_REF_NAME-${{ matrix.target }}${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/agent-wrangler${{ matrix.suffix }}" "$asset"
           gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
