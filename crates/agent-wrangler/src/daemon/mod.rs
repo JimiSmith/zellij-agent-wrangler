@@ -3,9 +3,11 @@
 //!
 //! One connection is one thread, and the state behind one lock, because the
 //! traffic is a handful of messages a second and a lock is far less machinery
-//! than a core loop with a channel. Delivery is the one thing done outside the
-//! lock: it runs a program per client, and holding the state while that happens
-//! would stall every other connection behind it.
+//! than a core loop with a channel. What the lock does *not* cover is the point:
+//! reading an agent's files, running a client, and writing the state out all
+//! happen with it released, because each of them can take arbitrarily long and
+//! the daemon answers its own socket while it is stuck, so nothing else could
+//! take over from a daemon that froze holding it.
 
 pub mod persist;
 pub mod sink;
@@ -14,7 +16,7 @@ pub mod state;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
@@ -23,15 +25,37 @@ use interprocess::local_socket::{GenericNamespaced, Listener, ListenerOptions, S
 
 use agent_wrangler_core::agent::FORMAT;
 
-use crate::daemon::state::{Real, State};
+use crate::daemon::state::{look, read_hook, Real, State};
 use crate::paths;
-use crate::proto::{read_message, write_message, Inbound, Outbound};
+use crate::proto::{read_message, write_message, Inbound, Outbound, Sink};
 
 /// How often every held transcript is looked at again, and every held pid.
 ///
 /// A second is what the eye reads as immediate for something that is not a
 /// keystroke, and one stat per session at that rate costs nothing measurable.
 const POLL: Duration = Duration::from_secs(1);
+
+/// How long to wait before accepting again after a failure.
+///
+/// A failure such as running out of descriptors does not consume the connection
+/// that caused it, so the same error is waiting on the next call and an
+/// immediate retry is a spin. This is short enough not to matter when the
+/// failure was a one-off.
+const AFTER_REFUSAL: Duration = Duration::from_millis(100);
+
+/// Take the state, whatever happened to whoever held it last.
+///
+/// A thread that panicked holding this poisons it, and every later attempt would
+/// fail forever after. Since the daemon keeps answering its socket either way,
+/// nothing could replace it, so a poisoned lock would leave a daemon that is
+/// alive, reachable and permanently useless. What it guards is a set of records
+/// re-sent whole on every change, so carrying on with it recovers where refusing
+/// to does not.
+fn held(shared: &Arc<Mutex<State>>) -> MutexGuard<'_, State> {
+    shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// What the daemon does with the socket name.
 enum Bound {
@@ -44,80 +68,113 @@ enum Bound {
 /// Claim the socket name, or find that someone else holds it.
 ///
 /// Connecting first is what tells a live daemon from a name left behind by one
-/// that died: a name that answers has an owner, and a name that does not is
-/// taken back rather than treated as fatal.
+/// that died. Taking the name over is then safe *because* of that: nothing
+/// answered it, so nothing is listening on it. Without this a daemon killed
+/// outright leaves a name that can never be bound again, on every system where
+/// the name is a file rather than one the kernel drops with the process.
 fn bind() -> std::io::Result<Bound> {
     let name = paths::socket_name();
-    let ns = name.clone().to_ns_name::<GenericNamespaced>()?;
+    let ns = name.to_ns_name::<GenericNamespaced>()?;
     if Stream::connect(ns.clone()).is_ok() {
         return Ok(Bound::Taken);
     }
     ListenerOptions::new()
         .name(ns)
+        .try_overwrite(true)
         .create_sync()
         .map(Bound::Ours)
 }
 
-/// Send one payload to every client, dropping the ones that have gone.
+/// Write the state out and tell every client, dropping the ones that have gone.
 ///
-/// Side effect: runs a program per zellij client. Called with no lock held.
-fn broadcast(shared: &Arc<Mutex<State>>) {
-    let (payload, sinks) = {
-        let state = shared.lock().expect("state lock");
-        (state.payload(), state.sinks())
+/// Side effect: writes a file and runs a program per zellij client. Called with
+/// no lock held, and takes it only to read what to send and to note who could
+/// not be reached.
+fn publish(shared: &Arc<Mutex<State>>, dir: &Path) {
+    let (payload, sinks, saved) = {
+        let state = held(shared);
+        (state.payload(), state.sinks(), state.snapshot())
     };
-    let mut gone = Vec::new();
-    for sink in sinks {
-        if !sink::deliver(&sink, &payload).sent() {
-            gone.push(sink);
-        }
-    }
-    if !gone.is_empty() {
-        let mut state = shared.lock().expect("state lock");
-        for sink in &gone {
-            state.drop_sink(sink);
+    persist::save(dir, &saved, &sinks);
+    let answers: Vec<(Sink, bool)> = sinks
+        .into_iter()
+        .map(|sink| {
+            let sent = sink::deliver(&sink, &payload).sent();
+            (sink, sent)
+        })
+        .collect();
+    let mut state = held(shared);
+    for (sink, sent) in answers {
+        match sent {
+            true => state.reached(&sink),
+            false => {
+                state.missed(&sink);
+            }
         }
     }
 }
 
-/// Deliver to one client, whatever the rest of them are doing.
-fn deliver_one(shared: &Arc<Mutex<State>>, to: &crate::proto::Sink) {
-    let payload = shared.lock().expect("state lock").payload();
-    if !sink::deliver(to, &payload).sent() {
-        shared.lock().expect("state lock").drop_sink(to);
+/// Tell one client, whatever the rest of them are doing.
+fn deliver_one(shared: &Arc<Mutex<State>>, to: &Sink) {
+    let payload = held(shared).payload();
+    let sent = sink::deliver(to, &payload).sent();
+    let mut state = held(shared);
+    match sent {
+        true => state.reached(to),
+        false => {
+            state.missed(to);
+        }
     }
+}
+
+/// Write out the state and who is listening to it, without telling anyone.
+fn record(shared: &Arc<Mutex<State>>, dir: &Path) {
+    let (saved, sinks) = {
+        let state = held(shared);
+        (state.snapshot(), state.sinks())
+    };
+    persist::save(dir, &saved, &sinks);
 }
 
 /// Read one connection to its end, applying what it says.
+///
+/// Each message is published as it is applied rather than at the end of the
+/// connection, so a client that holds its socket open is not also holding back
+/// every change it has already reported.
 ///
 /// Returns `true` when the sender spoke a record format this build does not,
 /// which is the one condition that makes the daemon stand down.
 fn serve(stream: Stream, shared: &Arc<Mutex<State>>, dir: &Path) -> bool {
     let mut reader = BufReader::new(&stream);
-    let mut stale = false;
-    let mut changed = false;
-    let mut announce: Option<crate::proto::Sink> = None;
 
     while let Ok(Some(message)) = read_message::<_, Inbound>(&mut reader) {
         match message {
             Inbound::Hook { format, .. } | Inbound::Register { format, .. } if format != FORMAT => {
-                stale = true;
-                break;
+                return true;
             }
             Inbound::Hook { hook, .. } => {
-                let mut state = shared.lock().expect("state lock");
-                changed |= state.on_hook(&hook, &Real);
+                // Read before locking. A transcript on a mount that has stopped
+                // answering takes as long as it takes, and every other event on
+                // the machine carries on meanwhile.
+                let reading = read_hook(&hook, &Real);
+                if held(shared).apply_hook(&hook, reading) {
+                    publish(shared, dir);
+                }
             }
             Inbound::Register { sink, .. } => {
-                shared.lock().expect("state lock").register(sink.clone());
-                announce = Some(sink);
+                held(shared).register(sink.clone());
+                // A client that has just registered has nothing yet, so it is
+                // told the state whether or not anything changed.
+                deliver_one(shared, &sink);
+                record(shared, dir);
             }
             Inbound::Seen { session } => {
-                let mut state = shared.lock().expect("state lock");
-                changed |= state.on_seen(&session);
+                if held(shared).on_seen(&session) {
+                    publish(shared, dir);
+                }
             }
             Inbound::Snapshot => {
-                let payload = shared.lock().expect("state lock").payload();
+                let payload = held(shared).payload();
                 let mut writer = BufWriter::new(&stream);
                 let _ = write_message(
                     &mut writer,
@@ -129,17 +186,20 @@ fn serve(stream: Stream, shared: &Arc<Mutex<State>>, dir: &Path) -> bool {
             }
         }
     }
+    false
+}
 
-    if changed {
-        let saved = shared.lock().expect("state lock").snapshot();
-        persist::save(dir, &saved);
-        broadcast(shared);
-    } else if let Some(sink) = announce {
-        // A client that has just registered has nothing yet, so it is told the
-        // state whether or not anything changed.
-        deliver_one(shared, &sink);
+/// Look at every held transcript and pid, and take in what changed.
+fn sweep(shared: &Arc<Mutex<State>>, dir: &Path) {
+    let (plan, since) = {
+        let state = held(shared);
+        (state.plan(), state.mtimes())
+    };
+    // The looking is the slow part, and it holds nothing.
+    let found = look(&plan, &Real, &since);
+    if held(shared).observe(found) {
+        publish(shared, dir);
     }
-    stale
 }
 
 /// Run as the daemon until something says to stop.
@@ -154,7 +214,11 @@ pub fn run() -> std::io::Result<()> {
 
     let dir = paths::state_dir();
     let mut initial = State::default();
-    initial.restore(persist::load(&dir), &Real);
+    let (sessions, sinks) = persist::load(&dir);
+    initial.restore(sessions, &Real);
+    for sink in sinks {
+        initial.register(sink);
+    }
     let shared = Arc::new(Mutex::new(initial));
     let stop = Arc::new(AtomicBool::new(false));
 
@@ -165,21 +229,18 @@ pub fn run() -> std::io::Result<()> {
         thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
                 thread::sleep(POLL);
-                let changed = {
-                    let mut state = shared.lock().expect("state lock");
-                    state.poll(&Real)
-                };
-                if changed {
-                    let saved = shared.lock().expect("state lock").snapshot();
-                    persist::save(&dir, &saved);
-                    broadcast(&shared);
-                }
+                sweep(&shared, &dir);
             }
         });
     }
 
     for incoming in listener.incoming() {
-        let Ok(stream) = incoming else { continue };
+        let Ok(stream) = incoming else {
+            // Whatever refused this is usually still there on the next call, so
+            // retrying at once is a spin rather than a retry.
+            thread::sleep(AFTER_REFUSAL);
+            continue;
+        };
         let shared = Arc::clone(&shared);
         let stop = Arc::clone(&stop);
         let dir = dir.clone();
@@ -191,10 +252,10 @@ pub fn run() -> std::io::Result<()> {
                 // says cannot be read reliably and what this says cannot be read
                 // by it. Standing down leaves the name free for the daemon it
                 // expects, which is itself; the next event of any kind starts
-                // that one.
+                // that one. What has been applied is written out first, and the
+                // clients with it, so the daemon taking over inherits both.
                 stop.store(true, Ordering::Relaxed);
-                let saved = shared.lock().expect("state lock").snapshot();
-                persist::save(&dir, &saved);
+                record(&shared, &dir);
                 std::process::exit(0);
             }
         });
@@ -209,5 +270,27 @@ mod tests {
     #[test]
     fn the_poll_is_often_enough_to_read_as_immediate() {
         assert!(POLL <= Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_refused_connection_is_not_retried_at_once() {
+        // The whole point of the pause: whatever refused it is still there, so
+        // an immediate retry saturates a core rather than recovering.
+        assert!(AFTER_REFUSAL >= Duration::from_millis(50));
+    }
+
+    #[test]
+    fn a_poisoned_lock_still_gives_up_its_state() {
+        let shared = Arc::new(Mutex::new(State::default()));
+        let poisoner = Arc::clone(&shared);
+        let _ = thread::spawn(move || {
+            let _guard = poisoner.lock().expect("state lock");
+            panic!("a thread died holding the state");
+        })
+        .join();
+        assert!(shared.is_poisoned());
+        // A daemon that refused to carry on here would be alive, reachable, and
+        // permanently unable to answer anything.
+        assert!(held(&shared).sinks().is_empty());
     }
 }

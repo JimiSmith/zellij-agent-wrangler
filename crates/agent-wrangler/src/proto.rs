@@ -45,7 +45,7 @@ pub struct Hook {
 /// One variant per multiplexer, and each says only how to reach that client.
 /// Adding a multiplexer is a variant here and an arm in the delivery, with
 /// nothing else in the daemon aware of it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Sink {
     /// A zellij session, reached by piping into it by name.
@@ -91,14 +91,28 @@ pub fn write_message<W: Write, T: Serialize>(writer: &mut W, message: &T) -> io:
     writer.flush()
 }
 
+/// The most one message may be.
+///
+/// A reader with no limit grows to whatever it is sent, so anything that can
+/// connect can take the daemon down by writing without ever sending a newline.
+/// This is far above any real message: the largest is a run of records, and a
+/// record is a few hundred bytes.
+const LONGEST: u64 = 4 * 1024 * 1024;
+
 /// Read one message from a line, or `None` at the end of the stream.
 ///
 /// A line that is not a message this build knows is skipped rather than ending
-/// the stream, so one unrecognised message does not cost the connection.
+/// the stream, so one unrecognised message does not cost the connection. A line
+/// longer than [`LONGEST`] ends it, because nothing that says anything is that
+/// long and carrying on would mean reading the rest of it as messages.
 pub fn read_message<R: BufRead, T: DeserializeOwned>(reader: &mut R) -> io::Result<Option<T>> {
     loop {
         let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
+        let mut bounded = io::Read::take(&mut *reader, LONGEST);
+        if bounded.read_line(&mut line)? == 0 {
+            return Ok(None);
+        }
+        if line.len() as u64 >= LONGEST && !line.ends_with('\n') {
             return Ok(None);
         }
         let line = line.trim();
@@ -203,6 +217,15 @@ mod tests {
             read_message::<_, Inbound>(&mut reader).unwrap(),
             Some(Inbound::Snapshot)
         );
+    }
+
+    #[test]
+    fn a_line_that_never_ends_ends_the_stream() {
+        // Anything that can connect could otherwise write forever and take the
+        // daemon down with it.
+        let endless = vec![b'x'; (LONGEST + 16) as usize];
+        let mut reader = endless.as_slice();
+        assert_eq!(read_message::<_, Inbound>(&mut reader).unwrap(), None);
     }
 
     #[test]

@@ -106,12 +106,90 @@ pub struct State {
     /// Where to deliver, newest last. A client that registers twice is one
     /// client, so the same sink is never held twice.
     sinks: Vec<Sink>,
+    /// How many deliveries in a row each client has refused.
+    misses: BTreeMap<Sink, u32>,
+}
+
+/// How many refusals in a row retire a client.
+///
+/// One is not enough. A client registers once and has no way of knowing it has
+/// been dropped, so a single delivery that failed for a passing reason - the
+/// multiplexer busy, a program missing from the path this daemon happened to
+/// inherit - would leave that sidebar drawing whatever it last received for
+/// good, with nothing said about why.
+const REFUSALS: u32 = 3;
+
+/// What an agent's files said, read before anything is locked.
+///
+/// Reading is separated from filing because a file can take arbitrarily long to
+/// open: a hung network mount, a dead sshfs, a named pipe with no writer. Doing
+/// it while holding the state would stop every other event on the machine being
+/// recorded, and the daemon answers its socket while frozen, so nothing could
+/// take over from it either.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Reading {
+    meta: Meta,
+    mtime: Option<u64>,
+}
+
+/// What the next look should cover.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Plan {
+    /// Session, agent kind, transcript path.
+    pub watch: Vec<(SessionId, String, String)>,
+    /// Session and the process said to be running it.
+    pub pids: Vec<(SessionId, u32)>,
+}
+
+/// What the look found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Look {
+    /// Session, the transcript's new modification time, and what it now says.
+    pub moved: Vec<(SessionId, u64, Meta)>,
+    /// Sessions whose process is no longer running.
+    pub dead: Vec<SessionId>,
+}
+
+/// Carry out a plan. Touches the filesystem and the process table, and holds
+/// nothing, so it is safe to do this while every other event carries on.
+pub fn look(plan: &Plan, world: &dyn World, since: &BTreeMap<SessionId, Option<u64>>) -> Look {
+    Look {
+        dead: plan
+            .pids
+            .iter()
+            .filter(|(_, pid)| !world.alive(*pid))
+            .map(|(session, _)| session.clone())
+            .collect(),
+        moved: plan
+            .watch
+            .iter()
+            .filter_map(|(session, agent, transcript)| {
+                let mtime = world.mtime(transcript)?;
+                if since.get(session).copied().flatten() == Some(mtime) {
+                    return None;
+                }
+                Some((
+                    session.clone(),
+                    mtime,
+                    world.meta(agent, transcript, session.as_str()),
+                ))
+            })
+            .collect(),
+    }
+}
+
+/// Read what a hook named. Touches the filesystem and nothing else.
+pub fn read_hook(hook: &Hook, world: &dyn World) -> Reading {
+    Reading {
+        meta: world.meta(&hook.agent, &hook.transcript, &hook.session_id),
+        mtime: world.mtime(&hook.transcript),
+    }
 }
 
 impl State {
-    /// Take in what a hook reported. `true` when this changed anything a client
-    /// would draw.
-    pub fn on_hook(&mut self, hook: &Hook, world: &dyn World) -> bool {
+    /// Take in what a hook reported, given what its files already said. `true`
+    /// when this changed anything a client would draw.
+    pub fn apply_hook(&mut self, hook: &Hook, reading: Reading) -> bool {
         let Some(session) = SessionId::new(&hook.session_id) else {
             return false;
         };
@@ -121,10 +199,9 @@ impl State {
             return self.registry.end(&session);
         }
 
-        let found = world.meta(&hook.agent, &hook.transcript, &hook.session_id);
         let meta = Meta {
             dir: dir(&hook.cwd),
-            ..found
+            ..reading.meta
         };
         let turn = match event {
             Event::Turn(turn) => turn,
@@ -154,7 +231,7 @@ impl State {
             Source {
                 agent: hook.agent.clone(),
                 transcript: hook.transcript.clone(),
-                mtime: world.mtime(&hook.transcript),
+                mtime: reading.mtime,
             },
         );
 
@@ -162,6 +239,17 @@ impl State {
             Event::Announce => self.registry.start(record),
             _ => self.registry.report(record),
         }
+    }
+
+    /// Read what the hook named and file it, in one step.
+    ///
+    /// The daemon does the two halves separately so the reading happens with
+    /// nothing locked. This is the same two calls with nothing in between, for
+    /// tests that are about what a hook does rather than about when it is safe
+    /// to do it.
+    #[cfg(test)]
+    pub fn on_hook(&mut self, hook: &Hook, world: &dyn World) -> bool {
+        self.apply_hook(hook, read_hook(hook, world))
     }
 
     /// The user reached a session that was calling for them.
@@ -175,14 +263,29 @@ impl State {
     /// Deliver to this client from now on. A client that says so twice is still
     /// one client.
     pub fn register(&mut self, sink: Sink) {
+        self.misses.remove(&sink);
         if !self.sinks.contains(&sink) {
             self.sinks.push(sink);
         }
     }
 
-    /// Stop delivering to a client that could not be reached.
-    pub fn drop_sink(&mut self, sink: &Sink) {
+    /// Note that a client could not be reached, and say whether it has now been
+    /// given up on.
+    pub fn missed(&mut self, sink: &Sink) -> bool {
+        let misses = self.misses.entry(sink.clone()).or_default();
+        *misses += 1;
+        if *misses < REFUSALS {
+            return false;
+        }
         self.sinks.retain(|held| held != sink);
+        self.misses.remove(sink);
+        true
+    }
+
+    /// Note that a client was reached, so the refusals before it do not count
+    /// towards giving up on it.
+    pub fn reached(&mut self, sink: &Sink) {
+        self.misses.remove(sink);
     }
 
     pub fn sinks(&self) -> Vec<Sink> {
@@ -206,48 +309,54 @@ impl State {
         &self.registry
     }
 
-    /// Look again at what has not been reported: transcripts that have changed
-    /// under a session, and agents that have gone without saying so.
+    /// What the next look should cover: the transcripts held, and the processes
+    /// to ask after. Reads nothing.
+    pub fn plan(&self) -> Plan {
+        Plan {
+            watch: self
+                .sources
+                .iter()
+                .map(|(session, source)| {
+                    (
+                        session.clone(),
+                        source.agent.clone(),
+                        source.transcript.clone(),
+                    )
+                })
+                .collect(),
+            pids: self
+                .registry
+                .iter()
+                .filter_map(|agent| agent.pid.map(|pid| (agent.session.clone(), pid)))
+                .collect(),
+        }
+    }
+
+    /// Take in what the look found. `true` when this changed anything.
     ///
     /// This is the whole reason for a daemon rather than a hook that reports and
     /// exits. A session titles itself, or is given a color, without any hook
     /// firing at all, and an agent that is killed fires no end event; neither is
     /// visible to anything that only listens.
-    pub fn poll(&mut self, world: &dyn World) -> bool {
+    pub fn observe(&mut self, look: Look) -> bool {
         let mut changed = false;
 
         // An agent whose process has gone is gone, whatever it last said.
-        let dead: Vec<SessionId> = self
-            .registry
-            .iter()
-            .filter(|agent| matches!(agent.pid, Some(pid) if !world.alive(pid)))
-            .map(|agent| agent.session.clone())
-            .collect();
-        for session in dead {
+        for session in look.dead {
             self.sources.remove(&session);
             changed |= self.registry.end(&session);
         }
 
-        let moved: Vec<(SessionId, Source, u64)> = self
-            .sources
-            .iter()
-            .filter_map(|(session, source)| {
-                let mtime = world.mtime(&source.transcript)?;
-                match source.mtime == Some(mtime) {
-                    true => None,
-                    false => Some((session.clone(), source.clone(), mtime)),
-                }
-            })
-            .collect();
-
-        for (session, source, mtime) in moved {
-            if let Some(source) = self.sources.get_mut(&session) {
-                source.mtime = Some(mtime);
-            }
+        for (session, mtime, found) in look.moved {
+            // A session that ended while the look was happening is not one to
+            // bring back.
+            let Some(source) = self.sources.get_mut(&session) else {
+                continue;
+            };
+            source.mtime = Some(mtime);
             let Some(held) = self.registry.get(&session).cloned() else {
                 continue;
             };
-            let found = world.meta(&source.agent, &source.transcript, session.as_str());
             // The directory is not in the transcript, so it is kept from what
             // the last hook said rather than blanked by a scan that never looks
             // for it.
@@ -262,6 +371,24 @@ impl State {
         }
 
         changed
+    }
+
+    /// Plan, look and take in, in one step. Separate in the daemon for the same
+    /// reason the hook path is.
+    #[cfg(test)]
+    pub fn poll(&mut self, world: &dyn World) -> bool {
+        let plan = self.plan();
+        let look = look(&plan, world, &self.mtimes());
+        self.observe(look)
+    }
+
+    /// What each held transcript last read as, which is what tells a file that
+    /// has moved from one that has not.
+    pub fn mtimes(&self) -> BTreeMap<SessionId, Option<u64>> {
+        self.sources
+            .iter()
+            .map(|(session, source)| (session.clone(), source.mtime))
+            .collect()
     }
 
     /// The state as it is kept between runs: every session, with the file its
@@ -484,9 +611,56 @@ mod tests {
         };
         state.register(sink.clone());
         state.register(sink.clone());
-        assert_eq!(state.sinks(), vec![sink.clone()]);
-        state.drop_sink(&sink);
+        assert_eq!(state.sinks(), vec![sink]);
+    }
+
+    #[test]
+    fn a_client_is_given_up_on_only_after_refusing_repeatedly() {
+        let mut state = State::default();
+        let sink = Sink::Zellij {
+            session: "proto".to_string(),
+        };
+        state.register(sink.clone());
+        for _ in 1..REFUSALS {
+            assert!(!state.missed(&sink));
+            assert_eq!(state.sinks(), vec![sink.clone()]);
+        }
+        assert!(state.missed(&sink));
         assert!(state.sinks().is_empty());
+    }
+
+    #[test]
+    fn reaching_a_client_forgives_the_times_it_was_missed() {
+        let mut state = State::default();
+        let sink = Sink::Zellij {
+            session: "proto".to_string(),
+        };
+        state.register(sink.clone());
+        for _ in 1..REFUSALS {
+            state.missed(&sink);
+        }
+        state.reached(&sink);
+        // The count starts again, so a client that answers now and then is
+        // never retired by refusals spread over hours.
+        for _ in 1..REFUSALS {
+            assert!(!state.missed(&sink));
+        }
+        assert_eq!(state.sinks(), vec![sink]);
+    }
+
+    #[test]
+    fn registering_again_forgives_the_times_a_client_was_missed() {
+        let mut state = State::default();
+        let sink = Sink::Zellij {
+            session: "proto".to_string(),
+        };
+        state.register(sink.clone());
+        for _ in 1..REFUSALS {
+            state.missed(&sink);
+        }
+        state.register(sink.clone());
+        assert!(!state.missed(&sink));
+        assert_eq!(state.sinks(), vec![sink]);
     }
 
     #[test]

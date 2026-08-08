@@ -390,6 +390,34 @@ silently reads the developer's real configuration and permissions instead. A
 sidebar that comes up blank because the permission it now asks for was never
 granted looks exactly like a sidebar that is broken.
 
+**Nothing slow may happen while the state is held.** The daemon reads an agent's
+files, runs a client and writes its state out, and any of those can take
+arbitrarily long: a hung network mount, a dead sshfs, a named pipe with no
+writer. Doing one of them under the lock stops every other event on the machine
+being recorded, and because the daemon keeps answering its socket while stuck,
+the recovery this design relies on - a fresh daemon taking the name back -
+cannot fire either. So reading is separated from filing on both paths: a hook is
+read, then applied; a sweep is planned, looked at, then taken in. The lock covers
+only the two ends.
+
+**Two writers naming one temporary file tear the state.** The save wrote to
+`agents.json.new` and renamed it over the real file, which is atomic for one
+writer and not for two: the second truncates the first's file, the first renames
+it into place, and the second then writes through its own descriptor into the
+file that is now live. The result parses as nothing, and reading nothing back
+means every session has ended. The name now carries the process and a counter.
+Worth knowing for the test: writers producing identical bytes tear into
+something that still reads back correctly, and looking only at the end finds
+whatever the last writer left, which is always whole. It takes distinct writers
+and a reader running alongside them.
+
+**A client registers once and cannot tell it is talking to a new daemon.** So
+the daemon keeps its clients on disk beside the sessions. Without that, any
+restart - a version mismatch, a crash, `dev.sh` - leaves every sidebar drawing
+whatever it last received, for good, with nothing said about why. For the same
+reason a client is given up on after several refusals rather than one: a single
+delivery that failed for a passing reason would otherwise retire it permanently.
+
 ## A note on method
 
 Two of the three detours in this port came from concluding "zellij cannot do
