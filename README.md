@@ -25,9 +25,15 @@ what the design rests on.
 curl -fsSL https://raw.githubusercontent.com/JimiSmith/zellij-agent-wrangler/main/install.sh | sh
 ```
 
-That installs the hook client, wires it into each agent's hooks, and prints the
+That installs the client, wires it into each agent's hooks, and prints the
 layout block for the plugin that goes with it. Nothing downloads the plugin:
-zellij fetches it from the url in that block and holds it.
+zellij fetches it from the url in that block and holds it. Nothing starts the
+daemon either: the first hook to find none running starts it.
+
+The block it prints is the one that is right for your machine. Where the install
+directory is not on your `PATH`, or your `PATH` finds another copy of the client
+first, the block names the client outright, because a sidebar that cannot run it
+draws no agents and says nothing about why.
 
 Put the block in your layout inside both `default_tab_template` and
 `new_tab_template`, beside `children`:

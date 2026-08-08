@@ -1,6 +1,10 @@
 #!/bin/sh
-# Install the hook client, and print the layout block for the plugin that goes
-# with it.
+# Install the client, and print the layout block for the plugin that goes with
+# it.
+#
+# The client is one binary holding the hook the agents invoke, the daemon those
+# hooks feed, and this installer. Nothing starts the daemon here: the first hook
+# to find none running starts it, by running this same binary.
 #
 # Both halves come from one release and are named for its tag, so the block this
 # prints pins the plugin to the version of the client it just installed. Nothing
@@ -56,6 +60,35 @@ chmod +x "$bin/agent-wrangler"
 
 "$bin/agent-wrangler" install-hooks
 
+# The sidebar reaches the daemon by running the client, so it has to be able to
+# find it. Left to itself it looks on `$PATH`; where that would find nothing, or
+# would find some other copy first, the layout has to name this one outright.
+# Getting this wrong costs every agent row and says nothing about why, so the
+# block printed below is the one that is right for this machine rather than the
+# one that is usually right.
+url="https://github.com/$repo/releases/download/$version/$wasm"
+found=$(command -v agent-wrangler 2>/dev/null || true)
+
+if [ "$found" = "$bin/agent-wrangler" ]; then
+    note="The sidebar finds the client on your PATH."
+    block="    pane size=32 borderless=true {
+        plugin location=\"$url\"
+    }"
+else
+    if [ -n "$found" ]; then
+        note="Your PATH finds a different agent-wrangler first ($found), so the
+block above names this one outright."
+    else
+        note="$bin is not on your PATH, so the block above names the client
+outright. Put $bin on your PATH instead and you can drop that line."
+    fi
+    block="    pane size=32 borderless=true {
+        plugin location=\"$url\" {
+            install_hooks \"$bin/agent-wrangler\"
+        }
+    }"
+fi
+
 cat <<BLOCK
 
 Installed $("$bin/agent-wrangler" --version) to $bin.
@@ -63,9 +96,9 @@ Installed $("$bin/agent-wrangler" --version) to $bin.
 Give every tab a sidebar by putting this in your zellij layout, inside both
 default_tab_template and new_tab_template:
 
-    pane size=32 borderless=true {
-        plugin location="https://github.com/$repo/releases/download/$version/$wasm"
-    }
+$block
+
+$note
 
 Zellij downloads that once and holds it. Updating means running this script
 again and changing the version in the url to match: the url is what zellij
