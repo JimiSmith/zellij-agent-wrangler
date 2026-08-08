@@ -15,8 +15,7 @@ wasm="$root/target/wasm32-wasip1/debug/zellij-agent-wrangler.wasm"
 mkdir -p "$(dirname "$out")" "$root/tests/out/cache/zellij"
 
 sed -e "s#PLUGIN_LOCATION#file:$wasm#" \
-    -e "s#install_hooks \"on\"#install_hooks \"$root/tests/scripts/wrangler-probe.sh\"#" \
-    -e "s#install_hooks \"off\"#install_hooks \"$root/tests/scripts/wrangler-probe.sh\"#" \
+    -e "s#CLIENT_LOCATION#$root/tests/scripts/wrangler-probe.sh#" \
     -e "s#desktop_notification \"on\"#desktop_notification \"off\"#" \
     "$root/dev.kdl" >"$out"
 

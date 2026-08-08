@@ -230,6 +230,13 @@ the agent running them (`CLAUDE`, `COPILOT`, ...) rather than under the tab
 they are in. It only groups: a tab, a pane and an agent are drawn exactly the
 same wherever they appear.
 
+`install_hooks` names the client as well as asking for the hooks to be
+installed, because the sidebar reaches the daemon by running that client and
+needs to know where it is. `on` means "on your `$PATH`", which is where the
+install script puts it; give it a path instead when the client lives somewhere
+else, as a build from source does. Getting this wrong costs you every agent row
+with nothing said about why, so `dev.sh` writes the path in for you.
+
 `desktop_notification` and `install_hooks` both run a command, but so does
 asking the daemon for the agents at all, so the sidebar asks for zellij's
 `RunCommands` permission whatever these are set to. Turned on, one sidebar

@@ -23,7 +23,8 @@ ps -e -o pid=,args= | grep -F "$client daemon" | grep -v grep |
     awk '{print $1}' | xargs -r kill 2>/dev/null || true
 
 layout="$(mktemp -d)/dev.kdl"
-sed "s#PLUGIN_LOCATION#file:$wasm#" "$root/dev.kdl" >"$layout"
+sed -e "s#PLUGIN_LOCATION#file:$wasm#" \
+    -e "s#CLIENT_LOCATION#$client#" "$root/dev.kdl" >"$layout"
 
 zellij delete-session wrangler-proto --force >/dev/null 2>&1 || true
 

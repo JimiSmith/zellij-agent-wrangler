@@ -7,6 +7,12 @@
 //
 // PLUGIN_LOCATION is substituted for the built wasm's absolute path: a `file:`
 // location is resolved against the session's cwd rather than against this file.
+//
+// CLIENT_LOCATION is substituted for the built client's absolute path. It has to
+// be a path rather than `on` here: `on` means the client is on `$PATH`, and a
+// development build is not. The sidebar reaches the daemon by running that
+// client, so a name it cannot find means a sidebar that draws no agents at all
+// and says nothing about why.
 layout {
     default_tab_template {
         pane size=1 borderless=true {
@@ -15,15 +21,16 @@ layout {
         pane split_direction="vertical" {
             pane size=32 borderless=true {
                 plugin location="PLUGIN_LOCATION" {
-                    // Every option, at its default. Both templates carry the
-                    // same block: a tab opened later is configured by the one
-                    // it is built from.
+                    // Every option, at its default bar the client's path,
+                    // which has none. Both templates carry the same block: a
+                    // tab opened later is configured by the one it is built
+                    // from.
                     label "name"
                     sections false
                     turn_state true
                     notifications true
                     desktop_notification "on"
-                    install_hooks "on"
+                    install_hooks "CLIENT_LOCATION"
                 }
             }
             children
@@ -39,15 +46,16 @@ layout {
         pane split_direction="vertical" {
             pane size=32 borderless=true {
                 plugin location="PLUGIN_LOCATION" {
-                    // Every option, at its default. Both templates carry the
-                    // same block: a tab opened later is configured by the one
-                    // it is built from.
+                    // Every option, at its default bar the client's path,
+                    // which has none. Both templates carry the same block: a
+                    // tab opened later is configured by the one it is built
+                    // from.
                     label "name"
                     sections false
                     turn_state true
                     notifications true
                     desktop_notification "off"
-                    install_hooks "off"
+                    install_hooks "CLIENT_LOCATION"
                 }
             }
             pane
