@@ -58,7 +58,7 @@
     }
   },
   "copilot": {
-    "target": "~/.copilot/hooks/zellij-wrangler.json",
+    "target": "~/.copilot/hooks/agent-wrangler.json",
     "format": "copilot",
     "events": {
       "sessionStart": [

@@ -51,12 +51,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Open the release this tag names
+      # Opened as a draft and published at the end, so nothing ever sees a
+      # release that is missing the platform it is on. A draft that is already
+      # there is left alone: this runs again whenever a tag is re-cut, and
+      # deleting a tag turns its release back into a draft.
+      - name: Open the release this tag names, as a draft
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
-            gh release create "$GITHUB_REF_NAME" --verify-tag \
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
               --title "$GITHUB_REF_NAME" --generate-notes
 
   plugin:
@@ -119,3 +123,16 @@ jobs:
           asset="agent-wrangler-$GITHUB_REF_NAME-${{ matrix.target }}${{ matrix.suffix }}"
           cp "target/${{ matrix.target }}/release/agent-wrangler${{ matrix.suffix }}" "$asset"
           gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
+
+  # Nothing below the release is allowed to be half done: the install script
+  # asks for the latest release and takes what it finds, so a release carrying
+  # some of its platforms is worse than one carrying none.
+  publish:
+    needs: [plugin, client]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish it, now that every platform is attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest
