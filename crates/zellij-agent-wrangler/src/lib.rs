@@ -4,6 +4,7 @@
 //! and read back in tests without a session, a pane, or a wasm host to run in.
 
 pub mod agents;
+pub mod calls;
 pub mod model;
 pub mod options;
 pub mod render;

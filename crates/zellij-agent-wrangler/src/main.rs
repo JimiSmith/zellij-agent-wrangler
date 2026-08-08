@@ -16,12 +16,11 @@ use std::collections::BTreeMap;
 
 use zellij_tile::prelude::*;
 
-use agent_wrangler_core::agent::{
-    Agent, Record, SessionId, ATTENTION_MESSAGE, END_MESSAGE, START_MESSAGE, WORKING_MESSAGE,
-};
+use agent_wrangler_core::agent::{self, Agent, Turn, AGENTS_MESSAGE};
 use agent_wrangler_core::registry::Registry;
 
-use zellij_agent_wrangler::agents::{self, SYNC_MESSAGE, SYNC_REQUEST_MESSAGE};
+use zellij_agent_wrangler::agents;
+use zellij_agent_wrangler::calls::{self, Answered};
 use zellij_agent_wrangler::model::{Notification, Row, RowContent, RowKey};
 use zellij_agent_wrangler::options::Options;
 use zellij_agent_wrangler::render::{notification_body_field, notification_rows, paint, wrap};
@@ -76,10 +75,20 @@ struct State {
     notices: Vec<Notification>,
     /// The agent sessions running in this zellij session.
     ///
-    /// Every sidebar holds the whole set, because an agent's hooks report to all
-    /// of them at once and each sidebar draws every tab. A sidebar that starts
-    /// after an agent did asks the others for what they have.
+    /// Every sidebar holds the whole set, because what arrives reaches all of
+    /// them at once and each sidebar draws every tab.
     registry: Registry,
+    /// The calls this sidebar has answered but has not yet been told about, so
+    /// that a row already arrived at does not come back for the round trip.
+    answered: Answered,
+    /// What zellij calls the session this sidebar is in, once it has been told.
+    ///
+    /// It is the only thing that says which of the agents described to the
+    /// sidebar are in front of the user, so until it is known none of them are.
+    session_name: Option<String>,
+    /// Whether this sidebar has asked to be sent the agents, which is done once
+    /// and only once there is a session name to ask on behalf of.
+    registered: bool,
     selected: Option<RowKey>,
     /// The answer to the permission request, absent until it is given. The
     /// sidebar can read nothing and reach nothing without it.
@@ -185,11 +194,68 @@ impl State {
     /// Arriving at an agent's pane is not an event of its own: it is whichever
     /// change moved the focus, which is why this is read off where the user is
     /// rather than raised anywhere.
+    ///
+    /// Side effect: runs the client, which is how the answer reaches what the
+    /// state is drawn from. Every sidebar puts its own row down, since they all
+    /// hold the same agents, but only one of them says so out loud: the same
+    /// answer given by each sidebar of a session is the same answer given as
+    /// many times.
     fn answer(&mut self) -> bool {
-        match self.focus.and_then(|focus| focus.listed()) {
-            Some(pane) => self.registry.seen(pane),
-            None => false,
+        let Some(pane) = self.focus.and_then(|focus| focus.listed()) else {
+            return false;
+        };
+        let calling: Vec<Agent> = self
+            .registry
+            .iter()
+            .filter(|agent| agents::pane(agent) == Some(pane) && agent.turn == Turn::Attention)
+            .cloned()
+            .collect();
+        let mut changed = false;
+        for agent in &calling {
+            self.answered.answer(agent);
+            changed |= self.registry.seen(&agent.session);
         }
+        if self.allowed() && self.is_where_the_user_is() {
+            for agent in &calling {
+                run_command(
+                    &[self.options.client(), "seen", agent.session.as_str()],
+                    BTreeMap::new(),
+                );
+            }
+        }
+        changed
+    }
+
+    /// Put back the calls the user has already turned up to.
+    ///
+    /// What the sidebar draws is handed to it whole and was written before the
+    /// answer got there, so it still says the agent is asking. Taking it at its
+    /// word would raise the row again for as long as the round trip takes.
+    fn suppress(&mut self) -> bool {
+        let mut changed = false;
+        for session in self.answered.settled(&self.registry) {
+            changed |= self.registry.seen(&session);
+        }
+        changed
+    }
+
+    /// Ask for this zellij session's agents to be sent here.
+    ///
+    /// Side effect: runs the client, which is what carries the request. It is
+    /// asked once per sidebar, on whichever of the session name and the
+    /// permission to run anything arrives second.
+    fn register(&mut self) {
+        let Some(name) = self.session_name.clone() else {
+            return;
+        };
+        if self.registered || !self.allowed() {
+            return;
+        }
+        self.registered = true;
+        run_command(
+            &[self.options.client(), "register", "zellij", &name],
+            BTreeMap::new(),
+        );
     }
 
     /// Rebuild the tree from the tabs and panes last reported, and say whether
@@ -319,8 +385,7 @@ impl State {
     /// Where an agent is, as an entry says it: the tab holding its pane, then
     /// the agent's own label.
     fn where_it_is(&self, agent: &Agent) -> String {
-        let tab = agent
-            .pane
+        let tab = agents::pane(agent)
             .and_then(|pane| session::tab_of_pane(&self.panes, pane))
             .and_then(|position| self.tabs.iter().find(|tab| tab.position == position))
             .map(|tab| tab.name.clone())
@@ -403,7 +468,7 @@ impl State {
             Some(RowKey::Agent(session))
             | Some(RowKey::Section(session))
             | Some(RowKey::Notification(session)) => {
-                if let Some(id) = self.registry.get(&session).and_then(|agent| agent.pane) {
+                if let Some(id) = self.registry.get(&session).and_then(agents::pane) {
                     focus_pane_with_id(PaneId::Terminal(id), false, false);
                 }
             }
@@ -439,50 +504,60 @@ impl State {
         self.select(keys.get(next).cloned());
     }
 
-    /// Take in what an agent's hooks reported, and say whether the tree changed
-    /// because of it.
+    /// Take in the agents described to the sidebar, and say whether the tree
+    /// changed because of it.
     ///
-    /// Every event but the last carries the whole record, so what a session
-    /// calls itself is taken in again each time and a label follows the session
-    /// while it runs. The message name says only which event it was: announcing
-    /// a session says nothing about the turn it is in the middle of, where the
-    /// rest say exactly that.
-    fn hook(&mut self, message: &PipeMessage) -> bool {
-        let payload = message.payload.as_deref().unwrap_or_default();
-        if message.name == END_MESSAGE {
-            let ended = SessionId::new(payload)
-                .map(|session| self.registry.end(&session))
-                .unwrap_or(false);
-            return ended && self.resolve();
+    /// The whole state arrives every time, so what it leaves out has gone and
+    /// what it holds is what there is: a sidebar that missed one is put right by
+    /// the next rather than left a record behind. Only this zellij session's
+    /// agents are taken in, since the rest are in panes this sidebar has none of.
+    fn adopt(&mut self, text: &str) -> bool {
+        // Anything that is not a whole statement of the state is not one to act
+        // on. An empty message is the shape a truncated or foreign one takes,
+        // and acting on it would mean forgetting every agent there is.
+        let Some((format, records)) = agent::read_state(text) else {
+            return false;
+        };
+        // A client of another version is worth saying so about: it is why an
+        // agent that is plainly running has no row, and no amount of looking at
+        // the sidebar would otherwise explain it.
+        let mismatch = format != agent::FORMAT && !std::mem::replace(&mut self.mismatched, true);
+        if format != agent::FORMAT {
+            return mismatch;
         }
-        let record = match Agent::decode(payload) {
-            Record::Known(agent) => agent,
-            // A client of another version is worth saying so about: it is why
-            // an agent that is plainly running has no row, and no amount of
-            // looking at the sidebar would otherwise explain it.
-            Record::Foreign(_) => {
-                let known = std::mem::replace(&mut self.mismatched, true);
-                return !known;
-            }
-            Record::None => return false,
-        };
-        let changed = match message.name.as_str() {
-            START_MESSAGE => self.registry.start(record),
-            WORKING_MESSAGE => self.registry.report(record),
-            // A call for the user carries the moment it was raised, so that
-            // every sidebar lists the calls in the same order.
-            ATTENTION_MESSAGE => {
-                self.raise(&record);
-                self.registry.report(record)
-            }
-            _ => false,
-        };
+        let held = self.registry.clone();
+        let mine = agents::ours(records, self.session_name.as_deref().unwrap_or_default());
+        let mut changed = self.registry.adopt(&mine);
+        changed |= self.suppress();
+        // Every call that is new since the last state was read, which is the
+        // only thing here that says one has just been raised.
+        for agent in calls::raised(&held, &self.registry) {
+            self.raise(agent);
+        }
         // A call raised by the pane the user is already in is answered in the
-        // same pass that recorded it, and so never draws.
-        let answered = self.answer();
+        // same pass that took it in, and so never draws.
+        changed |= self.answer();
+        self.answered.prune(&self.registry);
         // A record only reaches the tree through the pane it names, so a change
         // to the registry is not yet a change to what is drawn.
-        (changed || answered) && self.resolve()
+        let drawn = changed && self.resolve();
+        drawn || mismatch
+    }
+
+    /// Take the name zellij gives the session this sidebar is in, and ask for
+    /// that session's agents.
+    ///
+    /// Side effect: stops listening for the sessions, and asks for the agents.
+    /// The name is settled when the session is made, and being woken for every
+    /// change to every session on the machine to be told the same name again is
+    /// a great deal of waking for nothing.
+    fn name_session(&mut self, sessions: &[SessionInfo]) {
+        let Some(current) = sessions.iter().find(|session| session.is_current_session) else {
+            return;
+        };
+        unsubscribe(&[EventType::SessionUpdate]);
+        self.session_name = Some(current.name.clone());
+        self.register();
     }
 }
 
@@ -492,17 +567,15 @@ impl ZellijPlugin for State {
         self.plugin_id = get_plugin_ids().plugin_id;
         // Reading the session's tabs and panes, and going to what a row points
         // at: the sidebar asks for nothing it would not use. Running a command
-        // is asked for only by a sidebar configured to run one, so turning the
-        // options that do off is also turning that question off.
-        let mut permissions = vec![
+        // is how it asks to be sent the agents at all, so it is asked for
+        // whatever the layout says: a sidebar that cannot run one has nothing
+        // to draw.
+        request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
             PermissionType::MessageAndLaunchOtherPlugins,
-        ];
-        if self.options.runs_commands() {
-            permissions.push(PermissionType::RunCommands);
-        }
-        request_permission(&permissions);
+            PermissionType::RunCommands,
+        ]);
         subscribe(&[
             EventType::Key,
             EventType::Mouse,
@@ -511,6 +584,7 @@ impl ZellijPlugin for State {
             EventType::CommandChanged,
             EventType::CwdChanged,
             EventType::PermissionRequestResult,
+            EventType::SessionUpdate,
         ]);
     }
 
@@ -530,13 +604,17 @@ impl ZellijPlugin for State {
             // re-read exactly then and the sidebar keeps no clock of its own.
             Event::CommandChanged(PaneId::Terminal(id), ..)
             | Event::CwdChanged(PaneId::Terminal(id), ..) => self.refresh_title(id),
+            // Which session this is is asked for once and then never again, so
+            // it is taken from the first report that names it.
+            Event::SessionUpdate(sessions, _) => {
+                self.name_session(&sessions);
+                false
+            }
             Event::PermissionRequestResult(status) => {
                 self.permission = Some(status);
-                // Asking before the answer arrives sends nothing: a plugin
-                // without permission to message others has its sends dropped.
-                if status == PermissionStatus::Granted {
-                    pipe_message_to_plugin(MessageToPlugin::new(SYNC_REQUEST_MESSAGE));
-                }
+                // Asking before the answer arrives runs nothing: a plugin
+                // without permission to run a command has its runs dropped.
+                self.register();
                 true
             }
             Event::Key(key) => match key.bare_key {
@@ -581,11 +659,11 @@ impl ZellijPlugin for State {
         }
     }
 
-    /// Take in what another sidebar said, or what an agent's hooks reported.
+    /// Take in what another sidebar said, or what the agents were described as.
     ///
     /// Every broadcast reaches its own sender, so anything a sidebar says to the
-    /// others is ignored when it comes back. Hook messages come from the command
-    /// line and are never this plugin's own.
+    /// others is ignored when it comes back. What describes the agents comes
+    /// from the command line and is never this plugin's own.
     fn pipe(&mut self, message: PipeMessage) -> bool {
         if message.source == PipeSource::Plugin(self.plugin_id) {
             return false;
@@ -616,23 +694,7 @@ impl ZellijPlugin for State {
                 }
                 None => false,
             },
-            // A sidebar that knows nothing has nothing to answer with, and
-            // answering would only tell the asker what it already has.
-            SYNC_REQUEST_MESSAGE => {
-                if !self.registry.is_empty() {
-                    pipe_message_to_plugin(
-                        MessageToPlugin::new(SYNC_MESSAGE).with_payload(self.registry.encode()),
-                    );
-                }
-                false
-            }
-            SYNC_MESSAGE => {
-                let payload = message.payload.as_deref().unwrap_or_default();
-                self.registry.absorb(payload) && self.resolve()
-            }
-            START_MESSAGE | END_MESSAGE | WORKING_MESSAGE | ATTENTION_MESSAGE => {
-                self.hook(&message)
-            }
+            AGENTS_MESSAGE => self.adopt(message.payload.as_deref().unwrap_or_default()),
             _ => false,
         }
     }

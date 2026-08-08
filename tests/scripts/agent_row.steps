@@ -1,0 +1,56 @@
+# The whole path, end to end: a hook fired from inside a real pane reaches the
+# daemon, the daemon pipes the state into the zellij session, and the sidebar
+# draws that session as a row.
+#
+# The hook is typed into a pane rather than run on the host, because the pane is
+# where `ZELLIJ_PANE_ID` comes from and that variable is the only thing that
+# decides which row the agent lands under.
+
+env: ZELLIJ_CONFIG_DIR=$PWD/tests/zellij-config
+env: TERM=xterm-256color
+env: XDG_STATE_HOME=$PWD/tests/out/state
+env: XDG_CACHE_HOME=$PWD/tests/out/cache
+
+# A session left behind by a run that was interrupted would make this one fail
+# to start rather than fail an assertion, and a daemon left over from another
+# run holds records this run did not make.
+sh?: tests/scripts/reset.sh wrangler-test-e2e
+
+sh: cargo build --target wasm32-wasip1 -p zellij-agent-wrangler
+sh: cargo build -p agent-wrangler
+sh: tests/scripts/make-layout.sh tests/out/e2e.kdl
+
+spawn: zellij --session wrangler-test-e2e --new-session-with-layout tests/out/e2e.kdl
+
+# The sidebar draws the session's tabs, so its own tab's name is the first proof
+# it is alive and has been given the permissions it asked for.
+wait: notes @ 25
+
+# What a real agent's hook does, from the pane a real agent would be running in.
+keys: printf '%s' '{"session_id":"e2e-one","cwd":"/home/u/quarry","transcript_path":"'"$PWD"'/tests/out/e2e-transcript.jsonl"}' | "$PWD/target/debug/agent-wrangler" hook claude start\r
+
+# What the pane saw of its own environment and of the hook, which is the only
+# way to tell a hook that never ran from one that ran and was not delivered.
+keys: echo "PANE zellij=$ZELLIJ session=$ZELLIJ_SESSION_NAME pane=$ZELLIJ_PANE_ID" > tests/out/pane-env.txt 2>&1\r
+sleep: 1
+sh?: sh -c 'sleep 1; ./target/debug/agent-wrangler agents > tests/out/agents.txt 2>&1'
+
+# Deliver by hand, which tells a sink that was never registered from a message
+# the sidebar does not act on.
+
+# The label the transcript gives the session. Its appearing at all means the
+# hook reached the daemon, the daemon reached this session, and the plugin
+# placed the record under the pane the hook named.
+wait: QUARRYMARK @ 20
+dump: agent_row_start
+
+# A call for the user raised by the pane the user is already sitting in is
+# answered where it lands, so what proves it travelled is the daemon agreeing
+# that it has been answered, not anything appearing on screen.
+keys: printf '%s' '{"session_id":"e2e-one","cwd":"/home/u/quarry","transcript_path":"'"$PWD"'/tests/out/e2e-transcript.jsonl"}' | "$PWD/target/debug/agent-wrangler" hook claude needsAttention\r
+sleep: 3
+sh: tests/scripts/expect-turn.sh e2e-one idle
+dump: agent_row_answered
+
+keys: <C-q>
+sleep: 1

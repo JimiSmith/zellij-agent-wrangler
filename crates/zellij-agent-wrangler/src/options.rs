@@ -143,10 +143,15 @@ impl Options {
         }
     }
 
-    /// Whether anything here needs zellij to run a command on the sidebar's
-    /// behalf, which is a permission worth asking for only when it is used.
-    pub fn runs_commands(&self) -> bool {
-        self.desktop.is_some() || self.install_hooks.is_some()
+    /// The client the sidebar reaches everything outside its own pane through.
+    ///
+    /// The sidebar always needs one, whatever the layout says: what it draws
+    /// arrives only once it has asked to be sent it, and only the client can
+    /// ask. The install option is where a layout names a client living
+    /// somewhere the path would not find, so a layout that has named one there
+    /// has named it for this too.
+    pub fn client(&self) -> &str {
+        self.install_hooks.as_deref().unwrap_or(CLIENT)
     }
 }
 
@@ -236,9 +241,14 @@ mod tests {
     }
 
     #[test]
-    fn only_the_options_that_run_something_ask_to_run_commands() {
-        assert!(!read(&[]).runs_commands());
-        assert!(read(&[("desktop_notification", "on")]).runs_commands());
-        assert!(read(&[("install_hooks", "on")]).runs_commands());
+    fn the_client_is_the_one_the_install_option_names_or_the_default() {
+        // A sidebar told not to install the hooks still has a client to reach,
+        // since that is what it is sent anything through at all.
+        assert_eq!(read(&[]).client(), "agent-wrangler");
+        assert_eq!(read(&[("install_hooks", "off")]).client(), "agent-wrangler");
+        assert_eq!(
+            read(&[("install_hooks", "/opt/bin/agent-wrangler")]).client(),
+            "/opt/bin/agent-wrangler"
+        );
     }
 }

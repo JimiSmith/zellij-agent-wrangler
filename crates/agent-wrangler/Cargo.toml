@@ -2,14 +2,35 @@
 name = "agent-wrangler"
 version.workspace = true
 edition.workspace = true
-description = "The hook client the agents invoke, and the installer that wires them up"
+description = "The daemon that tracks agent sessions, the hooks that feed it, and the installer that wires them up"
 
 # Named for what it wrangles rather than for what draws it: the same binary
 # serves any multiplexer, because nothing it does depends on one.
+#
+# The daemon is a subcommand rather than a binary of its own, and a hook starts
+# it by running its own executable. That is what makes the two impossible to
+# have at different versions.
 [[bin]]
 name = "agent-wrangler"
 path = "src/main.rs"
 
 [dependencies]
 agent-wrangler-core = { path = "../agent-wrangler-core" }
+serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+# A local socket that is a unix socket on unix and a named pipe on Windows.
+# Zellij's own answer to the same problem, which is why it is the one taken.
+interprocess = { version = "2.2", default-features = false }
+
+# Asking whether a pid is still alive, which is the one thing std cannot do.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The same question, plus reading the process table, which Windows answers
+# through kernel32 rather than through a command. Only the two leaf features are
+# named; each pulls in the Foundation handle and error types it depends on.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+] }

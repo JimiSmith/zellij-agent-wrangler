@@ -1,9 +1,12 @@
-//! One agent session: who it is, what it calls itself, and whose turn it is.
+//! One agent session: who it is, what it calls itself, where it reported itself
+//! from, and whose turn it is.
 //!
 //! A record is written as one line of delimited text and read back the same
 //! way, so the two ends of the wire can be built and updated separately. Every
 //! field is stripped of the characters that would split a line, which is why the
 //! fields are built rather than assigned.
+
+use crate::origin::Origin;
 
 /// The character between a record's fields, and the one between records. Both
 /// are excluded from every field, so a run of records splits exactly.
@@ -16,18 +19,40 @@ pub(crate) const RECORD: char = '\n';
 /// separately, so one of them can be older than the other. Saying which shape a
 /// record is written in is what turns that into something the reader can report
 /// rather than a run of records it silently makes nothing of.
-pub const FORMAT: u32 = 2;
+pub const FORMAT: u32 = 3;
 
-/// The messages a session is reported on. Each carries one whole record: what a
-/// session calls itself changes under it, so every event is a chance to say so,
-/// and only the message name says which event it was.
+/// The message every record travels in.
 ///
-/// The one exception is the end of a session, which names it and nothing else:
-/// there is no state left to describe.
-pub const START_MESSAGE: &str = "wrangler:agent-start";
-pub const END_MESSAGE: &str = "wrangler:agent-end";
-pub const WORKING_MESSAGE: &str = "wrangler:agent-working";
-pub const ATTENTION_MESSAGE: &str = "wrangler:agent-attention";
+/// One message carries the whole set rather than one session's news, because
+/// what a reader needs is the state, not the events that led to it: a reader
+/// that misses a message is corrected by the next one instead of being left a
+/// record behind.
+pub const AGENTS_MESSAGE: &str = "wrangler:agents";
+
+/// The line every state message leads with, naming what it is and what shape
+/// its records are in.
+const HEADER: &str = "wrangler";
+
+/// A run of records as a whole statement of what there is.
+///
+/// The header is what makes "there are no agents" a thing that can be *said*.
+/// Without it an empty state and an empty message are the same bytes, and a
+/// message that arrived truncated, or one sent by something else entirely,
+/// would read as an instruction to forget every agent there is.
+pub fn state(records: &str) -> String {
+    format!("{HEADER} {FORMAT}{RECORD}{records}")
+}
+
+/// The format and the records of a state message, or `None` for anything that
+/// is not one.
+pub fn read_state(payload: &str) -> Option<(u32, &str)> {
+    let (head, records) = payload.split_once(RECORD)?;
+    let (name, format) = head.split_once(' ')?;
+    match name == HEADER {
+        true => Some((format.parse().ok()?, records)),
+        false => None,
+    }
+}
 
 /// The id an agent gives its own session, which is what that session is filed
 /// under.
@@ -129,14 +154,18 @@ pub enum Record {
     None,
 }
 
-/// One agent session: who it is, what it calls itself, the pane it reported
-/// itself from, and whose turn it is.
+/// One agent session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
     pub session: SessionId,
     pub agent: String,
     pub meta: Meta,
-    pub pane: Option<u32>,
+    /// Where the agent's own hook was invoked, as its environment described it.
+    pub origin: Origin,
+    /// The agent's own process, as its hook found it by climbing its ancestry.
+    /// `None` for a hook that could not say, which is a record nothing can check
+    /// the liveness of.
+    pub pid: Option<u32>,
     pub turn: Turn,
     /// When the agent last called for the user, as the clock read at the time.
     /// It is taken once, where the call happens, so everything downstream orders
@@ -153,7 +182,7 @@ fn field(text: &str) -> String {
 }
 
 impl Agent {
-    pub fn new(session: SessionId, agent: &str, meta: Meta, pane: Option<u32>) -> Self {
+    pub fn new(session: SessionId, agent: &str, meta: Meta, origin: Origin) -> Self {
         Agent {
             session,
             agent: field(agent),
@@ -163,19 +192,20 @@ impl Agent {
                 color: field(&meta.color),
                 title: field(&meta.title),
             },
-            pane,
+            origin,
+            pid: None,
             turn: Turn::default(),
             raised: 0,
         }
     }
 
-    /// The record as one line: the format, then session, agent, pane, turn,
-    /// raised, and the four things it is known by. The pane is written as
-    /// nothing at all when the agent reported none.
+    /// The record as one line: the format, then everything about the session,
+    /// with the title last because it is the one field allowed to hold anything
+    /// at all.
     pub fn encode(&self) -> String {
-        let pane = self.pane.map(|id| id.to_string()).unwrap_or_default();
+        let pid = self.pid.map(|id| id.to_string()).unwrap_or_default();
         format!(
-            "{FORMAT}{FIELD}{}{FIELD}{}{FIELD}{pane}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}",
+            "{FORMAT}{FIELD}{}{FIELD}{}{FIELD}{pid}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}",
             self.session.as_str(),
             self.agent,
             self.turn.encode(),
@@ -183,6 +213,7 @@ impl Agent {
             self.meta.dir,
             self.meta.name,
             self.meta.color,
+            self.origin.encode(),
             self.meta.title,
         )
     }
@@ -193,7 +224,7 @@ impl Agent {
     /// field character would still parse; it cannot, because the constructor
     /// takes that character out.
     pub fn decode(line: &str) -> Record {
-        let mut fields = line.splitn(10, FIELD);
+        let mut fields = line.splitn(11, FIELD);
         match fields.next().and_then(|format| format.parse::<u32>().ok()) {
             Some(FORMAT) => {}
             Some(other) => return Record::Foreign(other),
@@ -209,23 +240,33 @@ impl Agent {
     fn read<'a>(mut fields: impl Iterator<Item = &'a str>) -> Option<Self> {
         let session = SessionId::new(fields.next()?)?;
         let agent = fields.next()?;
-        let pane = fields.next()?;
+        let pid = fields.next()?;
         let turn = Turn::decode(fields.next()?)?;
         let raised = fields.next()?.parse().ok()?;
-        let meta = Meta {
-            dir: fields.next()?.to_string(),
-            name: fields.next()?.to_string(),
-            color: fields.next()?.to_string(),
-            title: fields.next()?.to_string(),
-        };
-        let pane = match pane.is_empty() {
+        let dir = fields.next()?.to_string();
+        let name = fields.next()?.to_string();
+        let color = fields.next()?.to_string();
+        let origin = Origin::decode(fields.next()?);
+        let title = fields.next()?.to_string();
+        let pid = match pid.is_empty() {
             true => None,
-            false => Some(pane.parse().ok()?),
+            false => Some(pid.parse().ok()?),
         };
         Some(Agent {
+            pid,
             turn,
             raised,
-            ..Agent::new(session, agent, meta, pane)
+            ..Agent::new(
+                session,
+                agent,
+                Meta {
+                    dir,
+                    name,
+                    color,
+                    title,
+                },
+                origin,
+            )
         })
     }
 }
@@ -233,6 +274,7 @@ impl Agent {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::origin::Origin;
 
     pub(crate) fn session(text: &str) -> SessionId {
         SessionId::new(text).unwrap()
@@ -247,8 +289,33 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn agent(id: &str, pane: Option<u32>) -> Agent {
-        Agent::new(session(id), "claude", meta("wrangler", "", ""), pane)
+    /// An origin describing a zellij pane, which is what a hook invoked in one
+    /// captures.
+    pub(crate) fn at_pane(pane: u32) -> Origin {
+        Origin::from(|name| match name {
+            "ZELLIJ" => Some("0".to_string()),
+            "ZELLIJ_SESSION_NAME" => Some("wrangler-proto".to_string()),
+            "ZELLIJ_PANE_ID" => Some(pane.to_string()),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn agent(id: &str, pane: u32) -> Agent {
+        Agent::new(
+            session(id),
+            "claude",
+            meta("wrangler", "", ""),
+            at_pane(pane),
+        )
+    }
+
+    pub(crate) fn nowhere(id: &str) -> Agent {
+        Agent::new(
+            session(id),
+            "claude",
+            meta("wrangler", "", ""),
+            Origin::default(),
+        )
     }
 
     pub(crate) fn colored(id: &str, color: &str) -> Agent {
@@ -259,13 +326,13 @@ pub(crate) mod tests {
                 color: color.to_string(),
                 ..meta("wrangler", "", "")
             },
-            Some(1),
+            at_pane(1),
         )
     }
 
     /// The record an agent's hooks send when the turn changes: everything the
     /// session is, plus whose turn it now is.
-    pub(crate) fn reporting(id: &str, pane: Option<u32>, turn: Turn, raised: u64) -> Agent {
+    pub(crate) fn reporting(id: &str, pane: u32, turn: Turn, raised: u64) -> Agent {
         Agent {
             turn,
             raised,
@@ -286,14 +353,44 @@ pub(crate) mod tests {
 
     #[test]
     fn a_record_survives_the_round_trip() {
-        for record in [agent("one", Some(3)), agent("two", None)] {
+        for record in [agent("one", 3), nowhere("two")] {
             assert_eq!(Agent::decode(&record.encode()), Record::Known(record));
         }
     }
 
     #[test]
+    fn a_pid_survives_the_round_trip_and_so_does_having_none() {
+        let with = Agent {
+            pid: Some(4242),
+            ..agent("one", 3)
+        };
+        assert_eq!(Agent::decode(&with.encode()), Record::Known(with));
+        let without = agent("two", 3);
+        assert_eq!(without.pid, None);
+        assert_eq!(Agent::decode(&without.encode()), Record::Known(without));
+    }
+
+    #[test]
+    fn an_origin_survives_the_round_trip_inside_a_record() {
+        let record = agent("one", 7);
+        let Record::Known(read) = Agent::decode(&record.encode()) else {
+            panic!("not a record");
+        };
+        assert_eq!(read.origin.get("ZELLIJ_PANE_ID"), Some("7"));
+        assert_eq!(
+            read.origin.get("ZELLIJ_SESSION_NAME"),
+            Some("wrangler-proto")
+        );
+    }
+
+    #[test]
     fn a_title_cannot_split_the_record_it_sits_at_the_end_of() {
-        let record = Agent::new(session("one"), "claude", meta("d", "", "a\tb\nc"), Some(1));
+        let record = Agent::new(
+            session("one"),
+            "claude",
+            meta("d", "", "a\tb\nc"),
+            at_pane(1),
+        );
         assert_eq!(record.meta.title, "a b c");
         assert_eq!(Agent::decode(&record.encode()), Record::Known(record));
     }
@@ -303,9 +400,9 @@ pub(crate) mod tests {
         for line in [
             "",
             "one",
-            "2\tone\tclaude",
-            "2\tone\tclaude\t1\tidle\t0\tdir",
-            "2\tone\tclaude\tx\tidle\t0\tdir\t\t\ttitle",
+            "3\tone\tclaude",
+            "3\tone\tclaude\t\tidle\t0\tdir",
+            "3\tone\tclaude\tx\tidle\t0\tdir\t\t\t\ttitle",
         ] {
             assert_eq!(Agent::decode(line), Record::None, "{line}");
         }
@@ -314,7 +411,7 @@ pub(crate) mod tests {
     #[test]
     fn a_turn_survives_the_round_trip() {
         for turn in [Turn::Idle, Turn::Working, Turn::Attention] {
-            let record = reporting("one", Some(3), turn, 7);
+            let record = reporting("one", 3, turn, 7);
             assert_eq!(Agent::decode(&record.encode()), Record::Known(record));
         }
     }
@@ -322,9 +419,44 @@ pub(crate) mod tests {
     #[test]
     fn a_record_with_no_turn_it_recognises_decodes_to_nothing() {
         assert_eq!(
-            Agent::decode("2\tone\tclaude\t3\tdozing\t0\tdir\t\t\t"),
+            Agent::decode("3\tone\tclaude\t\tdozing\t0\tdir\t\t\t\t"),
             Record::None
         );
+    }
+
+    #[test]
+    fn a_state_message_survives_the_round_trip() {
+        let records = format!("{}\n{}", agent("one", 3).encode(), agent("two", 4).encode());
+        let message = state(&records);
+        assert_eq!(read_state(&message), Some((FORMAT, records.as_str())));
+    }
+
+    #[test]
+    fn having_no_agents_is_something_that_can_be_said() {
+        // The difference this whole header exists for: a state with nothing in
+        // it is a message, where nothing at all is not.
+        let empty = state("");
+        assert_eq!(read_state(&empty), Some((FORMAT, "")));
+        assert_eq!(read_state(""), None);
+    }
+
+    #[test]
+    fn anything_that_is_not_a_state_message_is_not_read_as_one() {
+        for text in [
+            "",
+            "wrangler",
+            "wrangler 3",
+            "3\tone\tclaude",
+            "somethingelse 3\n",
+        ] {
+            assert_eq!(read_state(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_state_message_says_which_format_it_is_in() {
+        let older = "wrangler 1\n3\tone\tclaude";
+        assert_eq!(read_state(older), Some((1, "3\tone\tclaude")));
     }
 
     #[test]

@@ -1,0 +1,3 @@
+# Screen dumps are run output, not source.
+out/
+__pycache__/

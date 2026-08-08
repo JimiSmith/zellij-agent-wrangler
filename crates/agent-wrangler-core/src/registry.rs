@@ -51,6 +51,15 @@ impl Registry {
                     *fresh = held.clone();
                 }
             }
+            // Where an agent is, and what process it is, are found the same way
+            // every time, so a record that says neither was written by something
+            // that could not look rather than by an agent that has moved.
+            if agent.origin.is_empty() {
+                agent.origin = known.origin.clone();
+            }
+            if agent.pid.is_none() {
+                agent.pid = known.pid;
+            }
         }
         self.sessions.insert(agent.session.clone(), agent.clone()) != Some(agent)
     }
@@ -71,19 +80,19 @@ impl Registry {
         calling
     }
 
-    /// Answer the agents in `pane` that were asking for the user.
+    /// Answer one session that was asking for the user.
     ///
     /// Attention is a fact about an agent the user has not got to yet, so
-    /// arriving at its pane is what settles it.
-    pub fn seen(&mut self, pane: u32) -> bool {
-        let mut changed = false;
-        for agent in self.sessions.values_mut() {
-            if agent.pane == Some(pane) && agent.turn == Turn::Attention {
+    /// arriving at it is what settles it. Which arrival counts is not decided
+    /// here: only whatever is drawing the session knows where the user is.
+    pub fn seen(&mut self, session: &SessionId) -> bool {
+        match self.sessions.get_mut(session) {
+            Some(agent) if agent.turn == Turn::Attention => {
                 agent.turn = Turn::Idle;
-                changed = true;
+                true
             }
+            _ => false,
         }
-        changed
     }
 
     pub fn get(&self, session: &SessionId) -> Option<&Agent> {
@@ -108,6 +117,27 @@ impl Registry {
             .join(&RECORD.to_string())
     }
 
+    /// Become exactly the run of records `encode` wrote, dropping every session
+    /// it does not mention. `true` when this changed anything.
+    ///
+    /// This is for a whole statement of what there is, where [`absorb`] is for
+    /// news to add to what is already held: a session the sender no longer has
+    /// is a session that has ended, and keeping it would leave a row nothing
+    /// will ever take away.
+    ///
+    /// [`absorb`]: Registry::absorb
+    pub fn adopt(&mut self, text: &str) -> bool {
+        let mut fresh = Registry::default();
+        for line in text.split(RECORD) {
+            if let Record::Known(agent) = Agent::decode(line) {
+                fresh.sessions.insert(agent.session.clone(), agent);
+            }
+        }
+        let changed = fresh != *self;
+        *self = fresh;
+        changed
+    }
+
     /// Take in every record of a run `encode` wrote, turns included, keeping
     /// what is already known about a session the run does not mention. `true`
     /// when this changed anything.
@@ -125,14 +155,14 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::tests::{agent, colored, meta, reporting, session};
+    use crate::agent::tests::{agent, at_pane, colored, meta, nowhere, reporting, session};
     use crate::agent::FORMAT;
 
     #[test]
     fn a_registry_survives_the_round_trip() {
         let mut registry = Registry::default();
-        registry.start(agent("one", Some(3)));
-        registry.start(agent("two", None));
+        registry.start(agent("one", 3));
+        registry.start(nowhere("two"));
         let mut copy = Registry::default();
         assert!(copy.absorb(&registry.encode()));
         assert_eq!(copy, registry);
@@ -148,9 +178,9 @@ mod tests {
     #[test]
     fn absorbing_keeps_a_session_the_text_does_not_mention() {
         let mut registry = Registry::default();
-        registry.start(agent("mine", Some(1)));
+        registry.start(agent("mine", 1));
         let mut other = Registry::default();
-        other.start(agent("theirs", Some(2)));
+        other.start(agent("theirs", 2));
         registry.absorb(&other.encode());
         assert!(registry.get(&session("mine")).is_some());
         assert!(registry.get(&session("theirs")).is_some());
@@ -159,9 +189,9 @@ mod tests {
     #[test]
     fn re_filing_the_same_record_changes_nothing() {
         let mut registry = Registry::default();
-        assert!(registry.start(agent("one", Some(3))));
-        assert!(!registry.start(agent("one", Some(3))));
-        assert!(registry.start(agent("one", Some(4))));
+        assert!(registry.start(agent("one", 3)));
+        assert!(!registry.start(agent("one", 3)));
+        assert!(registry.start(agent("one", 4)));
     }
 
     #[test]
@@ -169,7 +199,7 @@ mod tests {
         // The two ends of the wire are installed separately, so one can be
         // older than the other, and a record it wrote is not a line to pass
         // over in silence.
-        let record = agent("one", Some(3)).encode();
+        let record = agent("one", 3).encode();
         let older = record.replacen(&FORMAT.to_string(), "0", 1);
         assert_eq!(Agent::decode(&older), Record::Foreign(0));
         // Absorbing takes nothing from a format it does not know.
@@ -180,10 +210,10 @@ mod tests {
     #[test]
     fn a_report_files_a_session_nobody_saw_start() {
         let mut registry = Registry::default();
-        assert!(registry.report(reporting("one", Some(3), Turn::Working, 0)));
+        assert!(registry.report(reporting("one", 3, Turn::Working, 0)));
         assert_eq!(registry.get(&session("one")).unwrap().turn, Turn::Working);
         // Saying the same thing twice is not a change.
-        assert!(!registry.report(reporting("one", Some(3), Turn::Working, 0)));
+        assert!(!registry.report(reporting("one", 3, Turn::Working, 0)));
     }
 
     #[test]
@@ -191,9 +221,9 @@ mod tests {
         // An agent re-registers whenever its own session restarts under it,
         // which says nothing about the turn it is in the middle of.
         let mut registry = Registry::default();
-        registry.start(agent("one", Some(3)));
-        registry.report(reporting("one", Some(3), Turn::Working, 0));
-        registry.start(agent("one", Some(3)));
+        registry.start(agent("one", 3));
+        registry.report(reporting("one", 3, Turn::Working, 0));
+        registry.start(agent("one", 3));
         assert_eq!(registry.get(&session("one")).unwrap().turn, Turn::Working);
     }
 
@@ -204,9 +234,9 @@ mod tests {
             session("one"),
             "claude",
             meta("wrangler", "scout", "the port"),
-            Some(1),
+            at_pane(1),
         ));
-        registry.report(reporting("one", Some(1), Turn::Working, 0));
+        registry.report(reporting("one", 1, Turn::Working, 0));
         let held = registry.get(&session("one")).unwrap();
         assert_eq!(held.meta, meta("wrangler", "scout", "the port"));
     }
@@ -220,7 +250,7 @@ mod tests {
         // that names a different one changes it.
         let mut registry = Registry::default();
         registry.start(colored("one", "red"));
-        registry.report(reporting("one", Some(1), Turn::Working, 0));
+        registry.report(reporting("one", 1, Turn::Working, 0));
         assert_eq!(registry.get(&session("one")).unwrap().meta.color, "red");
         registry.start(colored("one", "blue"));
         assert_eq!(registry.get(&session("one")).unwrap().meta.color, "blue");
@@ -229,12 +259,12 @@ mod tests {
     #[test]
     fn a_record_that_does_say_something_new_replaces_it() {
         let mut registry = Registry::default();
-        registry.start(agent("one", Some(1)));
+        registry.start(agent("one", 1));
         registry.start(Agent::new(
             session("one"),
             "claude",
             meta("wrangler", "", "the port"),
-            Some(1),
+            at_pane(1),
         ));
         assert_eq!(
             registry.get(&session("one")).unwrap().meta.title,
@@ -245,21 +275,21 @@ mod tests {
     #[test]
     fn absorbing_takes_the_turn_it_is_told() {
         let mut mine = Registry::default();
-        mine.start(agent("one", Some(3)));
+        mine.start(agent("one", 3));
         let mut theirs = Registry::default();
-        theirs.report(reporting("one", Some(3), Turn::Attention, 5));
+        theirs.report(reporting("one", 3, Turn::Attention, 5));
         assert!(mine.absorb(&theirs.encode()));
         assert_eq!(mine.get(&session("one")).unwrap().turn, Turn::Attention);
     }
 
     #[test]
-    fn arriving_at_a_pane_answers_the_agents_asking_from_it() {
+    fn arriving_at_a_session_answers_it() {
         let mut registry = Registry::default();
-        registry.report(reporting("one", Some(3), Turn::Attention, 0));
-        registry.report(reporting("two", Some(9), Turn::Attention, 0));
-        assert!(registry.seen(3));
+        registry.report(reporting("one", 3, Turn::Attention, 0));
+        registry.report(reporting("two", 9, Turn::Attention, 0));
+        assert!(registry.seen(&session("one")));
         assert_eq!(registry.get(&session("one")).unwrap().turn, Turn::Idle);
-        // Another pane's agent is still asking.
+        // Every other session is still asking.
         assert_eq!(registry.get(&session("two")).unwrap().turn, Turn::Attention);
     }
 
@@ -267,10 +297,10 @@ mod tests {
     fn calls_for_the_user_are_listed_newest_first() {
         let mut registry = Registry::default();
         for (id, at) in [("one", 10), ("two", 30), ("three", 20)] {
-            registry.report(reporting(id, Some(1), Turn::Attention, at));
+            registry.report(reporting(id, 1, Turn::Attention, at));
         }
         // An agent that is not calling is not listed at all.
-        registry.start(agent("quiet", Some(1)));
+        registry.start(agent("quiet", 1));
         let calling: Vec<&str> = registry
             .calling()
             .iter()
@@ -282,26 +312,28 @@ mod tests {
     #[test]
     fn a_call_raised_again_moves_to_the_front() {
         let mut registry = Registry::default();
-        registry.report(reporting("one", Some(1), Turn::Attention, 10));
-        registry.report(reporting("two", Some(1), Turn::Attention, 20));
-        assert!(registry.report(reporting("one", Some(1), Turn::Attention, 30)));
+        registry.report(reporting("one", 1, Turn::Attention, 10));
+        registry.report(reporting("two", 1, Turn::Attention, 20));
+        assert!(registry.report(reporting("one", 1, Turn::Attention, 30)));
         assert_eq!(registry.calling()[0].session.as_str(), "one");
     }
 
     #[test]
-    fn arriving_at_a_pane_leaves_an_agent_working_in_it_alone() {
+    fn arriving_at_a_session_that_is_working_leaves_it_alone() {
         // Only a call for the user is answered by turning up; work carries on.
         let mut registry = Registry::default();
-        registry.report(reporting("one", Some(3), Turn::Working, 0));
-        assert!(!registry.seen(3));
+        registry.report(reporting("one", 3, Turn::Working, 0));
+        assert!(!registry.seen(&session("one")));
         assert_eq!(registry.get(&session("one")).unwrap().turn, Turn::Working);
+        // A session nobody has heard of is nothing to answer.
+        assert!(!registry.seen(&session("gone")));
     }
 
     #[test]
     fn ending_a_session_that_was_never_filed_changes_nothing() {
         let mut registry = Registry::default();
         assert!(!registry.end(&session("one")));
-        registry.start(agent("one", Some(3)));
+        registry.start(agent("one", 3));
         assert!(registry.end(&session("one")));
     }
 }

@@ -1,0 +1,29 @@
+# Does a pipe sent from outside a session reach the plugins inside it?
+#
+# `wrangler:off` is the message used, because its effect cannot be mistaken for
+# anything else: every sidebar in the session closes, so either the tree
+# disappears or the message never arrived.
+
+env: ZELLIJ_CONFIG_DIR=$PWD/tests/zellij-config
+env: TERM=xterm-256color
+env: XDG_STATE_HOME=$PWD/tests/out/state
+env: XDG_CACHE_HOME=$PWD/tests/out/cache
+
+sh?: tests/scripts/reset.sh wrangler-test-pipe
+sh: cargo build --target wasm32-wasip1 -p zellij-agent-wrangler
+sh: tests/scripts/make-layout.sh tests/out/e2e.kdl
+
+spawn: zellij --session wrangler-test-pipe --new-session-with-layout tests/out/e2e.kdl
+
+# The sidebar's own drawing of the tab it is in, which no other pane produces.
+wait: 1: wrangler @ 25
+dump: pipe_before
+
+sh?: tests/scripts/pipe-in.sh wrangler-test-pipe wrangler:off ignored
+
+# If the pipe arrived, every sidebar closed itself and its tree went with it.
+waitgone: 1: wrangler @ 15
+dump: pipe_after
+
+keys: <C-q>
+sleep: 1

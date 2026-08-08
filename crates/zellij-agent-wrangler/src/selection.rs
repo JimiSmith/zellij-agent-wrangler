@@ -45,12 +45,9 @@ pub fn selected(keys: &[RowKey], held: Option<&RowKey>) -> Option<RowKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::tests::{at_pane, session};
     use crate::model::{Placement, RowContent};
-    use agent_wrangler_core::agent::{Agent, Meta, SessionId, Turn};
-
-    fn session(text: &str) -> SessionId {
-        SessionId::new(text).unwrap()
-    }
+    use agent_wrangler_core::agent::{Agent, Meta, Turn};
 
     fn tree() -> Vec<Row> {
         vec![
@@ -70,7 +67,7 @@ mod tests {
         registry.report(Agent {
             turn: Turn::Attention,
             raised: 1,
-            ..Agent::new(session(id), "claude", Meta::default(), Some(1))
+            ..Agent::new(session(id), "claude", Meta::default(), at_pane(1))
         });
         registry
     }

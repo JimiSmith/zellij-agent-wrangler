@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod command;
+pub mod origin;
 pub mod registry;
 
 /// Finding what a session calls itself means reading the agent's own files, so

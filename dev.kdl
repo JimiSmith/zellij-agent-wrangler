@@ -22,8 +22,8 @@ layout {
                     sections false
                     turn_state true
                     notifications true
-                    desktop_notification "off"
-                    install_hooks "off"
+                    desktop_notification "on"
+                    install_hooks "on"
                 }
             }
             children

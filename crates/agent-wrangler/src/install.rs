@@ -232,14 +232,13 @@ fn parent_dir(path: &Path) -> &Path {
 /// Side effect: creates the parent directory, and leaves no temporary file
 /// behind on either path.
 fn atomic_write(path: &Path, text: &str, mode: u32) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     fs::create_dir_all(parent_dir(path))?;
     let mut name = std::ffi::OsString::from(format!(".{CLIENT}-tmp-{}-", std::process::id()));
     name.push(path.file_name().unwrap_or_default());
     let temp = parent_dir(path).join(name);
     let written = (|| {
         fs::write(&temp, text)?;
-        fs::set_permissions(&temp, fs::Permissions::from_mode(mode))?;
+        set_mode(&temp, mode)?;
         fs::rename(&temp, path)
     })();
     if written.is_err() {
@@ -248,11 +247,36 @@ fn atomic_write(path: &Path, text: &str, mode: u32) -> std::io::Result<()> {
     written
 }
 
+/// Give a file the permissions it is to be written with.
+///
+/// A settings file of this kind holds credentials, so on a system with file
+/// modes the mode is set explicitly rather than left to the umask. Windows has
+/// no such mode: a file there inherits the access rules of the directory it is
+/// created in, which is what its own protection rests on.
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// The permissions a file already has, so rewriting it keeps them. `None` on a
+/// system with no file modes, and for a file that is not there yet.
+#[cfg(unix)]
 fn file_mode(path: &Path) -> Option<u32> {
     use std::os::unix::fs::PermissionsExt;
     fs::metadata(path)
         .ok()
         .map(|data| data.permissions().mode() & 0o777)
+}
+
+#[cfg(not(unix))]
+fn file_mode(_path: &Path) -> Option<u32> {
+    None
 }
 
 /// Merge this installer's hooks into the shared settings file an agent reads.

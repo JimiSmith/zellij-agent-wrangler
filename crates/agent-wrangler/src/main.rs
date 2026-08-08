@@ -1,47 +1,36 @@
-//! The hook client an agent invokes: it reads one hook payload on standard
-//! input and pipes a single record to the sidebars of the zellij session it was
-//! invoked in.
+//! The one binary: the hook an agent invokes, the daemon those hooks feed, and
+//! the installer that wires the two together.
 //!
-//! The whole path is best effort. A hook runs inside the agent's own turn, so
-//! nothing here is allowed to fail loudly or to take long: outside zellij it
-//! does nothing at all, and a pipe that cannot be delivered is dropped. The only
-//! non-zero exit is a missing argument, which is a misconfiguration no event
-//! could describe.
+//! A hook runs inside the agent's own turn, so nothing on that path is allowed
+//! to fail loudly or to take long: it says what it saw and exits, and reading
+//! files is the daemon's. The only non-zero exit is a missing argument, which is
+//! a misconfiguration no event could describe.
 
 use std::io::Read;
-use std::process::{Command, ExitCode, Stdio};
+use std::process::ExitCode;
 
-use agent_wrangler_core::agent::{
-    Agent, Meta, SessionId, Turn, ATTENTION_MESSAGE, END_MESSAGE, START_MESSAGE, WORKING_MESSAGE,
-};
-use agent_wrangler_core::payload::{dir, Payload};
-use agent_wrangler_core::titles;
+use agent_wrangler_core::agent::FORMAT;
+use agent_wrangler_core::origin::Origin;
+use agent_wrangler_core::payload::Payload;
 
+mod client;
+mod daemon;
 mod install;
+mod paths;
+mod platform;
+mod proto;
 
-/// The pane the hook was invoked in, which zellij sets on every terminal pane
-/// it spawns and every process started in one inherits.
-fn pane() -> Option<u32> {
-    std::env::var("ZELLIJ_PANE_ID").ok()?.trim().parse().ok()
-}
+use proto::{Hook, Inbound, Sink};
 
-/// Send one message down a zellij pipe, addressed to no plugin so that every
-/// sidebar of this session hears it.
+/// The most ancestry levels climbed looking for the agent that invoked a hook.
 ///
-/// Side effect: runs `zellij`, whose own output is discarded. The call waits for
-/// zellij to accept the message, and gives up silently if it cannot.
-fn pipe(name: &str, payload: &str) {
-    let _ = Command::new("zellij")
-        .args(["pipe", "--name", name, "--", payload])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
+/// A hook is invoked through a shell, sometimes two, and the agent is above
+/// those. Eight is far more than any of that and still stops long before the
+/// root of a deep process tree.
+const HOPS: u32 = 8;
 
 /// Milliseconds since the epoch, which is what orders one call for the user
-/// against another. Read here because this process sees each call exactly once,
-/// where every sidebar sees all of them.
+/// against another. Read here because this process sees each call exactly once.
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -55,81 +44,69 @@ fn read_stdin() -> String {
     body
 }
 
-/// The pipe an agent's own event name reports on.
+/// The process of the agent that invoked this hook, found by climbing to the
+/// nearest ancestor running that agent.
 ///
-/// An error is the one event whose meaning depends on who raised it: Copilot
-/// says whether it can carry on, and one that can is still working rather than
-/// waiting. Every other agent's error is something the user has to look at.
-/// Anything unrecognised is a session announcing itself, which is also how a
-/// session already known re-states where it is.
-fn message(agent: &str, event: &str, recoverable: Option<bool>) -> &'static str {
-    match event {
-        "end" => END_MESSAGE,
-        "working" => WORKING_MESSAGE,
-        "needsAttention" => ATTENTION_MESSAGE,
-        "error" if agent == "copilot" && recoverable == Some(true) => WORKING_MESSAGE,
-        "error" => ATTENTION_MESSAGE,
-        _ => START_MESSAGE,
-    }
+/// Side effect: reads the machine's process table. `None` when the agent is not
+/// in this process's ancestry at all, which is a record nothing can later check
+/// the liveness of.
+fn agent_pid(agent: &str) -> Option<u32> {
+    let table = platform::processes();
+    platform::agent_process(std::process::id(), agent, &table, HOPS)
 }
 
-/// Everything this session is called by, gathered from the hook body and from
-/// whatever the agent keeps on disk.
+/// Report one event to the daemon.
 ///
-/// Side effect: reads the agent's own files. An agent this client does not know
-/// is described by its working directory alone, which every hook body carries.
-fn meta(agent: &str, payload: &Payload) -> Meta {
-    let found = match agent {
-        "claude" => titles::claude(&payload.transcript_path),
-        "copilot" => match std::env::var_os("HOME") {
-            Some(home) => titles::copilot(std::path::Path::new(&home), &payload.session_id),
-            None => Meta::default(),
-        },
-        _ => Meta::default(),
-    };
-    Meta {
-        dir: dir(&payload.cwd),
-        ..found
-    }
-}
-
-/// The turn a pipe reports, and the moment it was reported.
-///
-/// A call for the user carries when it was raised, which is what orders one
-/// call against another; nothing else needs a clock, and reading one would only
-/// make two identical reports look different.
-fn turn(message: &str) -> (Turn, u64) {
-    match message {
-        WORKING_MESSAGE => (Turn::Working, 0),
-        ATTENTION_MESSAGE => (Turn::Attention, now()),
-        _ => (Turn::Idle, 0),
-    }
-}
-
+/// Side effect: reads the environment and the process table, and starts a daemon
+/// if none is running. Failure is silent by design: an agent's turn is not the
+/// place to report that a sidebar could not be told something.
 fn hook(agent: &str, event: &str) {
-    let payload = Payload::parse(&read_stdin());
-    // An event naming no session describes nothing the sidebar can file.
-    let Some(session) = SessionId::new(&payload.session_id) else {
-        return;
-    };
-    let message = message(agent, event, payload.recoverable);
-    // The end of a session leaves nothing to describe. Every other event
-    // carries the whole record, so a title the session has taken on since it
-    // started reaches the sidebar on the next event of any kind.
-    if message == END_MESSAGE {
-        pipe(END_MESSAGE, session.as_str());
+    let origin = Origin::capture();
+    // A process in no multiplexer this knows about is in nothing that could draw
+    // it. Reporting it would fill the daemon with sessions nothing will ever ask
+    // for.
+    if origin.is_empty() {
         return;
     }
-    let (turn, raised) = turn(message);
-    let record = Agent {
-        turn,
-        raised,
-        ..Agent::new(session, agent, meta(agent, &payload), pane())
+    let payload = Payload::parse(&read_stdin());
+    if payload.session_id.is_empty() {
+        return;
+    }
+    let message = Inbound::Hook {
+        format: FORMAT,
+        hook: Hook {
+            agent: agent.to_string(),
+            event: event.to_string(),
+            session_id: payload.session_id,
+            cwd: payload.cwd,
+            transcript: payload.transcript_path,
+            recoverable: payload.recoverable,
+            origin: origin.encode(),
+            pid: agent_pid(agent),
+            at: now(),
+        },
     };
-    pipe(message, &record.encode());
+    let _ = client::tell(&message);
+}
+
+/// The sink a client names for itself on the command line.
+fn sink(kind: &str, id: &str) -> Option<Sink> {
+    match kind {
+        "zellij" => Some(Sink::Zellij {
+            session: id.to_string(),
+        }),
+        "pipe" => Some(Sink::Pipe {
+            path: id.to_string(),
+        }),
+        _ => None,
+    }
 }
 
 const USAGE: &str = "usage: agent-wrangler hook <agent> <start|end|working|needsAttention|error>
+       agent-wrangler daemon
+       agent-wrangler register <zellij|pipe> <session|path>
+       agent-wrangler seen <session>
+       agent-wrangler agents
        agent-wrangler install-hooks [all|claude|copilot] [--uninstall]
        agent-wrangler --version";
 
@@ -141,20 +118,56 @@ fn main() -> ExitCode {
                 eprintln!("agent-wrangler hook: agent name required");
                 return ExitCode::from(2);
             };
-            // A session outside zellij has no sidebar to tell, and running the
-            // CLI there would only produce an error nobody reads.
-            if std::env::var("ZELLIJ").is_ok() {
-                hook(agent, args.get(2).map(String::as_str).unwrap_or("start"));
-            }
+            hook(agent, args.get(2).map(String::as_str).unwrap_or("start"));
             ExitCode::SUCCESS
         }
+        Some("daemon") => {
+            let _ = daemon::run();
+            ExitCode::SUCCESS
+        }
+        Some("register") => {
+            let (Some(kind), Some(id)) = (args.get(1), args.get(2)) else {
+                eprintln!("agent-wrangler register: a kind and an id are required");
+                return ExitCode::from(2);
+            };
+            let Some(sink) = sink(kind, id) else {
+                eprintln!("agent-wrangler register: {kind} is not a kind of client");
+                return ExitCode::from(2);
+            };
+            let _ = client::tell(&Inbound::Register {
+                format: FORMAT,
+                sink,
+            });
+            ExitCode::SUCCESS
+        }
+        Some("seen") => {
+            let Some(session) = args.get(1) else {
+                eprintln!("agent-wrangler seen: session id required");
+                return ExitCode::from(2);
+            };
+            let _ = client::tell(&Inbound::Seen {
+                session: session.clone(),
+            });
+            ExitCode::SUCCESS
+        }
+        // What the daemon holds, as it would send it. For looking at what is
+        // there when a row is not what was expected.
+        Some("agents") => match client::ask() {
+            Ok(records) => {
+                println!("{records}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("agent-wrangler agents: {error}");
+                ExitCode::FAILURE
+            }
+        },
         // The record format is printed beside the version because it, not the
-        // version, is what has to match the sidebar this client reports to.
+        // version, is what has to match at both ends of the wire.
         Some("--version") | Some("-V") => {
             println!(
-                "agent-wrangler {} (record format {})",
+                "agent-wrangler {} (record format {FORMAT})",
                 env!("CARGO_PKG_VERSION"),
-                agent_wrangler_core::agent::FORMAT
             );
             ExitCode::SUCCESS
         }
@@ -180,24 +193,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_event_reports_on_its_own_pipe() {
-        assert_eq!(message("claude", "start", None), START_MESSAGE);
-        assert_eq!(message("claude", "end", None), END_MESSAGE);
-        assert_eq!(message("claude", "working", None), WORKING_MESSAGE);
-        assert_eq!(message("claude", "needsAttention", None), ATTENTION_MESSAGE);
+    fn each_kind_of_client_names_its_own_sink() {
+        assert_eq!(
+            sink("zellij", "proto"),
+            Some(Sink::Zellij {
+                session: "proto".to_string()
+            })
+        );
+        assert_eq!(
+            sink("pipe", "/tmp/w"),
+            Some(Sink::Pipe {
+                path: "/tmp/w".to_string()
+            })
+        );
     }
 
     #[test]
-    fn an_unrecognised_event_registers_the_session() {
-        assert_eq!(message("claude", "", None), START_MESSAGE);
-        assert_eq!(message("claude", "wat", Some(true)), START_MESSAGE);
-    }
-
-    #[test]
-    fn only_a_copilot_error_it_can_carry_on_from_is_still_working() {
-        assert_eq!(message("copilot", "error", Some(true)), WORKING_MESSAGE);
-        assert_eq!(message("copilot", "error", Some(false)), ATTENTION_MESSAGE);
-        assert_eq!(message("copilot", "error", None), ATTENTION_MESSAGE);
-        assert_eq!(message("claude", "error", Some(true)), ATTENTION_MESSAGE);
+    fn a_kind_of_client_this_cannot_reach_is_not_registered() {
+        assert_eq!(sink("carrier-pigeon", "coop"), None);
+        assert_eq!(sink("", ""), None);
     }
 }

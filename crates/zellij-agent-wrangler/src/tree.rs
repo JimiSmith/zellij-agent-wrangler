@@ -249,6 +249,7 @@ mod tests {
 
     use agent_wrangler_core::agent::{Meta, SessionId};
 
+    use crate::agents::tests::at_pane;
     use crate::options::Label;
 
     fn pane(id: u32, title: &str, focused: bool) -> Pane {
@@ -270,7 +271,7 @@ mod tests {
                         dir: label.to_string(),
                         ..Meta::default()
                     },
-                    Some(pane.id),
+                    at_pane(pane.id),
                 )
             })
             .collect();

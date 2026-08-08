@@ -1,0 +1,20 @@
+// The zellij configuration test runs use, pointed at by ZELLIJ_CONFIG_DIR.
+//
+// Its existence is the point: with no config file at all zellij opens its
+// first run setup wizard, which swallows the screen and every keystroke a test
+// tries to send. Stock keybindings are kept, so <C-q> quits and <C-p> enters
+// pane mode exactly as the documentation says.
+//
+// The developer's own configuration is deliberately not used: a test must not
+// change its result because someone rebound a key or picked a different theme.
+
+// The startup tip and release note panes open over the layout and would be the
+// first thing every dump caught.
+show_startup_tips false
+show_release_notes false
+
+theme "default"
+default_mode "normal"
+pane_frames true
+mouse_mode false
+copy_on_select false
