@@ -16,20 +16,56 @@ use serde_json::Value;
 
 use crate::agents::Meta;
 
-/// How much of a transcript's end is read. The records naming a session sit
-/// within a few KB of the end in practice, and reading a fixed window keeps the
-/// cost of a hook the same however long the session has run.
-const TAIL: u64 = 64 * 1024;
+/// How much of each end of a transcript is read. Reading a fixed amount keeps
+/// the cost of a hook the same however long the session has run.
+const WINDOW: u64 = 64 * 1024;
 
-/// The last `TAIL` bytes of a file, and whether anything was cut off the front
-/// of them. Nothing at all when the file cannot be read.
-fn tail(path: &Path) -> Option<(Vec<u8>, bool)> {
+/// The first and last `WINDOW` bytes of a file, as lines, with the line each
+/// window is cut off mid-record dropped. Nothing at all when it cannot be read.
+///
+/// Both ends are read because the two things wanted are written at different
+/// times: a session's color and a teammate's name are recorded once, as it
+/// begins, and its title is written and rewritten as it goes. Reading only the
+/// end finds the title and loses the color the moment a session outgrows one
+/// window.
+fn windows(path: &Path) -> Option<Vec<Vec<u8>>> {
     let mut file = std::fs::File::open(path).ok()?;
     let size = file.seek(SeekFrom::End(0)).ok()?;
-    file.seek(SeekFrom::Start(size.saturating_sub(TAIL))).ok()?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    Some((bytes, size > TAIL))
+
+    // Short enough that the two windows would overlap: read it whole, and
+    // nothing is cut off either end.
+    if size <= WINDOW * 2 {
+        let mut all = Vec::new();
+        file.seek(SeekFrom::Start(0)).ok()?;
+        file.read_to_end(&mut all).ok()?;
+        return Some(split(&all, false, false));
+    }
+
+    let mut head = vec![0u8; WINDOW as usize];
+    file.seek(SeekFrom::Start(0)).ok()?;
+    file.read_exact(&mut head).ok()?;
+    let mut tail = Vec::new();
+    file.seek(SeekFrom::Start(size - WINDOW)).ok()?;
+    file.read_to_end(&mut tail).ok()?;
+
+    // The head is read first so that what is written once, at the start, is
+    // seen before what is written last.
+    let mut lines = split(&head, false, true);
+    lines.extend(split(&tail, true, false));
+    Some(lines)
+}
+
+/// The lines of one window, dropping the half record at whichever end the
+/// window was cut.
+fn split(bytes: &[u8], cut_at_start: bool, cut_at_end: bool) -> Vec<Vec<u8>> {
+    let mut lines: Vec<Vec<u8>> = bytes.split(|byte| *byte == b'\n').map(Vec::from).collect();
+    if cut_at_end {
+        lines.pop();
+    }
+    if cut_at_start && !lines.is_empty() {
+        lines.remove(0);
+    }
+    lines
 }
 
 /// A record's string field, or `None` when it is absent or empty.
@@ -54,18 +90,13 @@ fn text<'a>(record: &'a Value, key: &str) -> Option<&'a str> {
 /// carries the same field and is passed over: it says what the name became, and
 /// the conversation records after it already say so.
 pub fn claude(transcript: &str) -> Meta {
-    let Some((bytes, cut)) = tail(Path::new(transcript)) else {
+    let Some(lines) = windows(Path::new(transcript)) else {
         return Meta::default();
     };
-    let mut lines = bytes.split(|byte| *byte == b'\n');
-    // The first line of a window that starts mid-file is half a record.
-    if cut {
-        lines.next();
-    }
 
     let (mut given, mut written) = (String::new(), String::new());
     let (mut name, mut color) = (String::new(), String::new());
-    for line in lines {
+    for line in &lines {
         // Reading every record as JSON would parse the whole conversation; the
         // records worth reading name themselves in bytes that can be looked for
         // first.
@@ -283,6 +314,29 @@ mod tests {
         );
         // The last one in the window is the one in force, as for a title.
         assert_eq!(claude(&path).color, "purple");
+    }
+
+    #[test]
+    fn a_color_written_at_the_start_survives_a_session_that_runs_long() {
+        // A session records its color once, as it begins, and goes on writing
+        // titles for as long as it runs. Reading only the end of the transcript
+        // keeps the title and loses the color.
+        let scratch = Scratch::new("long");
+        let mut lines = vec![
+            r#"{"type":"agent-color","agentColor":"red"}"#.to_string(),
+            r#"{"type":"assistant","agentName":"scout"}"#.to_string(),
+        ];
+        let filler = format!(r#"{{"type":"assistant","text":"{}"}}"#, "x".repeat(500));
+        lines.resize(lines.len() + 600, filler);
+        lines.push(r#"{"type":"ai-title","aiTitle":"the long one"}"#.to_string());
+        let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let path = transcript(scratch.path(), &borrowed);
+
+        assert!(std::fs::metadata(&path).unwrap().len() > WINDOW * 2);
+        let meta = claude(&path);
+        assert_eq!(meta.color, "red");
+        assert_eq!(meta.name, "scout");
+        assert_eq!(meta.title, "the long one");
     }
 
     #[test]

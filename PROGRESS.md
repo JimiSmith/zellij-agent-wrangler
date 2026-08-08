@@ -97,6 +97,13 @@ inherit the filesystem: the four mounts are all there is, so anything in the
 user's home directory - an agent's own settings, for one - can only reach the
 sidebar by being sent to it.
 
+**A Claude transcript is written at both ends.** The color a session is given
+and the name a teammate goes by are recorded once, in the first records of the
+file; the title is written and rewritten throughout. A fixed window over the end
+of the file therefore finds every title and no color at all, for any session
+that outgrows it - which is every session that runs for a while. Measured on a
+3MB transcript: 47 color records in the file, 4 of them in the last 64KB.
+
 **`PaneInfo` carries no color.** A pane's border color is not among the fields
 zellij reports, so a pane's icon has nothing of its own to be drawn in.
 

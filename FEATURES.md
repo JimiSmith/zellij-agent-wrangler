@@ -43,8 +43,10 @@ placeholder.
 - [x] Teammates labelled `@name - title`
 
 A session's title is in neither agent's hook body, so the client reads it off
-disk: Claude's from the end of the transcript the body names, Copilot's from the
-workspace file it keeps per session. That is also what makes a label live
+disk: Claude's from the transcript the body names, Copilot's from the workspace
+file it keeps per session. Both ends of a transcript are read, because what is
+wanted is written at both: a session records its color and a teammate's name
+once, as it begins, and writes and rewrites its title for as long as it runs. That is also what makes a label live
 without anything watching anything - an agent fires hooks throughout its turn,
 and every one of them carries the whole record, so a title taken on mid-session
 arrives on the next event of any kind.
