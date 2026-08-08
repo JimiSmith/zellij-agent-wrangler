@@ -115,11 +115,14 @@ pub fn load(dir: &Path) -> (Vec<(String, Source)>, Vec<Sink>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicBool, AtomicUsize};
+    #[cfg(unix)]
     use std::sync::Arc;
 
     /// Enough records that one write is several calls into the kernel, because
     /// the tear happens between them.
+    #[cfg(unix)]
     const RECORDS: usize = 400;
 
     fn scratch(name: &str) -> PathBuf {
@@ -151,6 +154,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    // Renaming over a file another thread holds open succeeds on unix and can
+    // be refused on Windows, so a run there would be measuring that rather than
+    // the tear this is about. The fix it checks is not unix-only; the method is.
+    #[cfg(unix)]
     #[test]
     fn saving_at_the_same_moment_from_two_threads_leaves_one_whole_file() {
         // Two saves naming one temporary file end with one of them writing

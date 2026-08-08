@@ -18,12 +18,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup component add clippy rustfmt
-      - run: cargo fmt --check
+      - run: rustup target add wasm32-wasip1
+      # `--all` because the root is a virtual manifest, where the plain form
+      # covers the default members rather than every crate.
+      - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The plugin ships as wasm and nothing else builds it that way, so the
+      # host lint above says nothing about the artifact that is actually
+      # released.
+      - run: >
+          cargo clippy -p zellij-agent-wrangler --target wasm32-wasip1
+          --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
+  # The native half is released for Windows, so it is built and run there before
+  # a tag can ship one. Compiling it from Linux catches a great deal and cannot
+  # catch the process table, the local socket or the paths actually working, all
+  # of which are written twice and only tested once anywhere else.
+  #
+  # The plugin is not built here: it is wasm, and off wasm its dependency pulls
+  # in the whole of zellij, which is neither wanted nor portable.
+  check-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add clippy
+      - run: cargo clippy -p agent-wrangler -p agent-wrangler-core --all-targets --locked -- -D warnings
+      - run: cargo test -p agent-wrangler -p agent-wrangler-core --locked
+
   release:
-    needs: check
+    needs: [check, check-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
