@@ -60,33 +60,29 @@ chmod +x "$bin/agent-wrangler"
 
 "$bin/agent-wrangler" install-hooks
 
-# The sidebar reaches the daemon by running the client, so it has to be able to
-# find it. Left to itself it looks on `$PATH`; where that would find nothing, or
-# would find some other copy first, the layout has to name this one outright.
-# Getting this wrong costs every agent row and says nothing about why, so the
-# block printed below is the one that is right for this machine rather than the
-# one that is usually right.
+# The block names the client outright, always. The sidebar reaches the daemon by
+# running it, and left to itself it looks on `$PATH` - but the one that matters
+# is the zellij server's, inherited from whatever started zellij, which is not
+# necessarily the shell this script is running in. Naming the path is the only
+# thing that is true whatever started zellij, and getting it wrong costs every
+# agent row while saying nothing about why.
 url="https://github.com/$repo/releases/download/$version/$wasm"
 found=$(command -v agent-wrangler 2>/dev/null || true)
 
-if [ "$found" = "$bin/agent-wrangler" ]; then
-    note="The sidebar finds the client on your PATH."
-    block="    pane size=32 borderless=true {
-        plugin location=\"$url\"
-    }"
-else
-    if [ -n "$found" ]; then
-        note="Your PATH finds a different agent-wrangler first ($found), so the
-block above names this one outright."
-    else
-        note="$bin is not on your PATH, so the block above names the client
-outright. Put $bin on your PATH instead and you can drop that line."
-    fi
-    block="    pane size=32 borderless=true {
+block="    pane size=32 borderless=true {
         plugin location=\"$url\" {
             install_hooks \"$bin/agent-wrangler\"
         }
     }"
+
+if [ -n "$found" ] && [ "$found" != "$bin/agent-wrangler" ]; then
+    note="Note that your PATH finds a different agent-wrangler first ($found).
+The block names the one this script just installed, so the sidebar runs that
+one whatever the path says."
+else
+    note="That names the client this script installed. Leave the path in even if
+$bin is on your PATH: what has to find it is zellij, whose environment comes
+from whatever started it rather than from this shell."
 fi
 
 cat <<BLOCK

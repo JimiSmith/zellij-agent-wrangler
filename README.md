@@ -238,10 +238,11 @@ same wherever they appear.
 
 `install_hooks` names the client as well as asking for the hooks to be
 installed, because the sidebar reaches the daemon by running that client and
-needs to know where it is. `on` means "on your `$PATH`", which is where the
-install script puts it; give it a path instead when the client lives somewhere
-else, as a build from source does. Getting this wrong costs you every agent row
-with nothing said about why, so `dev.sh` writes the path in for you.
+needs to know where it is. Give it the client's path. `on` means "on your
+`$PATH`" and is worth avoiding: the `$PATH` that matters is the zellij server's,
+inherited from whatever started zellij rather than from the shell you installed
+from, and getting it wrong costs every agent row with nothing said about why.
+Both the install script and `dev.sh` write the path in for you.
 
 `desktop_notification` and `install_hooks` both run a command, but so does
 asking the daemon for the agents at all, so the sidebar asks for zellij's
