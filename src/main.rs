@@ -308,7 +308,7 @@ impl State {
             .map(|agent| Notification {
                 session: agent.session.clone(),
                 agent: agent.agent.clone(),
-                color: None,
+                color: agent.color(),
                 message: self.where_it_is(agent),
             })
             .collect()

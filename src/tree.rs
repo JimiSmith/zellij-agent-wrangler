@@ -32,7 +32,7 @@ fn agent_row(
         label: agent.label(options.label),
         branch,
         placement,
-        color: None,
+        color: agent.color(),
     })
     .with(indicator(agent, options))
 }

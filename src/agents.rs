@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::SessionId;
+use crate::model::{NamedColor, SessionId};
 use crate::options::Label;
 use crate::tree::Tab;
 
@@ -22,7 +22,7 @@ const RECORD: char = '\n';
 /// them can be older than the other. Saying which shape a record is written in
 /// is what turns that into something the sidebar can report rather than a run of
 /// records it silently makes nothing of.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// The pipes an agent's hooks report a session on. Each carries one whole
 /// record: what a session calls itself changes under it, so every event is a
@@ -85,6 +85,9 @@ pub struct Meta {
     /// The agent's own name when it is a teammate of another session, which is
     /// what tells the two apart.
     pub name: String,
+    /// The color the agent shows for this session, by the agent's own name for
+    /// it. Empty for a session with none, and for an agent that assigns none.
+    pub color: String,
     /// The title the session gave itself.
     pub title: String,
 }
@@ -123,6 +126,7 @@ impl Agent {
             meta: Meta {
                 dir: field(&meta.dir),
                 name: field(&meta.name),
+                color: field(&meta.color),
                 title: field(&meta.title),
             },
             pane,
@@ -152,19 +156,26 @@ impl Agent {
         }
     }
 
+    /// The color this session's icon is drawn in, or `None` for one the agent
+    /// gives no color to.
+    pub fn color(&self) -> Option<NamedColor> {
+        NamedColor::agent(&self.meta.color)
+    }
+
     /// The record as one line: the format, then session, agent, pane, turn,
-    /// raised, and the three things it is called by. The pane is written as
+    /// raised, and the four things it is known by. The pane is written as
     /// nothing at all when the agent reported none.
     pub fn encode(&self) -> String {
         let pane = self.pane.map(|id| id.to_string()).unwrap_or_default();
         format!(
-            "{FORMAT}{FIELD}{}{FIELD}{}{FIELD}{pane}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}",
+            "{FORMAT}{FIELD}{}{FIELD}{}{FIELD}{pane}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}",
             self.session.as_str(),
             self.agent,
             self.turn.encode(),
             self.raised,
             self.meta.dir,
             self.meta.name,
+            self.meta.color,
             self.meta.title,
         )
     }
@@ -175,7 +186,7 @@ impl Agent {
     /// field character would still parse; it cannot, because the constructor
     /// takes that character out.
     pub fn decode(line: &str) -> Record {
-        let mut fields = line.splitn(9, FIELD);
+        let mut fields = line.splitn(10, FIELD);
         match fields.next().and_then(|format| format.parse::<u32>().ok()) {
             Some(FORMAT) => {}
             Some(other) => return Record::Foreign(other),
@@ -197,6 +208,7 @@ impl Agent {
         let meta = Meta {
             dir: fields.next()?.to_string(),
             name: fields.next()?.to_string(),
+            color: fields.next()?.to_string(),
             title: fields.next()?.to_string(),
         };
         let pane = match pane.is_empty() {
@@ -264,6 +276,7 @@ impl Registry {
             for (fresh, held) in [
                 (&mut agent.meta.dir, &known.meta.dir),
                 (&mut agent.meta.name, &known.meta.name),
+                (&mut agent.meta.color, &known.meta.color),
                 (&mut agent.meta.title, &known.meta.title),
             ] {
                 if fresh.is_empty() {
@@ -369,8 +382,21 @@ mod tests {
         Meta {
             dir: dir.to_string(),
             name: name.to_string(),
+            color: String::new(),
             title: title.to_string(),
         }
+    }
+
+    fn colored(id: &str, color: &str) -> Agent {
+        Agent::new(
+            session(id),
+            "claude",
+            Meta {
+                color: color.to_string(),
+                ..meta("wrangler", "", "")
+            },
+            Some(1),
+        )
     }
 
     fn agent(id: &str, pane: Option<u32>) -> Agent {
@@ -406,9 +432,9 @@ mod tests {
         for line in [
             "",
             "one",
-            "1\tone\tclaude",
-            "1\tone\tclaude\t1\tidle\t0\tdir",
-            "1\tone\tclaude\tx\tidle\t0\tdir\t\ttitle",
+            "2\tone\tclaude",
+            "2\tone\tclaude\t1\tidle\t0\tdir",
+            "2\tone\tclaude\tx\tidle\t0\tdir\t\t\ttitle",
         ] {
             assert_eq!(Agent::decode(line), Record::None, "{line}");
         }
@@ -461,7 +487,7 @@ mod tests {
     #[test]
     fn a_record_with_no_turn_it_recognises_decodes_to_nothing() {
         assert_eq!(
-            Agent::decode("1\tone\tclaude\t3\tdozing\t0\tdir\t\t"),
+            Agent::decode("2\tone\tclaude\t3\tdozing\t0\tdir\t\t\t"),
             Record::None
         );
     }
@@ -597,6 +623,37 @@ mod tests {
 
     fn labelled(dir: &str, name: &str, title: &str) -> Agent {
         Agent::new(session("one"), "claude", meta(dir, name, title), Some(1))
+    }
+
+    #[test]
+    fn a_session_is_drawn_in_the_color_the_agent_gives_it() {
+        // The two an agent names that a terminal does not are drawn in the
+        // bright form of their neighbour, so all eight stay apart.
+        for (name, color) in [
+            ("red", NamedColor::Red),
+            ("green", NamedColor::Green),
+            ("yellow", NamedColor::Yellow),
+            ("blue", NamedColor::Blue),
+            ("purple", NamedColor::Magenta),
+            ("cyan", NamedColor::Cyan),
+            ("orange", NamedColor::BrightYellow),
+            ("pink", NamedColor::BrightMagenta),
+        ] {
+            assert_eq!(colored("one", name).color(), Some(color), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_session_with_no_color_of_its_own_is_drawn_in_none() {
+        assert_eq!(colored("one", "").color(), None);
+        // A name this sidebar does not know is not a color to guess at.
+        assert_eq!(colored("one", "chartreuse").color(), None);
+    }
+
+    #[test]
+    fn a_color_survives_the_round_trip() {
+        let record = colored("one", "purple");
+        assert_eq!(Agent::decode(&record.encode()), Record::Known(record));
     }
 
     #[test]

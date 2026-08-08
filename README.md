@@ -93,6 +93,13 @@ directory it is working in until it has a name. A teammate is labelled
 running two agents contributes a row each. `○` at the right edge says the agent is mid-turn and `●` says it wants
 you; going to its pane answers the second and leaves the first alone.
 
+An agent's icon is drawn in the color that agent shows for the session (changed
+with Claude's `/color`), so the row ties to the session without a list of
+full-width colored lines to read past. Color says *which* agent, never which row
+is live - where you are is the `▌` gutter. The eight colors Claude names are
+drawn from your terminal's own palette, orange and pink in the bright form of
+their neighbour, so they follow your theme rather than Claude's.
+
 The agents of a session are known to every sidebar in it, and a sidebar opening
 in a new tab asks the others for what they have. Nothing survives every sidebar
 being closed at once.

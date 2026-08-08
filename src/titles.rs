@@ -46,6 +46,9 @@ fn text<'a>(record: &'a Value, key: &str) -> Option<&'a str> {
 /// wrote for itself. A given name wins wherever both appear, since it was asked
 /// for; between two of a kind the later one wins, since it is the later name.
 ///
+/// The color is read the same way as a title Claude wrote for itself: the last
+/// one in the window is the one in force.
+///
 /// A teammate's own name rides on every conversation record it writes, so the
 /// first one found in the window answers. The record that *renames* a teammate
 /// carries the same field and is passed over: it says what the name became, and
@@ -60,7 +63,8 @@ pub fn claude(transcript: &str) -> Meta {
         lines.next();
     }
 
-    let (mut given, mut written, mut name) = (String::new(), String::new(), String::new());
+    let (mut given, mut written) = (String::new(), String::new());
+    let (mut name, mut color) = (String::new(), String::new());
     for line in lines {
         // Reading every record as JSON would parse the whole conversation; the
         // records worth reading name themselves in bytes that can be looked for
@@ -68,6 +72,7 @@ pub fn claude(transcript: &str) -> Meta {
         let wanted = [
             b"\"custom-title\"".as_slice(),
             b"\"ai-title\"",
+            b"\"agent-color\"",
             b"\"agentName\"",
         ]
         .iter()
@@ -81,6 +86,7 @@ pub fn claude(transcript: &str) -> Meta {
         match text(&record, "type") {
             Some("custom-title") => given = text(&record, "customTitle").unwrap_or("").to_string(),
             Some("ai-title") => written = text(&record, "aiTitle").unwrap_or("").to_string(),
+            Some("agent-color") => color = text(&record, "agentColor").unwrap_or("").to_string(),
             Some("agent-name") => {}
             _ if name.is_empty() => name = text(&record, "agentName").unwrap_or("").to_string(),
             _ => {}
@@ -90,6 +96,7 @@ pub fn claude(transcript: &str) -> Meta {
     Meta {
         dir: String::new(),
         name,
+        color,
         title: if given.is_empty() { written } else { given },
     }
 }
@@ -261,6 +268,28 @@ mod tests {
             ],
         );
         assert_eq!(claude(&path).name, "scout");
+    }
+
+    #[test]
+    fn the_color_the_session_was_given_is_read() {
+        let scratch = Scratch::new("color");
+        let path = transcript(
+            scratch.path(),
+            &[
+                r#"{"type":"agent-color","agentColor":"blue"}"#,
+                r#"{"type":"user","message":"hi"}"#,
+                r#"{"type":"agent-color","agentColor":"purple"}"#,
+            ],
+        );
+        // The last one in the window is the one in force, as for a title.
+        assert_eq!(claude(&path).color, "purple");
+    }
+
+    #[test]
+    fn a_session_given_no_color_reports_none() {
+        let scratch = Scratch::new("no-color");
+        let path = transcript(scratch.path(), &[r#"{"type":"user","message":"hi"}"#]);
+        assert_eq!(claude(&path).color, "");
     }
 
     #[test]

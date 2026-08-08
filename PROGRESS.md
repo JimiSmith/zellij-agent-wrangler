@@ -24,11 +24,10 @@ Left in checkpoint 3: turning the sidebar back on after `q`, which needs a
 zellij key binding rather than plugin code. Width sync was dropped by decision,
 and so was the bell.
 
-What is left is not a checkpoint but a list: color, which the original takes
-from each session's own and matches to the Claude theme; the record-to-pane
-rules the original has for a session whose pane it cannot take at face value
-(pid ancestry, title matching); and the selection falling back to a nearby row
-rather than to the first one when the row it was on goes.
+What is left is not a checkpoint but a list: the record-to-pane rules the
+original has for a session whose pane it cannot take at face value (pid
+ancestry, title matching), and the selection falling back to a nearby row rather
+than to the first one when the row it was on goes.
 
 ## How it is tested
 
@@ -93,7 +92,13 @@ and it is not: `plugin_own_data_dir` ends in `<plugin_id>-<client_id>` and is
 four that two instances, or a plugin and a native process, can meet in.
 
 **A plugin inherits the zellij server's environment**, `ZELLIJ_SESSION_NAME`
-included, because the WASI context is built with `inherit_env`.
+included, because the WASI context is built with `inherit_env`. It does not
+inherit the filesystem: the four mounts are all there is, so anything in the
+user's home directory - an agent's own settings, for one - can only reach the
+sidebar by being sent to it.
+
+**`PaneInfo` carries no color.** A pane's border color is not among the fields
+zellij reports, so a pane's icon has nothing of its own to be drawn in.
 
 **A plugin's identity is its url and its configuration together.** Zellij adds
 `caller_cwd` to the configuration of an instance it launches, so a message

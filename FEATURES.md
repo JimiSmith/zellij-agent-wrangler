@@ -64,8 +64,20 @@ once with no agent reporting itself again.
 - [x] The selection bar spans the width and drops the color and dimming it covers
 - [x] Only the sidebar the keys would reach draws a selection bar at all
 - [x] Rows fitted to the pane width, padded or cut from the right
-- [ ] Agent color from the session's own color, matched to the Claude theme
-- [ ] Pane color from the pane's border color
+- [x] Agent color from the session's own color
+- [ ] ~~Pane color from the pane's border color~~ (zellij reports none)
+
+An agent names eight colors and a terminal has six it can count on, so the two
+with no name of their own - orange and pink - are drawn in the bright form of
+their neighbour. All eight stay apart, which is the whole of what the color is
+for: telling one session's row from another's at a glance.
+
+The original matches the exact xterm-256 index Claude itself emits, read off the
+user's Claude theme. That is not open here: the theme is in the user's home
+directory, and a plugin is given `/host`, `/tmp`, `/data` and `/cache` and no
+way to reach past them. Matching it would mean the theme riding on every record
+from the client, which is presentation travelling on a wire that carries facts.
+The color name is the fact; how to draw it is the sidebar's.
 
 ## Navigation
 

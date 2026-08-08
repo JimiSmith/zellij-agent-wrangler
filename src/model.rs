@@ -33,7 +33,6 @@ impl Placement {
 /// The palette a thing's identity is drawn from. Terminal-named rather than
 /// RGB, so the user's own theme decides what the colors look like.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum NamedColor {
     Red,
     Green,
@@ -41,6 +40,8 @@ pub enum NamedColor {
     Blue,
     Magenta,
     Cyan,
+    BrightYellow,
+    BrightMagenta,
 }
 
 impl NamedColor {
@@ -53,7 +54,30 @@ impl NamedColor {
             NamedColor::Blue => 34,
             NamedColor::Magenta => 35,
             NamedColor::Cyan => 36,
+            NamedColor::BrightYellow => 93,
+            NamedColor::BrightMagenta => 95,
         }
+    }
+
+    /// The terminal color an agent's own color name is drawn in, or `None` for
+    /// a session with no color of its own.
+    ///
+    /// An agent names eight colors and a terminal has six it can count on, so
+    /// the two with no name of their own are drawn in the bright form of their
+    /// nearest neighbour. That is what keeps eight sessions eight colors apart,
+    /// which is the whole of what the color is for.
+    pub fn agent(name: &str) -> Option<Self> {
+        Some(match name {
+            "red" => NamedColor::Red,
+            "green" => NamedColor::Green,
+            "yellow" => NamedColor::Yellow,
+            "blue" => NamedColor::Blue,
+            "purple" => NamedColor::Magenta,
+            "cyan" => NamedColor::Cyan,
+            "orange" => NamedColor::BrightYellow,
+            "pink" => NamedColor::BrightMagenta,
+            _ => return None,
+        })
     }
 }
 
