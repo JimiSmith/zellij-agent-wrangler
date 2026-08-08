@@ -30,17 +30,20 @@ layout block for the plugin that goes with it. Nothing downloads the plugin:
 zellij fetches it from the url in that block and holds it. Nothing starts the
 daemon either: the first hook to find none running starts it.
 
-The block it prints is the one that is right for your machine. Where the install
-directory is not on your `PATH`, or your `PATH` finds another copy of the client
-first, the block names the client outright, because a sidebar that cannot run it
-draws no agents and says nothing about why.
+The block it prints names the client's own path. The sidebar reaches the daemon
+by running it, and the `PATH` that has to find it is the zellij server's,
+inherited from whatever started zellij rather than from the shell you installed
+from. A sidebar that cannot run the client draws no agents and says nothing
+about why.
 
 Put the block in your layout inside both `default_tab_template` and
 `new_tab_template`, beside `children`:
 
 ```kdl
 pane size=32 borderless=true {
-    plugin location="https://github.com/JimiSmith/zellij-agent-wrangler/releases/download/v0.1.0/zellij-agent-wrangler-v0.1.0.wasm"
+    plugin location="https://github.com/JimiSmith/zellij-agent-wrangler/releases/download/v0.1.1/zellij-agent-wrangler-v0.1.1.wasm" {
+        install_hooks "/home/you/.local/bin/agent-wrangler"
+    }
 }
 ```
 
