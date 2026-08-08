@@ -543,6 +543,27 @@ mod tests {
     }
 
     #[test]
+    fn a_color_found_once_outlives_the_window_it_was_found_in() {
+        // A session records its color as it begins, and the client reads a
+        // fixed window over the end of the transcript, so the color scrolls out
+        // of sight as the session runs. It is held here rather than looked for
+        // again: the row keeps the color it was given, and only a record that
+        // names a different one changes it.
+        let mut registry = Registry::default();
+        registry.start(colored("one", "red"));
+        registry.report(reporting("one", Some(1), Turn::Working, 0));
+        assert_eq!(
+            registry.get(&session("one")).unwrap().color(),
+            Some(NamedColor::Red)
+        );
+        registry.start(colored("one", "blue"));
+        assert_eq!(
+            registry.get(&session("one")).unwrap().color(),
+            Some(NamedColor::Blue)
+        );
+    }
+
+    #[test]
     fn a_record_that_does_say_something_new_replaces_it() {
         let mut registry = Registry::default();
         registry.start(agent("one", Some(1)));

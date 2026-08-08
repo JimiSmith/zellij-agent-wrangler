@@ -109,12 +109,20 @@ That is the one property the polling daemon had that this does not. Closing it
 would mean either something that re-reads on a clock, or an agent event that
 fires when a slash command runs.
 
-**A Claude transcript is written at both ends.** The color a session is given
-and the name a teammate goes by are recorded once, in the first records of the
-file; the title is written and rewritten throughout. A fixed window over the end
-of the file therefore finds every title and no color at all, for any session
-that outgrows it - which is every session that runs for a while. Measured on a
-3MB transcript: 47 color records in the file, 4 of them in the last 64KB.
+**A Claude transcript records different things at different times.** The color a
+session is given and the name a teammate goes by are written once, near the
+start; the title is written and rewritten throughout. A fixed window over the
+end of the file therefore stops covering the first two as a session grows -
+measured on a 3MB transcript, 47 color records in the file and 4 in the last
+64KB.
+
+Reading the head as well is the obvious answer and the wrong one. A scan reports
+what it can see now, and a record that says nothing about a color is not a
+record saying the color is gone: the sidebar keeps the last non-empty value it
+was told. So the color needs finding once, while the transcript is still short,
+and never again - which the first hook after it is set does. The original solved
+it the same way, by remembering across polls rather than by reading more of the
+file.
 
 **`PaneInfo` carries no color.** A pane's border color is not among the fields
 zellij reports, so a pane's icon has nothing of its own to be drawn in.
