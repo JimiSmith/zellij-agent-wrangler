@@ -49,14 +49,30 @@ client="agent-wrangler-$version-$target"
 wasm="zellij-agent-wrangler-$version.wasm"
 
 mkdir -p "$bin"
+
+# Downloaded beside the real one and renamed over it, never written to it.
+#
+# Writing in place keeps the file the system already knows, and macOS validates a
+# signed binary against what it recorded for that file: rewriting the contents
+# under it leaves every later run killed outright, with nothing said about why.
+# Renaming puts a new file there instead, so what was running before goes on
+# running from what it started as and the next run gets the new one whole.
+#
+# It also means a download that dies halfway leaves nothing behind that could be
+# run: the temporary is what is half-written, and it is only ever renamed once it
+# is complete.
+temp="$bin/.agent-wrangler.$$"
+trap 'rm -f "$temp"' EXIT INT TERM
 if [ "$have_gh" = yes ]; then
     gh release download "$version" --repo "$repo" --pattern "$client" \
-        --output "$bin/agent-wrangler" --clobber
+        --output "$temp" --clobber
 else
-    curl -fsSL --output "$bin/agent-wrangler" \
+    curl -fsSL --output "$temp" \
         "https://github.com/$repo/releases/download/$version/$client"
 fi
-chmod +x "$bin/agent-wrangler"
+chmod +x "$temp"
+mv -f "$temp" "$bin/agent-wrangler"
+trap - EXIT INT TERM
 
 "$bin/agent-wrangler" install-hooks
 
