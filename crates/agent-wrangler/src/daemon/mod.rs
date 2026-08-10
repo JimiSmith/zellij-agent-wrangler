@@ -8,6 +8,13 @@
 //! happen with it released, because each of them can take arbitrarily long and
 //! the daemon answers its own socket while it is stuck, so nothing else could
 //! take over from a daemon that froze holding it.
+//!
+//! Delivering is the one thing not done by whichever thread caused it. Every
+//! client is sent the whole state rather than what changed, so a thread that
+//! applied something says the clients are [`Owed`] one and carries on, and a
+//! single thread does the delivering. Any number of changes arriving during one
+//! delivery is one delivery after it, which is what keeps a working agent's
+//! burst of events from being a burst of programs run.
 
 pub mod notify;
 pub mod persist;
@@ -17,7 +24,7 @@ pub mod state;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
@@ -57,6 +64,47 @@ fn held(shared: &Arc<Mutex<State>>) -> MutexGuard<'_, State> {
     shared
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Whether the clients are owed the state, and whoever is waiting to hand it to
+/// them.
+///
+/// A delivery runs a program per client and waits for each, so it takes as long
+/// as the slowest of them, and every event that happens meanwhile would
+/// otherwise start a delivery of its own. What the clients are sent is the whole
+/// state rather than what changed, so a hundred changes during one delivery are
+/// one delivery after it and lose nothing: the next one carries all of them.
+///
+/// This is what keeps the number of programs run a function of how fast they
+/// can be run, rather than of how fast the agents are reporting. A burst of
+/// events is what a working agent looks like.
+#[derive(Default)]
+struct Owed {
+    owed: Mutex<bool>,
+    told: Condvar,
+}
+
+impl Owed {
+    /// Say the clients are owed the state. Returns at once, whoever is
+    /// delivering and however long they take.
+    fn owe(&self) {
+        let mut owed = self.owed.lock().unwrap_or_else(|e| e.into_inner());
+        *owed = true;
+        self.told.notify_one();
+    }
+
+    /// Wait until something is owed, and take it. Every change made up to this
+    /// moment is covered by the delivery that follows.
+    fn take(&self) {
+        let mut owed = self.owed.lock().unwrap_or_else(|e| e.into_inner());
+        while !*owed {
+            owed = self
+                .told
+                .wait(owed)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        *owed = false;
+    }
 }
 
 /// What the daemon does with the socket name.
@@ -154,13 +202,13 @@ fn announce(shared: &Arc<Mutex<State>>, call: &Call) {
 
 /// Read one connection to its end, applying what it says.
 ///
-/// Each message is published as it is applied rather than at the end of the
+/// Each message is owed as it is applied rather than at the end of the
 /// connection, so a client that holds its socket open is not also holding back
 /// every change it has already reported.
 ///
 /// Returns `true` when the sender spoke a record format this build does not,
 /// which is the one condition that makes the daemon stand down.
-fn serve(stream: Stream, shared: &Arc<Mutex<State>>, dir: &Path) -> bool {
+fn serve(stream: Stream, shared: &Arc<Mutex<State>>, owed: &Owed, dir: &Path) -> bool {
     let mut reader = BufReader::new(&stream);
 
     while let Ok(Some(message)) = read_message::<_, Inbound>(&mut reader) {
@@ -175,11 +223,14 @@ fn serve(stream: Stream, shared: &Arc<Mutex<State>>, dir: &Path) -> bool {
                 let reading = read_hook(&hook, &Real);
                 let applied = held(shared).apply_hook(&hook, reading);
                 if applied.changed() {
-                    publish(shared, dir);
+                    owed.owe();
                 }
-                // Drawn first and announced after: what is on screen is worth
-                // more than what is said out loud, and a notifier that hangs
-                // would otherwise hold up the state that says the same thing.
+                // Owed first and announced after, which is the order that
+                // matters: a notifier that hangs cannot hold up the state
+                // saying the same thing, because saying it is owed is all this
+                // thread does about it. Which of the two the user meets first
+                // is whichever of a delivery and a notifier finishes first, and
+                // neither waits on the other.
                 if let Some(call) = applied.call() {
                     announce(shared, call);
                 }
@@ -196,7 +247,7 @@ fn serve(stream: Stream, shared: &Arc<Mutex<State>>, dir: &Path) -> bool {
             }
             Inbound::Seen { session } => {
                 if held(shared).on_seen(&session) {
-                    publish(shared, dir);
+                    owed.owe();
                 }
             }
             Inbound::Snapshot => {
@@ -216,7 +267,7 @@ fn serve(stream: Stream, shared: &Arc<Mutex<State>>, dir: &Path) -> bool {
 }
 
 /// Look at every held transcript and pid, and take in what changed.
-fn sweep(shared: &Arc<Mutex<State>>, dir: &Path) {
+fn sweep(shared: &Arc<Mutex<State>>, owed: &Owed) {
     let (plan, since) = {
         let state = held(shared);
         (state.plan(), state.mtimes())
@@ -224,7 +275,7 @@ fn sweep(shared: &Arc<Mutex<State>>, dir: &Path) {
     // The looking is the slow part, and it holds nothing.
     let found = look(&plan, &Real, &since);
     if held(shared).observe(found) {
-        publish(shared, dir);
+        owed.owe();
     }
 }
 
@@ -247,16 +298,30 @@ pub fn run() -> std::io::Result<()> {
     }
     let shared = Arc::new(Mutex::new(initial));
     let stop = Arc::new(AtomicBool::new(false));
+    let owed = Arc::new(Owed::default());
 
     {
         let shared = Arc::clone(&shared);
+        let owed = Arc::clone(&owed);
         let stop = Arc::clone(&stop);
-        let dir = dir.clone();
         thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
                 thread::sleep(POLL);
-                sweep(&shared, &dir);
+                sweep(&shared, &owed);
             }
+        });
+    }
+
+    // One thread does the delivering, so however many events arrive while a
+    // delivery is running, they are one delivery afterwards rather than one
+    // each.
+    {
+        let shared = Arc::clone(&shared);
+        let owed = Arc::clone(&owed);
+        let dir = dir.clone();
+        thread::spawn(move || loop {
+            owed.take();
+            publish(&shared, &dir);
         });
     }
 
@@ -268,12 +333,13 @@ pub fn run() -> std::io::Result<()> {
             continue;
         };
         let shared = Arc::clone(&shared);
+        let owed = Arc::clone(&owed);
         let stop = Arc::clone(&stop);
         let dir = dir.clone();
         // A connection gets a thread, so one client asking for a snapshot, or
         // one delivery that is slow to run, cannot hold up the next hook.
         thread::spawn(move || {
-            if serve(stream, &shared, &dir) {
+            if serve(stream, &shared, &owed, &dir) {
                 // The other end is a different build of this program, so what it
                 // says cannot be read reliably and what this says cannot be read
                 // by it. Standing down leaves the name free for the daemon it
@@ -303,6 +369,35 @@ mod tests {
         // The whole point of the pause: whatever refused it is still there, so
         // an immediate retry saturates a core rather than recovering.
         assert!(AFTER_REFUSAL >= Duration::from_millis(50));
+    }
+
+    #[test]
+    fn every_change_made_before_a_delivery_is_covered_by_it() {
+        // The whole point of owing rather than delivering: what the clients are
+        // sent is the state entire, so three changes during one delivery are
+        // one delivery afterwards rather than three.
+        let owed = Arc::new(Owed::default());
+        for _ in 0..3 {
+            owed.owe();
+        }
+        owed.take();
+
+        let waiting = Arc::clone(&owed);
+        let (delivered, heard) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            waiting.take();
+            let _ = delivered.send(());
+        });
+        assert!(
+            heard.recv_timeout(Duration::from_millis(100)).is_err(),
+            "the three were taken together, so nothing is owed"
+        );
+
+        owed.owe();
+        assert!(
+            heard.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "a change after the delivery is owed like any other"
+        );
     }
 
     #[test]
