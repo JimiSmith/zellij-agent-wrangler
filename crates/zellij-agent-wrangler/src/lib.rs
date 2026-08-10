@@ -5,6 +5,7 @@
 
 pub mod agents;
 pub mod calls;
+pub mod client;
 pub mod model;
 pub mod options;
 pub mod render;

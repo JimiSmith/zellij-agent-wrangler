@@ -13,6 +13,7 @@
 //! reprints its whole pane every time, and pane updates are frequent.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use zellij_tile::prelude::*;
 
@@ -21,6 +22,7 @@ use agent_wrangler_core::registry::Registry;
 
 use zellij_agent_wrangler::agents;
 use zellij_agent_wrangler::calls::Answered;
+use zellij_agent_wrangler::client::Client;
 use zellij_agent_wrangler::model::{Notification, Row, RowContent, RowKey};
 use zellij_agent_wrangler::options::Options;
 use zellij_agent_wrangler::render::{notification_body_field, notification_rows, paint, wrap};
@@ -52,6 +54,25 @@ const FOCUS_MESSAGE: &str = "wrangler:focus";
 /// asked to install them do it once between them rather than once each.
 const INSTALLED_MESSAGE: &str = "wrangler:hooks-installed";
 
+/// The directory the client is run from.
+///
+/// Zellij runs a plugin's command from the plugin's own working directory,
+/// which is the directory the sidebar's pane was opened in. A directory can be
+/// removed while the session holding it is still up - a worktree that has been
+/// torn down is the ordinary way - and the spawn changes directory before it
+/// reaches the program, so every later run fails with the same error a missing
+/// client gives, whatever the client's path says. The root is the one directory
+/// that cannot go, and none of the calls made here reads a working directory.
+const RUN_FROM: &str = "/";
+
+/// The context key naming which call a run was, so that the answer coming back
+/// says what failed rather than only that something did.
+const CALL: &str = "call";
+
+/// What the sidebar says when it cannot run the client at all. The client is
+/// how a sidebar is sent anything, so this is also why the tree is empty.
+const UNREACHABLE: &str = "the sidebar could not run its client";
+
 /// What a refused sidebar says beneath its heading.
 const REFUSED: &str = "the sidebar cannot read the session";
 
@@ -81,6 +102,9 @@ struct State {
     /// The calls this sidebar has answered but has not yet been told about, so
     /// that a row already arrived at does not come back for the round trip.
     answered: Answered,
+    /// The client, and whether running it has ever worked. Named when the
+    /// layout is read and given up on the first time a run fails.
+    client: Client,
     /// What zellij calls the session this sidebar is in, once it has been told.
     ///
     /// It is the only thing that says which of the agents described to the
@@ -138,6 +162,18 @@ fn focus() -> Option<Focus> {
 /// another version of the record format.
 const MISMATCH: &str = "the hook client is a different version; install both again";
 
+/// The first line of what a run put on its error stream, which is the whole of
+/// what is worth repeating: the rest is a usage message or a backtrace, and the
+/// pane is thirty columns wide.
+fn said(stderr: &[u8]) -> &str {
+    std::str::from_utf8(stderr)
+        .unwrap_or_default()
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+}
+
 /// A heading over a wrapped message: how the sidebar says something about
 /// itself, where every other row says something about the session.
 fn notice(heading: &str, text: &str, width: usize) -> Vec<Row> {
@@ -151,6 +187,47 @@ fn notice(heading: &str, text: &str, width: usize) -> Vec<Row> {
 }
 
 impl State {
+    /// Run the client, saying which call this is, if it is a client still worth
+    /// running.
+    ///
+    /// Side effect: spawns a process through zellij. What it came to arrives
+    /// back as a `RunCommandResult` naming this call, and is what decides
+    /// whether the client is run again at all.
+    fn run(&self, call: &str, words: &[&str]) {
+        let Some(path) = self.client.path() else {
+            return;
+        };
+        let mut command = vec![path];
+        command.extend_from_slice(words);
+        run_command_with_env_variables_and_cwd(
+            &command,
+            BTreeMap::new(),
+            PathBuf::from(RUN_FROM),
+            BTreeMap::from([(CALL.to_string(), call.to_string())]),
+        );
+    }
+
+    /// Take in how a run of the client went, and say whether the pane changed.
+    ///
+    /// Anything but a clean exit is read as the client being unrunnable rather
+    /// than as this call going wrong: the sidebar makes the same three calls
+    /// over and over, so a call that failed once fails every time, and what is
+    /// worth drawing is that the sidebar has stopped trying.
+    fn ran(
+        &mut self,
+        exit: Option<i32>,
+        stderr: &[u8],
+        context: &BTreeMap<String, String>,
+    ) -> bool {
+        match exit {
+            Some(0) => self.client.reached(),
+            _ => {
+                let call = context.get(CALL).map(String::as_str).unwrap_or_default();
+                self.client.failed(call, said(stderr))
+            }
+        }
+    }
+
     /// Take one pane's title as it is now, and say whether the tree changed.
     ///
     /// The tabs and panes zellij reports are sent when the session's *shape*
@@ -217,10 +294,7 @@ impl State {
         }
         if self.allowed() && self.is_where_the_user_is() {
             for agent in &calling {
-                run_command(
-                    &[self.options.client(), "seen", agent.session.as_str()],
-                    BTreeMap::new(),
-                );
+                self.run("seen", &["seen", agent.session.as_str()]);
             }
         }
         changed
@@ -257,7 +331,7 @@ impl State {
             return;
         }
         self.registered = true;
-        let mut command = vec![self.options.client(), "register", "zellij", &name];
+        let mut words = vec!["register", "zellij", name.as_str()];
         let notifier = self
             .options
             .desktop
@@ -265,10 +339,10 @@ impl State {
             .map(|notifier| notifier.words())
             .unwrap_or_default();
         if !notifier.is_empty() {
-            command.push("--notify");
-            command.extend(notifier.iter().map(String::as_str));
+            words.push("--notify");
+            words.extend(notifier.iter().map(String::as_str));
         }
-        run_command(&command, BTreeMap::new());
+        self.run("register", &words);
     }
 
     /// Rebuild the tree from the tabs and panes last reported, and say whether
@@ -318,14 +392,14 @@ impl State {
     /// The others are told rather than left to work it out, because two of them
     /// installing at once would be two processes writing one file.
     fn install_hooks(&mut self) {
-        let Some(client) = self.options.install_hooks.clone() else {
+        if self.options.install_hooks.is_none() {
             return;
-        };
+        }
         if self.installed || !self.allowed() || !self.is_where_the_user_is() {
             return;
         }
         self.installed = true;
-        run_command(&[&client, "install-hooks"], BTreeMap::new());
+        self.run("install-hooks", &["install-hooks"]);
         pipe_message_to_plugin(MessageToPlugin::new(INSTALLED_MESSAGE));
     }
 
@@ -418,14 +492,18 @@ impl State {
     /// Every line of the pane, in the order it is drawn and navigated: the tree,
     /// then enough blank padding to hold the notification area at the foot.
     ///
-    /// A sidebar being reported to by a hook client of another version leads
-    /// with saying so, since that is why the tree beneath it is missing rows.
+    /// What the sidebar has to say about itself leads, since that is why the
+    /// tree beneath it is missing rows: a hook client of another version, and a
+    /// client that could not be run at all.
     fn lines(&self, width: usize, height: usize) -> Vec<Row> {
         let area = self.notification_area(width, height / 4);
         let mut rows = match self.mismatched {
             true => notice("out of step", MISMATCH, width),
             false => Vec::new(),
         };
+        if let Some(why) = self.client.why() {
+            rows.extend(notice("no client", &format!("{UNREACHABLE}. {why}"), width));
+        }
         rows.extend(self.rows.iter().cloned());
         rows.truncate(height.saturating_sub(area.len()));
         rows.resize(
@@ -551,6 +629,7 @@ impl State {
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         self.options = Options::read(&configuration);
+        self.client = Client::new(self.options.client());
         self.plugin_id = get_plugin_ids().plugin_id;
         // Reading the session's tabs and panes, and going to what a row points
         // at: the sidebar asks for nothing it would not use. Running a command
@@ -572,6 +651,10 @@ impl ZellijPlugin for State {
             EventType::CwdChanged,
             EventType::PermissionRequestResult,
             EventType::SessionUpdate,
+            // How a run of the client answers. Without it a client that cannot
+            // be run fails silently, once per state change, for as long as the
+            // session lasts.
+            EventType::RunCommandResult,
         ]);
     }
 
@@ -597,6 +680,7 @@ impl ZellijPlugin for State {
                 self.name_session(&sessions);
                 false
             }
+            Event::RunCommandResult(exit, _, stderr, context) => self.ran(exit, &stderr, &context),
             Event::PermissionRequestResult(status) => {
                 self.permission = Some(status);
                 // Asking before the answer arrives runs nothing: a plugin

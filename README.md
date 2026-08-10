@@ -33,8 +33,9 @@ daemon either: the first hook to find none running starts it.
 The block it prints names the client's own path. The sidebar reaches the daemon
 by running it, and the `PATH` that has to find it is the zellij server's,
 inherited from whatever started zellij rather than from the shell you installed
-from. A sidebar that cannot run the client draws no agents and says nothing
-about why.
+from. A sidebar that cannot run the client draws no agents, and says so at the
+top of the pane along with what the run said, since that is why the tree beneath
+it is empty.
 
 Put the block in your layout inside both `default_tab_template` and
 `new_tab_template`, beside `children`:
