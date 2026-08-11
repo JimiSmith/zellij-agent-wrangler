@@ -87,6 +87,62 @@ pub enum Inbound {
     /// Say the state on this connection and nothing more. What the command line
     /// asks, for looking at what the daemon holds.
     Snapshot,
+    /// Say everything from now on, on this connection, until it is dropped.
+    Monitor { format: u32 },
+}
+
+/// One message the daemon was sent or sent on, and when.
+///
+/// These exist for one question: the state reaches a sidebar, the sidebar
+/// answers by running the client, and the answer arrives back here as another
+/// message. A run of these says how fast that goes round, what keeps sending it
+/// round again, and how long each leg took.
+///
+/// Only messages. What the daemon decided, polled or noticed in between is its
+/// own business and is not a record here, or a watcher would be reading the
+/// daemon's diary rather than its post.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Watched {
+    /// Milliseconds since the epoch, read where the message was.
+    pub at: u64,
+    #[serde(flatten)]
+    pub what: What,
+}
+
+/// A message, and which way it went.
+///
+/// `told` on an arriving message says whether it changed anything, because that,
+/// and not the arrival, is what owes the clients a delivery. A run of messages
+/// that each told the daemon nothing is a loop turning over without moving.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum What {
+    /// In: an agent's hook reported.
+    Hook {
+        agent: String,
+        event: String,
+        session: String,
+        told: bool,
+    },
+    /// In: a client asked to be delivered to from now on.
+    Registered { sink: Sink },
+    /// In: a client said the user reached a session that was calling for them.
+    Seen { session: String, told: bool },
+    /// In: something asked for the state on its own connection.
+    Asked,
+    /// Out: the state is going to this client, carrying this many agents.
+    ///
+    /// Paired with [`What::Delivered`] rather than folded into it, because a
+    /// delivery is a whole process run for a zellij client and can fail to end.
+    /// One of these with none of those is a delivery that never came back.
+    Delivering { sink: Sink, agents: usize },
+    /// Out: that delivery landed, or found the client gone. `took` is
+    /// milliseconds, which for a zellij client is a whole process run.
+    Delivered { sink: Sink, sent: bool, took: u64 },
+    /// Records that could not be handed over fast enough. A watcher that falls
+    /// behind loses records rather than holding the daemon up, and is told how
+    /// many rather than left believing it saw everything.
+    Missed { records: u64 },
 }
 
 /// What the daemon says back on a connection.

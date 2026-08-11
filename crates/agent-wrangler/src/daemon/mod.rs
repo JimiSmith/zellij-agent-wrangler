@@ -20,13 +20,14 @@ pub mod notify;
 pub mod persist;
 pub mod sink;
 pub mod state;
+pub mod watch;
 
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{GenericNamespaced, Listener, ListenerOptions, Stream};
@@ -35,8 +36,9 @@ use agent_wrangler_core::agent::FORMAT;
 use agent_wrangler_core::notify::Notifier;
 
 use crate::daemon::state::{look, read_hook, Call, Client, Real, State};
+use crate::daemon::watch::Watchers;
 use crate::paths;
-use crate::proto::{read_message, write_message, Inbound, Outbound, Sink};
+use crate::proto::{read_message, write_message, Inbound, Outbound, Sink, What};
 
 /// How often every held transcript is looked at again, and every held pid.
 ///
@@ -140,16 +142,28 @@ fn bind() -> std::io::Result<Bound> {
 /// Side effect: writes a file and runs a program per zellij client. Called with
 /// no lock held, and takes it only to read what to send and to note who could
 /// not be reached.
-fn publish(shared: &Arc<Mutex<State>>, dir: &Path) {
+fn publish(shared: &Arc<Mutex<State>>, dir: &Path, watchers: &Watchers) {
     let (payload, clients, saved) = {
         let state = held(shared);
         (state.payload(), state.clients(), state.snapshot())
     };
+    let agents = saved.len();
     persist::save(dir, &saved, &clients);
     let answers: Vec<(Sink, bool)> = clients
         .into_iter()
         .map(|client| {
+            watchers.saw(|| What::Delivering {
+                sink: client.sink.clone(),
+                agents,
+            });
+            let began = Instant::now();
             let sent = sink::deliver(&client.sink, &payload).sent();
+            let took = began.elapsed().as_millis() as u64;
+            watchers.saw(|| What::Delivered {
+                sink: client.sink.clone(),
+                sent,
+                took,
+            });
             (client.sink, sent)
         })
         .collect();
@@ -165,9 +179,23 @@ fn publish(shared: &Arc<Mutex<State>>, dir: &Path) {
 }
 
 /// Tell one client, whatever the rest of them are doing.
-fn deliver_one(shared: &Arc<Mutex<State>>, to: &Sink) {
-    let payload = held(shared).payload();
+fn deliver_one(shared: &Arc<Mutex<State>>, to: &Sink, watchers: &Watchers) {
+    let (payload, agents) = {
+        let state = held(shared);
+        (state.payload(), state.snapshot().len())
+    };
+    watchers.saw(|| What::Delivering {
+        sink: to.clone(),
+        agents,
+    });
+    let began = Instant::now();
     let sent = sink::deliver(to, &payload).sent();
+    let took = began.elapsed().as_millis() as u64;
+    watchers.saw(|| What::Delivered {
+        sink: to.clone(),
+        sent,
+        took,
+    });
     let mut state = held(shared);
     match sent {
         true => state.reached(to),
@@ -208,12 +236,22 @@ fn announce(shared: &Arc<Mutex<State>>, call: &Call) {
 ///
 /// Returns `true` when the sender spoke a record format this build does not,
 /// which is the one condition that makes the daemon stand down.
-fn serve(stream: Stream, shared: &Arc<Mutex<State>>, owed: &Owed, dir: &Path) -> bool {
+fn serve(
+    stream: Stream,
+    shared: &Arc<Mutex<State>>,
+    owed: &Owed,
+    dir: &Path,
+    watchers: &Watchers,
+) -> bool {
     let mut reader = BufReader::new(&stream);
 
     while let Ok(Some(message)) = read_message::<_, Inbound>(&mut reader) {
         match message {
-            Inbound::Hook { format, .. } | Inbound::Register { format, .. } if format != FORMAT => {
+            Inbound::Hook { format, .. }
+            | Inbound::Register { format, .. }
+            | Inbound::Monitor { format }
+                if format != FORMAT =>
+            {
                 return true;
             }
             Inbound::Hook { hook, .. } => {
@@ -222,6 +260,12 @@ fn serve(stream: Stream, shared: &Arc<Mutex<State>>, owed: &Owed, dir: &Path) ->
                 // the machine carries on meanwhile.
                 let reading = read_hook(&hook, &Real);
                 let applied = held(shared).apply_hook(&hook, reading);
+                watchers.saw(|| What::Hook {
+                    agent: hook.agent.clone(),
+                    event: hook.event.clone(),
+                    session: hook.session_id.clone(),
+                    told: applied.changed(),
+                });
                 if applied.changed() {
                     owed.owe();
                 }
@@ -236,21 +280,28 @@ fn serve(stream: Stream, shared: &Arc<Mutex<State>>, owed: &Owed, dir: &Path) ->
                 }
             }
             Inbound::Register { sink, notify, .. } => {
+                watchers.saw(|| What::Registered { sink: sink.clone() });
                 held(shared).register(Client {
                     sink: sink.clone(),
                     notify: Notifier::new(notify),
                 });
                 // A client that has just registered has nothing yet, so it is
                 // told the state whether or not anything changed.
-                deliver_one(shared, &sink);
+                deliver_one(shared, &sink, watchers);
                 record(shared, dir);
             }
             Inbound::Seen { session } => {
-                if held(shared).on_seen(&session) {
+                let told = held(shared).on_seen(&session);
+                watchers.saw(|| What::Seen {
+                    session: session.clone(),
+                    told,
+                });
+                if told {
                     owed.owe();
                 }
             }
             Inbound::Snapshot => {
+                watchers.saw(|| What::Asked);
                 let payload = held(shared).payload();
                 let mut writer = BufWriter::new(&stream);
                 let _ = write_message(
@@ -260,6 +311,19 @@ fn serve(stream: Stream, shared: &Arc<Mutex<State>>, owed: &Owed, dir: &Path) ->
                         records: payload,
                     },
                 );
+            }
+            // The connection becomes the watcher's, and is read no further: what
+            // it asked for is everything from now on, and it says nothing else.
+            // It leaves by going away, which the first record after that finds.
+            Inbound::Monitor { .. } => {
+                let from = watchers.watch();
+                let mut writer = BufWriter::new(&stream);
+                while let Ok(record) = from.recv() {
+                    if write_message(&mut writer, &record).is_err() {
+                        break;
+                    }
+                }
+                return false;
             }
         }
     }
@@ -299,6 +363,7 @@ pub fn run() -> std::io::Result<()> {
     let shared = Arc::new(Mutex::new(initial));
     let stop = Arc::new(AtomicBool::new(false));
     let owed = Arc::new(Owed::default());
+    let watchers = Arc::new(Watchers::default());
 
     {
         let shared = Arc::clone(&shared);
@@ -318,10 +383,11 @@ pub fn run() -> std::io::Result<()> {
     {
         let shared = Arc::clone(&shared);
         let owed = Arc::clone(&owed);
+        let watchers = Arc::clone(&watchers);
         let dir = dir.clone();
         thread::spawn(move || loop {
             owed.take();
-            publish(&shared, &dir);
+            publish(&shared, &dir, &watchers);
         });
     }
 
@@ -335,11 +401,12 @@ pub fn run() -> std::io::Result<()> {
         let shared = Arc::clone(&shared);
         let owed = Arc::clone(&owed);
         let stop = Arc::clone(&stop);
+        let watchers = Arc::clone(&watchers);
         let dir = dir.clone();
         // A connection gets a thread, so one client asking for a snapshot, or
         // one delivery that is slow to run, cannot hold up the next hook.
         thread::spawn(move || {
-            if serve(stream, &shared, &owed, &dir) {
+            if serve(stream, &shared, &owed, &dir, &watchers) {
                 // The other end is a different build of this program, so what it
                 // says cannot be read reliably and what this says cannot be read
                 // by it. Standing down leaves the name free for the daemon it

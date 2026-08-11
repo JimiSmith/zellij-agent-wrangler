@@ -31,7 +31,7 @@ const HOPS: u32 = 8;
 
 /// Milliseconds since the epoch, which is what orders one call for the user
 /// against another. Read here because this process sees each call exactly once.
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_millis() as u64)
@@ -121,6 +121,7 @@ const USAGE: &str = "usage: agent-wrangler hook <agent> <start|end|working|needs
        agent-wrangler register <zellij|pipe> <session|path> [--notify <command> [argument...]]
        agent-wrangler seen <session>
        agent-wrangler agents
+       agent-wrangler monitor
        agent-wrangler install-hooks [all|claude|copilot] [--uninstall]
        agent-wrangler --version";
 
@@ -164,6 +165,22 @@ fn main() -> ExitCode {
                 session: session.clone(),
             });
             ExitCode::SUCCESS
+        }
+        // What the daemon does, a record to a line, for as long as this runs.
+        // For the questions a snapshot cannot answer: how often the state goes
+        // out, what sent it out, and how long each client took to reach.
+        Some("monitor") => {
+            let mut out = std::io::stdout().lock();
+            match client::watch(&mut out) {
+                Ok(()) => ExitCode::SUCCESS,
+                // A pipe that has gone is the ordinary way this ends: the reader
+                // was a `head`, or a pager the user left.
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("agent-wrangler monitor: {error}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         // What the daemon holds, as it would send it. For looking at what is
         // there when a row is not what was expected.
