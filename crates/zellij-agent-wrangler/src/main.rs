@@ -609,39 +609,6 @@ impl State {
         drawn || mismatch
     }
 
-    /// What one message coming in does to the sidebar, whoever sent it.
-    fn take(&mut self, message: PipeMessage) -> bool {
-        match message.name.as_str() {
-            OFF_MESSAGE => {
-                close_self();
-                false
-            }
-            INSTALLED_MESSAGE => {
-                self.installed = true;
-                false
-            }
-            // Taken as read rather than checked, and not passed on: it was sent
-            // by the one sidebar that could see it, which has told everyone.
-            FOCUS_MESSAGE => match message.payload.as_deref().and_then(Focus::decode) {
-                Some(focus) => {
-                    self.focus = Some(focus);
-                    self.answer();
-                    self.resolve()
-                }
-                None => false,
-            },
-            SELECTION_MESSAGE => match message.payload.as_deref().and_then(RowKey::decode) {
-                Some(key) => {
-                    self.selected = Some(key);
-                    true
-                }
-                None => false,
-            },
-            AGENTS_MESSAGE => self.adopt(message.payload.as_deref().unwrap_or_default()),
-            _ => false,
-        }
-    }
-
     /// Take the name zellij gives the session this sidebar is in, and ask for
     /// that session's agents.
     ///
@@ -768,26 +735,39 @@ impl ZellijPlugin for State {
     /// Every broadcast reaches its own sender, so anything a sidebar says to the
     /// others is ignored when it comes back. What describes the agents comes
     /// from the command line and is never this plugin's own.
-    ///
-    /// Side effect: releases the command line that sent it. A pipe from the
-    /// command line is held open until a plugin lets it go, and one that no
-    /// plugin lets go is released by zellij a whole second later, which is a
-    /// second the sender spends waiting on a message the sidebar has already
-    /// read. The message is taken in full first, so what is released is a
-    /// message already acted on.
     fn pipe(&mut self, message: PipeMessage) -> bool {
         if message.source == PipeSource::Plugin(self.plugin_id) {
             return false;
         }
-        let sender = match &message.source {
-            PipeSource::Cli(pipe) => Some(pipe.clone()),
-            _ => None,
-        };
-        let drawn = self.take(message);
-        if let Some(pipe) = sender {
-            unblock_cli_pipe_input(&pipe);
+        match message.name.as_str() {
+            OFF_MESSAGE => {
+                close_self();
+                false
+            }
+            INSTALLED_MESSAGE => {
+                self.installed = true;
+                false
+            }
+            // Taken as read rather than checked, and not passed on: it was sent
+            // by the one sidebar that could see it, which has told everyone.
+            FOCUS_MESSAGE => match message.payload.as_deref().and_then(Focus::decode) {
+                Some(focus) => {
+                    self.focus = Some(focus);
+                    self.answer();
+                    self.resolve()
+                }
+                None => false,
+            },
+            SELECTION_MESSAGE => match message.payload.as_deref().and_then(RowKey::decode) {
+                Some(key) => {
+                    self.selected = Some(key);
+                    true
+                }
+                None => false,
+            },
+            AGENTS_MESSAGE => self.adopt(message.payload.as_deref().unwrap_or_default()),
+            _ => false,
         }
-        drawn
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
