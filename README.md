@@ -42,7 +42,7 @@ Put the block in your layout inside both `default_tab_template` and
 
 ```kdl
 pane size=32 borderless=true {
-    plugin location="https://github.com/JimiSmith/zellij-agent-wrangler/releases/download/v0.1.5/zellij-agent-wrangler-v0.1.5.wasm" {
+    plugin location="https://github.com/JimiSmith/zellij-agent-wrangler/releases/download/v0.1.6/zellij-agent-wrangler-v0.1.6.wasm" {
         install_hooks "/home/you/.local/bin/agent-wrangler"
     }
 }
@@ -84,7 +84,16 @@ are shown; the sidebar is what turns a record into a row.
 
 ```bash
 agent-wrangler agents      # what the daemon holds, as it would send it
+agent-wrangler monitor     # every message it is sent or sends, as it happens
 ```
+
+`monitor` writes one line of JSON per message until you stop it, and nothing
+while nothing is arriving. Each says which way the message went, and two fields
+say why it is worth reading: `told`, whether an arriving message changed
+anything, since that and not the arrival is what owes the clients a delivery;
+and `took`, how long reaching a client cost, which for a zellij client is a
+whole process run. A delivery is said twice, going and gone, so one that never
+comes back can be told from one that never started.
 
 A hook says what it saw and exits: which agent, which event, the transcript's
 path, and a named few of its own environment variables, captured verbatim. The
