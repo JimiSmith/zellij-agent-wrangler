@@ -88,6 +88,26 @@ impl Focus {
     }
 }
 
+/// What a sidebar should hold as the pane the user was last on in its own tab,
+/// given where they are now and what it holds already.
+///
+/// Only a pane of this sidebar's own tab counts, since this is what its own tab
+/// will be handed back to. The sidebar's own pane never counts, which is the
+/// whole point: opening a row focuses the sidebar first, and what is wanted is
+/// where the user was before they came to it. Anywhere else leaves what is held
+/// standing, because the user is coming back to this tab from it.
+pub fn left_behind_by(
+    manifest: &PaneManifest,
+    plugin_id: u32,
+    now: Focus,
+    held: Option<u32>,
+) -> Option<u32> {
+    if tab_of_plugin(manifest, plugin_id) != Some(now.tab) {
+        return held;
+    }
+    now.listed().or(held)
+}
+
 /// The pane a sidebar should put its own tab back on before leaving for
 /// `going_to`, or `None` when leaving changes nothing.
 ///
@@ -345,6 +365,37 @@ mod tests {
             ),
             (1, vec![pane(9, "elsewhere", 0, 0)]),
         ])
+    }
+
+    fn at(tab: usize, pane: PaneId) -> Focus {
+        Focus { tab, pane }
+    }
+
+    #[test]
+    fn the_pane_the_user_is_on_in_this_tab_is_what_is_held() {
+        let held = left_behind_by(&two_tabs(), 1, at(0, PaneId::Terminal(3)), Some(2));
+        assert_eq!(held, Some(3));
+    }
+
+    #[test]
+    fn arriving_at_the_sidebar_does_not_forget_where_they_came_from() {
+        // The click that opens a row focuses the sidebar, so this is the state
+        // the tab is handed back from. Taking it as where they were would hand
+        // the tab back to the sidebar, which is the whole complaint.
+        let held = left_behind_by(&two_tabs(), 1, at(0, PaneId::Plugin(1)), Some(2));
+        assert_eq!(held, Some(2));
+    }
+
+    #[test]
+    fn a_pane_in_another_tab_is_not_where_they_were_in_this_one() {
+        let held = left_behind_by(&two_tabs(), 1, at(1, PaneId::Terminal(9)), Some(2));
+        assert_eq!(held, Some(2));
+    }
+
+    #[test]
+    fn a_sidebar_the_manifest_has_not_placed_yet_holds_what_it_had() {
+        let held = left_behind_by(&two_tabs(), 7, at(0, PaneId::Terminal(3)), Some(2));
+        assert_eq!(held, Some(2));
     }
 
     #[test]

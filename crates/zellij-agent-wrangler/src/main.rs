@@ -287,25 +287,11 @@ impl State {
     fn resolve_asking(&mut self) -> bool {
         if let Some(fresh) = focus() {
             self.focus = Some(fresh);
-            self.remember_where_they_were(fresh);
+            self.left_behind =
+                session::left_behind_by(&self.panes, self.plugin_id, fresh, self.left_behind);
         }
         self.answer();
         self.resolve()
-    }
-
-    /// Keep the pane the user is on, while they are on one in this sidebar's own
-    /// tab.
-    ///
-    /// The sidebar's own pane is not one of these, which is the point: what is
-    /// wanted is where they were before they came to the sidebar, so that going
-    /// somewhere from it can put the tab back as they left it.
-    fn remember_where_they_were(&mut self, fresh: Focus) {
-        if session::tab_of_plugin(&self.panes, self.plugin_id) != Some(fresh.tab) {
-            return;
-        }
-        if let Some(pane) = fresh.listed() {
-            self.left_behind = Some(pane);
-        }
     }
 
     /// Answer the calls raised from the pane the user is in.
