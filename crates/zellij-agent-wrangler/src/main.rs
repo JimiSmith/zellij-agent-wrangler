@@ -41,15 +41,6 @@ const SELECTION_MESSAGE: &str = "wrangler:selection";
 /// The message that turns the sidebar off for the whole session.
 const OFF_MESSAGE: &str = "wrangler:off";
 
-/// The message carrying where the user is.
-///
-/// Only the sidebar whose tab is on screen is sent the events that move the
-/// focus; the rest hold whatever it was when their own tab was last looked at,
-/// which is by definition the moment before the user left. Where the user is is
-/// a fact about the session rather than about a pane, so the one sidebar that
-/// can read it tells the others rather than each of them guessing.
-const FOCUS_MESSAGE: &str = "wrangler:focus";
-
 /// The message saying the agent hooks have been installed, so that the sidebars
 /// asked to install them do it once between them rather than once each.
 const INSTALLED_MESSAGE: &str = "wrangler:hooks-installed";
@@ -127,6 +118,13 @@ struct State {
     /// waiting on the server, and the two would wait on each other. So it is
     /// asked on the events that move the focus and remembered for the rest.
     focus: Option<Focus>,
+    /// The pane the user was last on in this sidebar's own tab.
+    ///
+    /// Zellij remembers which pane each tab was left focused on, and going to a
+    /// row is done from the sidebar, which by then holds the focus itself. Left
+    /// alone, a tab the user visited the sidebar in is a tab they come back to
+    /// the sidebar in. This is where they were before they came to it.
+    left_behind: Option<u32>,
     /// This instance's own plugin id, which is how it finds the tab it is in.
     plugin_id: u32,
     /// Whether the tab this sidebar is in has ever held a pane besides it.
@@ -172,6 +170,35 @@ fn said(stderr: &[u8]) -> &str {
         .next()
         .unwrap_or_default()
         .trim()
+}
+
+/// The right to speak to the other sidebars of this session.
+///
+/// A sidebar acts on its own behalf in `update`, where zellij tells it what the
+/// user did, and it hears the other sidebars in `pipe`. Only the first is given
+/// one of these, so a sidebar that answered a broadcast with a broadcast of its
+/// own does not compile.
+///
+/// That rule is worth a type because breaking it is unbounded: two sidebars
+/// each speaking because the other spoke have nothing between them that slows
+/// down, and every lap of it costs whatever the handlers cost. A sidebar has
+/// something to say when the user did something, and never because another
+/// sidebar said something.
+struct Voice(());
+
+impl Voice {
+    /// The right to speak, held by whoever is handling what the user did.
+    fn heard_from_the_user() -> Self {
+        Voice(())
+    }
+
+    /// Say something to every sidebar of this session.
+    ///
+    /// Side effect: broadcasts. The sender is reached by its own message like
+    /// everyone else, and drops it: see [`State::pipe`].
+    fn say(&self, message: MessageToPlugin) {
+        pipe_message_to_plugin(message);
+    }
 }
 
 /// A heading over a wrapped message: how the sidebar says something about
@@ -252,18 +279,33 @@ impl State {
     /// Ask zellij where the user is, then rebuild. Only safe on an event: see
     /// `focus`.
     ///
-    /// A sidebar is only sent events while its own tab is on screen, so this is
-    /// the one reading that is worth passing on: every other sidebar is either
-    /// hearing nothing or about to be told.
+    /// The focus is read rather than heard about. Zellij answers this against
+    /// the client asking, not the tab the sidebar is in, so every sidebar of a
+    /// client is given that client's focus wherever it sits, and a sidebar has
+    /// no use for any other client's: the user of another terminal looking
+    /// somewhere else is not this sidebar's user arriving.
     fn resolve_asking(&mut self) -> bool {
-        if let Some(fresh) = focus().filter(|fresh| Some(*fresh) != self.focus) {
+        if let Some(fresh) = focus() {
             self.focus = Some(fresh);
-            pipe_message_to_plugin(
-                MessageToPlugin::new(FOCUS_MESSAGE).with_payload(fresh.encode()),
-            );
+            self.remember_where_they_were(fresh);
         }
         self.answer();
         self.resolve()
+    }
+
+    /// Keep the pane the user is on, while they are on one in this sidebar's own
+    /// tab.
+    ///
+    /// The sidebar's own pane is not one of these, which is the point: what is
+    /// wanted is where they were before they came to the sidebar, so that going
+    /// somewhere from it can put the tab back as they left it.
+    fn remember_where_they_were(&mut self, fresh: Focus) {
+        if session::tab_of_plugin(&self.panes, self.plugin_id) != Some(fresh.tab) {
+            return;
+        }
+        if let Some(pane) = fresh.listed() {
+            self.left_behind = Some(pane);
+        }
     }
 
     /// Answer the calls raised from the pane the user is in.
@@ -351,7 +393,6 @@ impl State {
         let focus = self.focus;
         let mut resolved = session::session(&self.tabs, &self.panes, focus);
         self.leave_if_alone(&resolved);
-        self.install_hooks();
         agents::place(&mut resolved, &self.registry);
         let rows = tree::build_tree(&resolved, &self.options);
         let notices = self.notifications();
@@ -388,10 +429,15 @@ impl State {
     /// Install the agent hooks, if the sidebar was asked to and no sidebar of
     /// this session has yet.
     ///
-    /// Side effect: runs the hook client, which rewrites each agent's config.
-    /// The others are told rather than left to work it out, because two of them
-    /// installing at once would be two processes writing one file.
-    fn install_hooks(&mut self) {
+    /// Side effect: runs the hook client, which rewrites each agent's config,
+    /// and tells the other sidebars it has. They are told rather than left to
+    /// work it out, because two of them installing at once would be two
+    /// processes writing one file.
+    ///
+    /// Attempted from `update` rather than from wherever the tree is rebuilt,
+    /// because it needs a voice and rebuilding happens on what the other
+    /// sidebars say as well as on what the user does.
+    fn install_hooks(&mut self, voice: &Voice) {
         if self.options.install_hooks.is_none() {
             return;
         }
@@ -400,7 +446,7 @@ impl State {
         }
         self.installed = true;
         self.run("install-hooks", &["install-hooks"]);
-        pipe_message_to_plugin(MessageToPlugin::new(INSTALLED_MESSAGE));
+        voice.say(MessageToPlugin::new(INSTALLED_MESSAGE));
     }
 
     /// Close this sidebar when the tab holding it has nothing else left.
@@ -526,13 +572,16 @@ impl State {
     /// nowhere. Its first pane is somewhere.
     fn activate(&self) {
         match self.selection() {
-            Some(RowKey::Pane(id)) => focus_pane_with_id(PaneId::Terminal(id), false, false),
+            Some(RowKey::Pane(id)) => self.go_to_pane(id),
             Some(RowKey::Tab(position)) => match session::first_pane(&self.panes, position) {
-                Some(id) => focus_pane_with_id(PaneId::Terminal(id), false, false),
+                Some(id) => self.go_to_pane(id),
                 // A tab with nothing the sidebar lists is still a tab to go to.
                 // Tabs are numbered from one here and from zero everywhere else
                 // the sidebar handles them.
-                None => switch_tab_to(position as u32 + 1),
+                None => {
+                    self.stand_down(position);
+                    switch_tab_to(position as u32 + 1);
+                }
             },
             // Opening an entry goes where the agent is now. Arriving is what
             // answers it, along with every other call raised from that pane.
@@ -540,26 +589,51 @@ impl State {
             | Some(RowKey::Section(session))
             | Some(RowKey::Notification(session)) => {
                 if let Some(id) = self.registry.get(&session).and_then(agents::pane) {
-                    focus_pane_with_id(PaneId::Terminal(id), false, false);
+                    self.go_to_pane(id);
                 }
             }
             None => {}
         }
     }
 
+    /// Go to a pane, giving this tab back to the user first if the pane is in
+    /// another one.
+    ///
+    /// Side effect: moves the focus, twice when the destination is elsewhere.
+    fn go_to_pane(&self, id: u32) {
+        if let Some(tab) = session::tab_of_pane(&self.panes, id) {
+            self.stand_down(tab);
+        }
+        focus_pane_with_id(PaneId::Terminal(id), false, false);
+    }
+
+    /// Put this tab's focus back where the user left it, on the way out of it.
+    ///
+    /// Zellij remembers the pane each tab was last focused on, and a row is
+    /// opened from the sidebar, which is holding the focus by then. A sidebar
+    /// that simply left would make itself the pane its own tab returns to, so
+    /// coming back would land on the sidebar rather than on the work.
+    ///
+    /// Side effect: moves the focus within this tab. Nothing moves when the
+    /// destination is this tab, since that leaves nothing behind.
+    fn stand_down(&self, going_to: usize) {
+        let back = session::stand_down_to(&self.panes, self.plugin_id, self.left_behind, going_to);
+        if let Some(id) = back {
+            focus_pane_with_id(PaneId::Terminal(id), false, false);
+        }
+    }
+
     /// Put the selection where `key` is and tell the other sidebars, so the
     /// sidebars of one session read as one sidebar that follows you.
-    fn select(&mut self, key: Option<RowKey>) {
+    fn select(&mut self, key: Option<RowKey>, voice: &Voice) {
         if let Some(key) = &key {
-            pipe_message_to_plugin(
-                MessageToPlugin::new(SELECTION_MESSAGE).with_payload(key.encode()),
-            );
+            voice.say(MessageToPlugin::new(SELECTION_MESSAGE).with_payload(key.encode()));
         }
         self.selected = key;
     }
 
     /// Move the selection `step` places through the keys the last frame drew.
-    fn step(&mut self, step: isize) {
+    fn step(&mut self, step: isize, voice: &Voice) {
         let mut keys: Vec<RowKey> = Vec::new();
         for key in self.painted.iter().flatten() {
             if keys.last() != Some(key) {
@@ -568,11 +642,11 @@ impl State {
         }
         let selection = self.selection();
         let Some(at) = keys.iter().position(|key| Some(key) == selection.as_ref()) else {
-            self.select(keys.first().cloned());
+            self.select(keys.first().cloned(), voice);
             return;
         };
         let next = (at as isize + step).clamp(0, keys.len() as isize - 1) as usize;
-        self.select(keys.get(next).cloned());
+        self.select(keys.get(next).cloned(), voice);
     }
 
     /// Take in the agents described to the sidebar, and say whether the tree
@@ -659,7 +733,10 @@ impl ZellijPlugin for State {
     }
 
     fn update(&mut self, event: Event) -> bool {
-        match event {
+        // What zellij reports here is what the user did, which is the one thing
+        // a sidebar is entitled to speak about.
+        let voice = Voice::heard_from_the_user();
+        let drawn = match event {
             Event::TabUpdate(tabs) => {
                 self.tabs = tabs;
                 self.resolve_asking()
@@ -690,11 +767,11 @@ impl ZellijPlugin for State {
             }
             Event::Key(key) => match key.bare_key {
                 BareKey::Down | BareKey::Char('j') => {
-                    self.step(1);
+                    self.step(1, &voice);
                     true
                 }
                 BareKey::Up | BareKey::Char('k') => {
-                    self.step(-1);
+                    self.step(-1, &voice);
                     true
                 }
                 BareKey::Enter => {
@@ -705,7 +782,7 @@ impl ZellijPlugin for State {
                 // sidebars of a session are one sidebar, and one of them left
                 // behind would open the rest again.
                 BareKey::Char('q') => {
-                    pipe_message_to_plugin(MessageToPlugin::new(OFF_MESSAGE));
+                    voice.say(MessageToPlugin::new(OFF_MESSAGE));
                     false
                 }
                 _ => false,
@@ -719,7 +796,7 @@ impl ZellijPlugin for State {
                     .cloned()
                 {
                     Some(Some(key)) => {
-                        self.select(Some(key));
+                        self.select(Some(key), &voice);
                         self.activate();
                         true
                     }
@@ -727,7 +804,12 @@ impl ZellijPlugin for State {
                 }
             }
             _ => false,
-        }
+        };
+        // Whether the hooks can be installed yet turns on the permission and on
+        // where the user is, so it is asked again on every event until one of
+        // them says yes. It is asked once and answered once: see `installed`.
+        self.install_hooks(&voice);
+        drawn
     }
 
     /// Take in what another sidebar said, or what the agents were described as.
@@ -735,6 +817,10 @@ impl ZellijPlugin for State {
     /// Every broadcast reaches its own sender, so anything a sidebar says to the
     /// others is ignored when it comes back. What describes the agents comes
     /// from the command line and is never this plugin's own.
+    ///
+    /// Nothing here has a [`Voice`], which is the point: everything reached from
+    /// here is something another sidebar said, and a sidebar that spoke because
+    /// another sidebar spoke would never stop.
     fn pipe(&mut self, message: PipeMessage) -> bool {
         if message.source == PipeSource::Plugin(self.plugin_id) {
             return false;
@@ -748,16 +834,6 @@ impl ZellijPlugin for State {
                 self.installed = true;
                 false
             }
-            // Taken as read rather than checked, and not passed on: it was sent
-            // by the one sidebar that could see it, which has told everyone.
-            FOCUS_MESSAGE => match message.payload.as_deref().and_then(Focus::decode) {
-                Some(focus) => {
-                    self.focus = Some(focus);
-                    self.answer();
-                    self.resolve()
-                }
-                None => false,
-            },
             SELECTION_MESSAGE => match message.payload.as_deref().and_then(RowKey::decode) {
                 Some(key) => {
                     self.selected = Some(key);

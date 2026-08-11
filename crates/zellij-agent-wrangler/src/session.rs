@@ -86,30 +86,36 @@ impl Focus {
     pub fn is_plugin(self, plugin_id: u32) -> bool {
         self.pane == PaneId::Plugin(plugin_id)
     }
+}
 
-    /// Where the user is, as one line of text: which is how it travels between
-    /// the sidebars, only one of which can read it for itself.
-    pub fn encode(self) -> String {
-        let (kind, id) = match self.pane {
-            PaneId::Terminal(id) => ("terminal", id),
-            PaneId::Plugin(id) => ("plugin", id),
-        };
-        format!("{}:{kind}:{id}", self.tab)
+/// The pane a sidebar should put its own tab back on before leaving for
+/// `going_to`, or `None` when leaving changes nothing.
+///
+/// Zellij remembers which pane each tab was last focused on, and a row is opened
+/// from the sidebar, which is holding the focus by then. A sidebar that simply
+/// left would make itself the pane its own tab returns to, so the user coming
+/// back would land on the sidebar rather than on the work.
+///
+/// Nothing is left behind by going somewhere in this same tab, so that does not
+/// ask for this. Whether the sidebar is what currently holds the focus is not
+/// asked either: `left_behind` is the last terminal pane the user was on in this
+/// tab, so handing the tab back to it is what is wanted when the sidebar holds
+/// the focus, and is where the focus already is when it does not.
+///
+/// `left_behind` is where the user was before they came to the sidebar; a tab
+/// they have not been seen in still has panes, and any of them is a better place
+/// to come back to than the sidebar.
+pub fn stand_down_to(
+    manifest: &PaneManifest,
+    plugin_id: u32,
+    left_behind: Option<u32>,
+    going_to: usize,
+) -> Option<u32> {
+    let mine = tab_of_plugin(manifest, plugin_id)?;
+    if mine == going_to {
+        return None;
     }
-
-    /// What `encode` wrote, or `None` for anything else.
-    pub fn decode(text: &str) -> Option<Self> {
-        let mut fields = text.split(':');
-        let tab = fields.next()?.parse().ok()?;
-        let kind = fields.next()?;
-        let id = fields.next()?.parse().ok()?;
-        let pane = match kind {
-            "terminal" => PaneId::Terminal(id),
-            "plugin" => PaneId::Plugin(id),
-            _ => return None,
-        };
-        Some(Focus { tab, pane })
-    }
+    left_behind.or_else(|| first_pane(manifest, mine))
 }
 
 /// The session as the tree needs it: every tab in position order, each carrying
@@ -324,34 +330,44 @@ mod tests {
         assert!(!session[0].panes[0].focused);
     }
 
-    #[test]
-    fn where_the_user_is_survives_the_round_trip() {
-        for focus in [
-            Focus {
-                tab: 0,
-                pane: PaneId::Terminal(3),
-            },
-            Focus {
-                tab: 12,
-                pane: PaneId::Plugin(3),
-            },
-        ] {
-            assert_eq!(Focus::decode(&focus.encode()), Some(focus));
-        }
+    /// A sidebar in tab 0 beside pane 2, with pane 9 over in tab 1.
+    fn two_tabs() -> PaneManifest {
+        let sidebar = PaneInfo {
+            id: 1,
+            is_plugin: true,
+            is_selectable: true,
+            ..Default::default()
+        };
+        manifest(vec![
+            (
+                0,
+                vec![sidebar, pane(2, "work", 0, 0), pane(3, "other", 10, 0)],
+            ),
+            (1, vec![pane(9, "elsewhere", 0, 0)]),
+        ])
     }
 
     #[test]
-    fn anything_else_decodes_to_nothing() {
-        for text in [
-            "",
-            "0",
-            "0:terminal",
-            "x:terminal:1",
-            "0:screen:1",
-            "0:plugin:x",
-        ] {
-            assert_eq!(Focus::decode(text), None, "{text}");
-        }
+    fn leaving_a_tab_puts_the_user_back_where_they_were_in_it() {
+        // The whole point: zellij returns to a tab's last focused pane, and
+        // that must not be the sidebar the user only passed through.
+        assert_eq!(stand_down_to(&two_tabs(), 1, Some(3), 1), Some(3));
+    }
+
+    #[test]
+    fn a_tab_the_user_was_never_seen_in_falls_back_to_its_first_pane() {
+        assert_eq!(stand_down_to(&two_tabs(), 1, None, 1), Some(2));
+    }
+
+    #[test]
+    fn going_somewhere_in_this_tab_leaves_nothing_behind() {
+        // The tab is not being left, so what it returns to is not in question.
+        assert_eq!(stand_down_to(&two_tabs(), 1, Some(3), 0), None);
+    }
+
+    #[test]
+    fn a_sidebar_the_manifest_has_not_placed_yet_leaves_nothing_behind() {
+        assert_eq!(stand_down_to(&two_tabs(), 7, Some(3), 1), None);
     }
 
     #[test]
