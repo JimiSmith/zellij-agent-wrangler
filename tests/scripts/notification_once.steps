@@ -1,5 +1,5 @@
 # One call for the user raises one desktop notification, however many sidebars
-# are holding that call.
+# are holding that call, and a flurry of calls raises one between them.
 #
 # A second tab is opened so that the session has two sidebars, since a sidebar
 # raising its own notification is only visible as a count: both of them draw the
@@ -42,8 +42,19 @@ sleep: 2
 # One call, two sidebars, one notification.
 sh: tests/scripts/expect-raised.sh 1
 
-# A second call from the same session is a second notification, so what the
-# count above measures is calls and not a notifier that only ever runs once.
+# A call arriving while the last one is still recent is not a second
+# interruption. The daemon is freshly started by the reset above, so the call
+# before this one is what began the quiet rather than anything an earlier run
+# left behind.
+sh: tests/scripts/raise-call.sh notify-one wrangler-test-notify 1 needsAttention
+sleep: 2
+sh: tests/scripts/expect-raised.sh 1
+
+# Once the quiet has run out, a call is announced again, so what the count
+# measures is calls and not a notifier that only ever runs once. The wait is
+# from the call that was announced: one passed over does not put the next one
+# further off.
+sleep: 5
 sh: tests/scripts/raise-call.sh notify-one wrangler-test-notify 1 needsAttention
 sleep: 2
 sh: tests/scripts/expect-raised.sh 2

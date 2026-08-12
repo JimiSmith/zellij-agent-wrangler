@@ -149,13 +149,16 @@ pub struct Reading {
 
 /// A call for the user, in the words an announcement is made of.
 ///
-/// It says which agent is asking and which of its sessions, and nothing about
-/// where that session is: where an agent is drawn is the business of whatever
-/// draws it, and one that is in no multiplexer at all still calls.
+/// It says which agent is asking and which of its sessions. Where that session
+/// is comes along unread: the daemon has no idea what any of the variables in
+/// an origin point at, and a call from an agent in no multiplexer at all
+/// carries an empty one and is still a call. The notifier is the thing that
+/// knows what they mean, and is the only reason they are here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Call {
     pub agent: String,
     pub label: String,
+    pub origin: Origin,
 }
 
 /// What taking an event in came to.
@@ -316,6 +319,7 @@ impl State {
                 Some(filed) => Applied::Called(Call {
                     agent: filed.agent.clone(),
                     label: label(filed, Label::Name),
+                    origin: filed.origin.clone(),
                 }),
                 None => Applied::Changed,
             },
@@ -846,8 +850,23 @@ mod tests {
             Some(&Call {
                 agent: "claude".to_string(),
                 label: "the port".to_string(),
+                origin: Origin::decode(&hook("needsAttention").origin),
             })
         );
+    }
+
+    #[test]
+    fn a_call_carries_where_the_agent_said_it_was() {
+        // The daemon reads none of it. It is carried so that a notifier which
+        // does know what a session name is can be told which one to speak to,
+        // rather than being left with whatever environment the daemon was
+        // spawned into and has held ever since.
+        let world = Fake::default();
+        let mut state = State::default();
+        let called = state.on_hook(&hook("needsAttention"), &world);
+        let origin = &called.call().expect("a call").origin;
+        assert_eq!(origin.get("ZELLIJ_SESSION_NAME"), Some("proto"));
+        assert_eq!(origin.get("ZELLIJ_PANE_ID"), Some("7"));
     }
 
     #[test]

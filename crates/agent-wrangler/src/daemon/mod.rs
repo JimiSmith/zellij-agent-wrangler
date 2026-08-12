@@ -35,6 +35,7 @@ use interprocess::local_socket::{GenericNamespaced, Listener, ListenerOptions, S
 use agent_wrangler_core::agent::FORMAT;
 use agent_wrangler_core::notify::Notifier;
 
+use crate::daemon::notify::Announced;
 use crate::daemon::state::{look, read_hook, Call, Client, Real, State};
 use crate::daemon::watch::Watchers;
 use crate::paths;
@@ -214,16 +215,32 @@ fn record(shared: &Arc<Mutex<State>>, dir: &Path) {
     persist::save(dir, &saved, &clients);
 }
 
-/// Say a call out loud, wherever the user is.
+/// Say a call out loud, wherever the user is, if this is a moment to say
+/// anything at all.
 ///
 /// Side effect: runs a program per notifier registered, and waits for each. It
 /// is done here rather than by the clients because every client is handed the
 /// same call: one that raised its own would raise it once per client, and the
 /// count would go up with every sidebar the user opened.
 ///
-/// Called with no lock held, and takes it only to read what to run.
-fn announce(shared: &Arc<Mutex<State>>, call: &Call) {
-    for notifier in held(shared).notifiers() {
+/// Whether a call is one to say out loud is `announced`'s to answer, and a call
+/// it turns down costs nothing else: every client is owed the state before this
+/// is reached, so what is drawn is the same either way.
+///
+/// Called with no lock held, and takes it only to read what to run. What to run
+/// is bound before the loop rather than iterated straight from the guard,
+/// because a notifier is waited for and the state is not this thread's to hold
+/// while that happens.
+fn announce(shared: &Arc<Mutex<State>>, call: &Call, announced: &Mutex<Announced>) {
+    let speaking = announced
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .worth_saying(Instant::now());
+    if !speaking {
+        return;
+    }
+    let notifiers = held(shared).notifiers();
+    for notifier in notifiers {
         notify::raise(&notifier, call);
     }
 }
@@ -242,6 +259,7 @@ fn serve(
     owed: &Owed,
     dir: &Path,
     watchers: &Watchers,
+    announced: &Mutex<Announced>,
 ) -> bool {
     let mut reader = BufReader::new(&stream);
 
@@ -276,7 +294,7 @@ fn serve(
                 // is whichever of a delivery and a notifier finishes first, and
                 // neither waits on the other.
                 if let Some(call) = applied.call() {
-                    announce(shared, call);
+                    announce(shared, call, announced);
                 }
             }
             Inbound::Register { sink, notify, .. } => {
@@ -364,6 +382,9 @@ pub fn run() -> std::io::Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     let owed = Arc::new(Owed::default());
     let watchers = Arc::new(Watchers::default());
+    // One per daemon rather than one per connection: a hook gets a thread of
+    // its own, so a quiet kept per connection would be no quiet at all.
+    let announced = Arc::new(Mutex::new(Announced::default()));
 
     {
         let shared = Arc::clone(&shared);
@@ -402,11 +423,12 @@ pub fn run() -> std::io::Result<()> {
         let owed = Arc::clone(&owed);
         let stop = Arc::clone(&stop);
         let watchers = Arc::clone(&watchers);
+        let announced = Arc::clone(&announced);
         let dir = dir.clone();
         // A connection gets a thread, so one client asking for a snapshot, or
         // one delivery that is slow to run, cannot hold up the next hook.
         thread::spawn(move || {
-            if serve(stream, &shared, &owed, &dir, &watchers) {
+            if serve(stream, &shared, &owed, &dir, &watchers, &announced) {
                 // The other end is a different build of this program, so what it
                 // says cannot be read reliably and what this says cannot be read
                 // by it. Standing down leaves the name free for the daemon it

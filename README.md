@@ -281,9 +281,32 @@ naming different commands get one each.
 The notification takes the agent's name and what the session is called as its
 last two arguments, which is what `notify-send` wants. It does not name the tab,
 where the entry at the foot does: the daemon has never heard of tabs. It is
-raised for every call whatever pane is focused, since sitting in a pane says
-nothing about whether the terminal is on screen; the `●` and the entry at the
-foot still clear when you get to the agent.
+raised whatever pane is focused, since sitting in a pane says nothing about
+whether the terminal is on screen; the `●` and the entry at the foot still clear
+when you get to the agent.
+
+It is raised at most once every five seconds. Agents call in flurries, one
+stopping for permission as another finishes, and a flurry is one interruption
+rather than four. A call passed over that way is only passed over out loud: the
+row, the `●` and the entry at the foot appear for it exactly as they would for
+any other.
+
+The command is run with `ZELLIJ_SESSION_NAME`, `ZELLIJ_PANE_ID`, `TMUX`,
+`TMUX_PANE` and `ZELLIJ` set to what the calling agent reported for them, and
+with any of those the agent reported nothing for cleared. So a notifier that
+speaks back into a multiplexer can address the session the call actually came
+from:
+
+```sh
+#!/bin/sh
+set -eu
+zellij --session "${ZELLIJ_SESSION_NAME:?}" pipe "$(printf 'zjstatus::notify::%s - %s' "${1:-}" "${2:-}")"
+```
+
+Name the session rather than leaving it to be inherited. The daemon is started
+by whichever hook first finds none running and keeps that pane's environment for
+the rest of its life, so a bare `zellij pipe` reaches whichever session happened
+to start the daemon, however long ago that session ended.
 
 `install_hooks "on"` runs `agent-wrangler` from your `PATH`. Name a path
 instead if it is not there.
