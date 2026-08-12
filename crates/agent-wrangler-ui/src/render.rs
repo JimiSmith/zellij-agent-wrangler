@@ -54,6 +54,10 @@ const ICON_AGENT: char = '\u{f167a}';
 /// title's text starts in (past the gutter, the icon and the gap after it).
 const BODY_INDENT: &str = "    ";
 
+/// What a name too long for the pane ends in, standing for the part of it that
+/// was not drawn.
+const ELLIPSIS: char = '…';
+
 /// The columns a description line has for its text in a pane `width` columns
 /// wide: the indent comes off the front and the reserved right-hand column off
 /// the end. Never zero, so wrapping to it always terminates.
@@ -256,11 +260,50 @@ fn selection() -> Style {
         .remove_modifier(Modifier::DIM)
 }
 
+/// Fit a line to `field` columns, ending one that has to be cut with an
+/// ellipsis.
+///
+/// A name that simply stops reads as the whole name of something else, which is
+/// the one thing a list of names must not do: two panes in the same directory
+/// differ in their tails. The ellipsis takes the last column of the field rather
+/// than the one after it, so the column kept for the turn-state marker stays
+/// clear whatever a name does.
+///
+/// The cut is made span by span so the styling survives it, and the ellipsis is
+/// drawn in the style of the span the cut fell in: it stands for the text it
+/// replaced. A field too narrow to hold even the tree in front of a name cuts
+/// into that instead, which is the same order the width takes them away in.
+///
+/// Columns are counted as characters, the measure the tree in front of a name is
+/// composed with.
+fn elide(line: Line<'static>, field: usize) -> Line<'static> {
+    let drawn: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+    if drawn <= field {
+        return line;
+    }
+    let Some(mut room) = field.checked_sub(1) else {
+        return Line::default();
+    };
+    let mut kept: Vec<Span<'static>> = Vec::new();
+    for span in line.spans {
+        let head: String = span.content.chars().take(room).collect();
+        room -= head.chars().count();
+        // Running out mid-span is certain: the line is longer than the field,
+        // and the field is one wider than the room its text was given.
+        if room == 0 {
+            kept.push(Span::styled(format!("{head}{ELLIPSIS}"), span.style));
+            break;
+        }
+        kept.push(Span::styled(head, span.style));
+    }
+    Line::from(kept)
+}
+
 /// The finished pane: every row drawn in order, with the selected one in reverse
 /// video.
 ///
 /// The rightmost column is kept for the turn-state indicator, so a long name is
-/// cut before it can collide with one.
+/// cut before it can collide with one, and the cut is marked with an ellipsis.
 pub struct Sidebar<'a> {
     pub lines: &'a [Row],
     /// What the selection is on, which is nothing at all when the keys are not
@@ -280,7 +323,8 @@ impl Sidebar<'_> {
     fn draw(&self, row: &Row, area: Rect, buf: &mut Buffer) {
         let field = area.width.saturating_sub(1);
         let base = base_style(&row.content);
-        buf.set_line(area.x, area.y, &row_line(&row.content), field);
+        let line = elide(row_line(&row.content), field as usize);
+        buf.set_line(area.x, area.y, &line, field);
         if let Some((glyph, color)) = row.indicator.resolve() {
             if let Some(cell) = buf.cell_mut((area.x + field, area.y)) {
                 cell.set_char(glyph).set_style(own_color(base, color));
@@ -558,6 +602,71 @@ mod tests {
             assert!(buf[(last, 0)].modifier.contains(Modifier::REVERSED));
             // The bar covers the padding a short row leaves as well as its text.
             assert!(buf[(0, 0)].modifier.contains(Modifier::REVERSED));
+        }
+    }
+
+    #[test]
+    fn a_name_too_long_for_the_pane_ends_in_an_ellipsis() {
+        let tab = drawn(
+            &Row::new(tab("1", "a very long tab name", Placement::Here)),
+            12,
+            false,
+        );
+        assert_eq!(text(&tab, 0), "▌ 1: a ver… ");
+        let pane = drawn(
+            &Row::new(pane(
+                "0",
+                "some rather long title",
+                Branch::Last,
+                Placement::Focused,
+            )),
+            20,
+            false,
+        );
+        assert_eq!(text(&pane, 0), "  └─ 0: \u{f489}  some ra… ");
+    }
+
+    #[test]
+    fn a_name_that_fills_the_field_exactly_is_drawn_whole() {
+        // The ellipsis stands for text that was dropped, so a name with nothing
+        // dropped never draws one.
+        let row = Row::new(tab("1", "editor", Placement::Here));
+        let width = row_text(&row.content).chars().count() as u16 + 1;
+        let buf = drawn(&row, width, false);
+        assert_eq!(text(&buf, 0), "▌ 1: editor ");
+    }
+
+    #[test]
+    fn the_ellipsis_is_drawn_in_the_style_of_what_it_replaces() {
+        // It stands in for the name, so it takes the name's styling rather than
+        // the color riding on the icon two columns before it.
+        let row = Row::new(RowContent::Agent {
+            index: "0".to_string(),
+            label: "a rather long session label".to_string(),
+            branch: Branch::Last,
+            placement: Placement::Unfocused,
+            color: Some(NamedColor::Cyan),
+        });
+        let buf = drawn(&row, 20, false);
+        assert_eq!(buf[(18, 0)].symbol(), "…");
+        assert_eq!(buf[(18, 0)].fg, Color::Reset);
+        assert!(buf[(18, 0)].modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn a_pane_too_narrow_for_the_tree_still_leaves_the_markers_column_alone() {
+        // The width takes the name first and the tree in front of it after, and
+        // neither can reach the column the marker is drawn in.
+        let row = Row::new(pane("0", "nvim", Branch::Last, Placement::Here))
+            .at(RowKey::Pane(1))
+            .with(Indicator::Working);
+        for width in [1u16, 2, 4, 6] {
+            let buf = drawn(&row, width, false);
+            let line = text(&buf, 0);
+            assert_eq!(line.chars().count(), width as usize, "{width}");
+            assert_eq!(buf[(width - 1, 0)].symbol(), "○", "{width}");
+            let head: String = line.chars().take((width - 1) as usize).collect();
+            assert!(!head.contains('○'), "{width}");
         }
     }
 

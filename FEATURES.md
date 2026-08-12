@@ -68,6 +68,7 @@ once with no agent reporting itself again.
 - [x] The selection bar spans the width and drops the color and dimming it covers
 - [x] Only the sidebar the keys would reach draws a selection bar at all
 - [x] Rows fitted to the pane width, padded or cut from the right
+- [x] A name too long for the pane is elided, the cut marked with an ellipsis
 - [x] Agent color from the session's own color
 - [ ] ~~Pane color from the pane's border color~~ (zellij reports none)
 
