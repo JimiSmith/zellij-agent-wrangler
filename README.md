@@ -66,12 +66,17 @@ rustup target add wasm32-wasip1
 cargo test               # everything that does not call zellij, on the host target
 ```
 
-Three crates. `agent-wrangler-core` holds what an agent session is and what it
-is called by, and names no pane, tab or row. `agent-wrangler` is one binary
-holding the hook client, the daemon and the installer; `dev.sh` prints its path.
-`zellij-agent-wrangler` is the plugin, the only crate that depends on zellij's
-own: off wasm that brings in curl, openssl and the rest of `zellij-utils`, 9
-crates rather than 250, and nothing native ever sees it.
+Four crates. `agent-wrangler-core` holds what an agent session is and what it
+is called by, and names no pane, tab or row. `agent-wrangler-ui` holds what a
+client shows: the rows, the glyphs and styles they are drawn with, and how the
+pane's height is divided between the tree and the calls at its foot. It draws
+into a ratatui buffer and knows nothing about how one reaches a screen, so a
+plugin that can only print and a program that owns its terminal draw the same
+sidebar. `agent-wrangler` is one binary holding the hook client, the daemon and
+the installer; `dev.sh` prints its path. `zellij-agent-wrangler` is the plugin,
+the only crate that depends on zellij's own: off wasm that brings in curl,
+openssl and the rest of `zellij-utils`, 9 crates rather than 250, and nothing
+native ever sees it.
 
 The client is named for what it wrangles rather than for what draws it, because
 nothing it does is particular to zellij.

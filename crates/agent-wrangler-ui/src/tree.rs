@@ -1,19 +1,19 @@
-//! Building the sidebar's rows from the session's tabs and their panes.
+//! Building a client's rows from the session's tabs and their panes.
 //!
-//! The input is the session as the sidebar cares about it: tabs in the order
+//! The input is the session as a client cares about it: tabs in the order
 //! they are drawn, each with the panes it shows, already filtered and ordered.
 //! What is derived here is everything that follows from a thing's *position*:
 //! its placement, its branch, and the index it is labelled with.
 
 use agent_wrangler_core::agent::{Agent, Turn};
+use agent_wrangler_core::label::label;
 
-use crate::agents;
-use crate::model::{Branch, Indicator, Placement, Row, RowContent, RowKey};
-use crate::options::Options;
+use crate::model::{Branch, Indicator, NamedColor, Placement, Row, RowContent, RowKey};
+use crate::options::View;
 
 /// The marker an agent's row carries at its right edge, which is nothing at all
-/// when the sidebar has been asked not to say whose turn it is.
-fn indicator(agent: &Agent, options: &Options) -> Indicator {
+/// when the client has been asked not to say whose turn it is.
+fn indicator(agent: &Agent, options: &View) -> Indicator {
     match (options.turn_state, agent.turn) {
         (false, _) | (_, Turn::Idle) => Indicator::None,
         (_, Turn::Working) => Indicator::Working,
@@ -27,14 +27,14 @@ fn agent_row(
     index: String,
     branch: Branch,
     placement: Placement,
-    options: &Options,
+    options: &View,
 ) -> Row {
     Row::new(RowContent::Agent {
         index,
-        label: agents::label(agent, options.label),
+        label: label(agent, options.label),
         branch,
         placement,
-        color: agents::color(agent),
+        color: NamedColor::of(agent),
     })
     .with(indicator(agent, options))
 }
@@ -139,7 +139,7 @@ fn branch_at(position: usize, last: usize) -> Branch {
 }
 
 /// The rows for one tab: the tab itself, then a child per pane or agent.
-fn tab_rows(tab: &Tab, options: &Options) -> Vec<Row> {
+fn tab_rows(tab: &Tab, options: &View) -> Vec<Row> {
     let mut rows = vec![window_row(tab).at(RowKey::Tab(tab.position))];
 
     let children = children(tab);
@@ -190,7 +190,7 @@ fn kinds(tabs: &[Tab]) -> Vec<&str> {
 /// A tab's row appears here as a heading for the sessions beneath it and points
 /// at nothing: the tab itself is one row up in the tree, and one thing worth
 /// selecting twice would be two rows the selection has to tell apart.
-fn kind_rows(tabs: &[Tab], kind: &str, options: &Options) -> Vec<Row> {
+fn kind_rows(tabs: &[Tab], kind: &str, options: &View) -> Vec<Row> {
     let mut rows = vec![Row::new(RowContent::Header {
         text: kind.to_string(),
     })];
@@ -222,13 +222,13 @@ fn kind_rows(tabs: &[Tab], kind: &str, options: &Options) -> Vec<Row> {
     rows
 }
 
-/// The rows the sidebar draws, in the order they are drawn and navigated.
+/// The rows a client draws, in the order they are drawn and navigated.
 ///
 /// In sections mode the same sessions are drawn twice, once where they are and
 /// once under what they are, so both blocks carry a heading saying which is
 /// which. Grouping is all the option changes: a tab, a pane and an agent are
 /// drawn exactly the same wherever they appear.
-pub fn build_tree(tabs: &[Tab], options: &Options) -> Vec<Row> {
+pub fn build_tree(tabs: &[Tab], options: &View) -> Vec<Row> {
     let tree = tabs.iter().flat_map(|tab| tab_rows(tab, options));
     if !options.sections {
         return tree.collect();
@@ -248,9 +248,8 @@ mod tests {
     use super::*;
 
     use agent_wrangler_core::agent::{Meta, SessionId};
-
-    use crate::agents::tests::at_pane;
     use agent_wrangler_core::label::Label;
+    use agent_wrangler_core::origin::Origin;
 
     fn pane(id: u32, title: &str, focused: bool) -> Pane {
         Pane::new(id, title, focused)
@@ -260,6 +259,9 @@ mod tests {
         running(pane, "claude", labels)
     }
 
+    /// The agents a pane hosts are handed to it here, so where a record says it
+    /// was raised is nothing this has to answer for: a tree is built from panes
+    /// that already hold their agents.
     fn running(mut pane: Pane, kind: &str, labels: &[&str]) -> Pane {
         pane.agents = labels
             .iter()
@@ -271,7 +273,7 @@ mod tests {
                         dir: label.to_string(),
                         ..Meta::default()
                     },
-                    at_pane(pane.id),
+                    Origin::default(),
                 )
             })
             .collect();
@@ -279,7 +281,7 @@ mod tests {
     }
 
     fn tree(tabs: &[Tab]) -> Vec<Row> {
-        build_tree(tabs, &Options::default())
+        build_tree(tabs, &View::default())
     }
 
     fn tab(position: usize, name: &str, active: bool, panes: Vec<Pane>) -> Tab {
@@ -478,9 +480,9 @@ mod tests {
     fn a_marker_is_not_drawn_at_all_when_the_turn_is_not_wanted() {
         let mut pane = hosting(pane(1, "bash", false), &["one"]);
         pane.agents[0].turn = Turn::Attention;
-        let options = Options {
+        let options = View {
             turn_state: false,
-            ..Options::default()
+            ..View::default()
         };
         let rows = build_tree(&[tab(0, "editor", true, vec![pane])], &options);
         assert_eq!(rows[1].indicator, Indicator::None);
@@ -492,9 +494,9 @@ mod tests {
         pane.agents[0].meta.title = "the zellij port".to_string();
         let tabs = [tab(0, "editor", true, vec![pane])];
         let label = |mode| {
-            let options = Options {
+            let options = View {
                 label: mode,
-                ..Options::default()
+                ..View::default()
             };
             match &build_tree(&tabs, &options)[1].content {
                 RowContent::Agent { label, .. } => label.clone(),
@@ -528,9 +530,9 @@ mod tests {
     fn sections(tabs: &[Tab]) -> Vec<Row> {
         build_tree(
             tabs,
-            &Options {
+            &View {
                 sections: true,
-                ..Options::default()
+                ..View::default()
             },
         )
     }

@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 
 use agent_wrangler_core::command::words;
-pub use agent_wrangler_core::label::Label;
 use agent_wrangler_core::notify::Notifier;
+use agent_wrangler_ui::options::{Label, View};
 
 /// What a desktop notification is raised by when the option only says to raise
 /// one.
@@ -40,16 +40,10 @@ fn truth(value: &str) -> Option<bool> {
 }
 
 /// Everything the layout can say about how the sidebar behaves.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Options {
-    pub label: Label,
-    /// Whether the tree is followed by a block per agent, the same sessions
-    /// gathered by which agent they are rather than by where they are.
-    pub sections: bool,
-    /// Whether an agent's row says whose turn it is.
-    pub turn_state: bool,
-    /// Whether the calls for the user are listed at the foot of the pane.
-    pub notifications: bool,
+    /// What the layout asked the pane to show.
+    pub view: View,
     /// What to have a desktop notification raised with, if anything. The
     /// sidebar names it rather than running it: it is one of many holding the
     /// same calls, and each of them raising its own would be one notification
@@ -63,19 +57,6 @@ pub struct Options {
 /// The hook client the install option names when it only says to install.
 const CLIENT: &str = "agent-wrangler";
 
-impl Default for Options {
-    fn default() -> Self {
-        Options {
-            label: Label::default(),
-            sections: false,
-            turn_state: true,
-            notifications: true,
-            desktop: None,
-            install_hooks: None,
-        }
-    }
-}
-
 impl Options {
     /// Read the configuration zellij passes a plugin, leaving every option it
     /// does not mention at its default.
@@ -88,13 +69,15 @@ impl Options {
                 .unwrap_or(default)
         };
         Options {
-            label: configuration
-                .get("label")
-                .and_then(|value| Label::read(value))
-                .unwrap_or(default.label),
-            sections: flag("sections", default.sections),
-            turn_state: flag("turn_state", default.turn_state),
-            notifications: flag("notifications", default.notifications),
+            view: View {
+                label: configuration
+                    .get("label")
+                    .and_then(|value| Label::read(value))
+                    .unwrap_or(default.view.label),
+                sections: flag("sections", default.view.sections),
+                turn_state: flag("turn_state", default.view.turn_state),
+                notifications: flag("notifications", default.view.notifications),
+            },
             desktop: configuration
                 .get("desktop_notification")
                 .and_then(|value| notifier(value)),
@@ -141,10 +124,10 @@ mod tests {
     #[test]
     fn a_flag_answers_to_every_word_for_yes_and_for_no() {
         for yes in ["true", "on", "yes", "1", " ON "] {
-            assert!(read(&[("sections", yes)]).sections, "{yes}");
+            assert!(read(&[("sections", yes)]).view.sections, "{yes}");
         }
         for no in ["false", "off", "no", "0"] {
-            assert!(!read(&[("turn_state", no)]).turn_state, "{no}");
+            assert!(!read(&[("turn_state", no)]).view.turn_state, "{no}");
         }
     }
 
@@ -157,8 +140,8 @@ mod tests {
 
     #[test]
     fn the_label_mode_is_named() {
-        assert_eq!(read(&[("label", "dir")]).label, Label::Dir);
-        assert_eq!(read(&[("label", "NAME")]).label, Label::Name);
+        assert_eq!(read(&[("label", "dir")]).view.label, Label::Dir);
+        assert_eq!(read(&[("label", "NAME")]).view.label, Label::Name);
     }
 
     #[test]

@@ -1,0 +1,16 @@
+[package]
+name = "agent-wrangler-ui"
+version.workspace = true
+edition.workspace = true
+description = "The rows a client draws and the cells they land in, told apart from the client drawing them"
+
+[dependencies]
+# Ratatui's core alone: the buffer, the styles, the text and the widget trait,
+# with no backend and no terminal behind any of it. That is what lets one
+# drawing compile into the zellij plugin, whose only way out is a string of
+# escape sequences, and into a client sitting on a real terminal, where a
+# backend takes the same cells there directly.
+ratatui-core = { version = "0.1", default-features = false, features = ["std"] }
+# The types alone. What a row says about an agent is read off the record it is
+# handed; nothing here goes looking for one.
+agent-wrangler-core = { path = "../agent-wrangler-core", default-features = false }

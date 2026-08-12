@@ -1,10 +1,5 @@
-//! How the sidebar reads an agent record: what a row calls the session, the
-//! color it says it in, which of the session's records are this sidebar's to
-//! draw at all, and which pane the row belongs under.
-//!
-//! A record carries what a session is known by rather than the text of its row,
-//! so the spelling is chosen here. That is what lets the label option change
-//! every row at once with no agent reporting itself again.
+//! How the sidebar reads an agent record: which of the session's records are
+//! this sidebar's to draw at all, and which pane the row belongs under.
 //!
 //! A record says where it was raised as the variables of that process read, and
 //! nothing about what those variables mean. This is where they are read for
@@ -15,8 +10,7 @@
 use agent_wrangler_core::agent::{Agent, Record};
 use agent_wrangler_core::registry::Registry;
 
-use crate::model::NamedColor;
-use crate::tree::Tab;
+use agent_wrangler_ui::tree::Tab;
 
 /// What a session is called is composed from the facts a record carries rather
 /// than decided here, and is re-exported so that a row and an announcement of
@@ -28,12 +22,6 @@ const SESSION_VAR: &str = "ZELLIJ_SESSION_NAME";
 
 /// The variable naming the pane an agent was raised in.
 const PANE_VAR: &str = "ZELLIJ_PANE_ID";
-
-/// The color this session's icon is drawn in, or `None` for one the agent gives
-/// no color to.
-pub fn color(agent: &Agent) -> Option<NamedColor> {
-    NamedColor::agent(&agent.meta.color)
-}
 
 /// Which zellij pane an agent reported itself from, or `None` for one that
 /// reported itself from somewhere this sidebar cannot point at.
@@ -89,7 +77,7 @@ pub(crate) mod tests {
     use agent_wrangler_core::agent::{Meta, SessionId};
     use agent_wrangler_core::origin::Origin;
 
-    use crate::tree::Pane;
+    use agent_wrangler_ui::tree::Pane;
 
     /// The zellij session every record in these tests was raised in, so that a
     /// record from anywhere else is plainly from anywhere else.
@@ -126,43 +114,6 @@ pub(crate) mod tests {
 
     pub(crate) fn agent(id: &str, origin: Origin) -> Agent {
         Agent::new(session(id), "claude", meta("wrangler", "", ""), origin)
-    }
-
-    fn colored(color: &str) -> Agent {
-        Agent::new(
-            session("one"),
-            "claude",
-            Meta {
-                color: color.to_string(),
-                ..meta("wrangler", "", "")
-            },
-            at_pane(1),
-        )
-    }
-
-    #[test]
-    fn a_session_is_drawn_in_the_color_the_agent_gives_it() {
-        // The two an agent names that a terminal does not are drawn in the
-        // bright form of their neighbour, so all eight stay apart.
-        for (name, want) in [
-            ("red", NamedColor::Red),
-            ("green", NamedColor::Green),
-            ("yellow", NamedColor::Yellow),
-            ("blue", NamedColor::Blue),
-            ("purple", NamedColor::Magenta),
-            ("cyan", NamedColor::Cyan),
-            ("orange", NamedColor::BrightYellow),
-            ("pink", NamedColor::BrightMagenta),
-        ] {
-            assert_eq!(color(&colored(name)), Some(want), "{name}");
-        }
-    }
-
-    #[test]
-    fn a_session_with_no_color_of_its_own_is_drawn_in_none() {
-        assert_eq!(color(&colored("")), None);
-        // A name this sidebar does not know is not a color to guess at.
-        assert_eq!(color(&colored("chartreuse")), None);
     }
 
     fn tabs() -> Vec<Tab> {

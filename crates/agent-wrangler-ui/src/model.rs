@@ -1,11 +1,14 @@
-//! The row vocabulary the sidebar is drawn from.
+//! The row vocabulary a client is drawn from.
 //!
 //! A row's content names *what* the row is; its `Branch` and `Placement` follow
 //! from where it sits, and its `Indicator` from the turn state of the thing it
 //! points at. A row's strings are the literal names of things, and every glyph
 //! drawn around them is chosen when the row is painted.
+//!
+//! Nothing here knows what a terminal is: a row says what is to be drawn, and
+//! never how.
 
-use agent_wrangler_core::agent::SessionId;
+use agent_wrangler_core::agent::{Agent, SessionId};
 
 /// A child's position in its tab: the last one closes the tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,7 +17,7 @@ pub enum Branch {
     Last,
 }
 
-/// Where a row sits relative to the user: the one channel the sidebar reads
+/// Where a row sits relative to the user: the one channel a client reads
 /// both the gutter and the row's intensity off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placement {
@@ -47,20 +50,6 @@ pub enum NamedColor {
 }
 
 impl NamedColor {
-    /// The SGR foreground parameter for this color.
-    pub fn sgr(self) -> u8 {
-        match self {
-            NamedColor::Red => 31,
-            NamedColor::Green => 32,
-            NamedColor::Yellow => 33,
-            NamedColor::Blue => 34,
-            NamedColor::Magenta => 35,
-            NamedColor::Cyan => 36,
-            NamedColor::BrightYellow => 93,
-            NamedColor::BrightMagenta => 95,
-        }
-    }
-
     /// The terminal color an agent's own color name is drawn in, or `None` for
     /// a session with no color of its own.
     ///
@@ -81,6 +70,12 @@ impl NamedColor {
             _ => return None,
         })
     }
+
+    /// The color one session is drawn in, which is the color the agent gave it
+    /// and nothing the client chose.
+    pub fn of(agent: &Agent) -> Option<Self> {
+        NamedColor::agent(&agent.meta.color)
+    }
 }
 
 /// The right-edge turn-state marker.
@@ -90,7 +85,6 @@ pub enum Indicator {
     /// The agent wants you.
     Attention,
     /// The agent is mid-turn.
-    #[allow(dead_code)]
     Working,
 }
 
@@ -133,7 +127,7 @@ pub enum RowKey {
 
 impl RowKey {
     /// The key as one line of text, which is how it travels between the
-    /// sidebars sharing a selection.
+    /// clients sharing a selection.
     pub fn encode(&self) -> String {
         match self {
             RowKey::Tab(position) => format!("tab:{position}"),
@@ -144,7 +138,7 @@ impl RowKey {
         }
     }
 
-    /// The key `encode` wrote, or `None` for anything else. A sidebar running
+    /// The key `encode` wrote, or `None` for anything else. A client running
     /// older code than the one that sent this says nothing rather than guessing.
     pub fn decode(text: &str) -> Option<Self> {
         let (kind, value) = text.split_once(':')?;
@@ -242,6 +236,46 @@ impl Row {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use agent_wrangler_core::agent::Meta;
+    use agent_wrangler_core::origin::Origin;
+
+    fn colored(color: &str) -> Agent {
+        Agent::new(
+            SessionId::new("one").unwrap(),
+            "claude",
+            Meta {
+                color: color.to_string(),
+                ..Meta::default()
+            },
+            Origin::default(),
+        )
+    }
+
+    #[test]
+    fn a_session_is_drawn_in_the_color_the_agent_gives_it() {
+        // The two an agent names that a terminal does not are drawn in the
+        // bright form of their neighbour, so all eight stay apart.
+        for (name, want) in [
+            ("red", NamedColor::Red),
+            ("green", NamedColor::Green),
+            ("yellow", NamedColor::Yellow),
+            ("blue", NamedColor::Blue),
+            ("purple", NamedColor::Magenta),
+            ("cyan", NamedColor::Cyan),
+            ("orange", NamedColor::BrightYellow),
+            ("pink", NamedColor::BrightMagenta),
+        ] {
+            assert_eq!(NamedColor::of(&colored(name)), Some(want), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_session_with_no_color_of_its_own_is_drawn_in_none() {
+        assert_eq!(NamedColor::of(&colored("")), None);
+        // A name this palette does not hold is not a color to guess at.
+        assert_eq!(NamedColor::of(&colored("chartreuse")), None);
+    }
 
     #[test]
     fn a_key_survives_the_round_trip() {

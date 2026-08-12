@@ -1,16 +1,12 @@
 //! A zellij sidebar pane listing the session's tabs and their panes as a tree.
 //!
-//! The pane is drawn as two regions. The tree fills it; the notification area is
-//! pinned to the foot and capped at a quarter of the pane, and an entry is
-//! admitted only if it fits whole, so a title never appears over a cut-off
-//! message. Both regions are navigated in one order, and every line of a
-//! notification entry carries that entry's key, so a click anywhere in it
-//! selects the same thing.
-//!
 //! The tree is resolved from the tabs and panes zellij reports, which arrive as
 //! two separate events, so both are held and the tree is rebuilt from whichever
 //! arrived. A rebuild that changes nothing drawn asks for no repaint: a plugin
 //! reprints its whole pane every time, and pane updates are frequent.
+//!
+//! What each line of the last frame pointed at is held until the next one, since
+//! a click arrives as a line number and says nothing about what was on it.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -20,15 +16,15 @@ use zellij_tile::prelude::*;
 use agent_wrangler_core::agent::{self, Agent, Turn, AGENTS_MESSAGE};
 use agent_wrangler_core::registry::Registry;
 
+use agent_wrangler_ui::frame::{compose, Frame, Note};
+use agent_wrangler_ui::model::{NamedColor, Notification, Row, RowKey};
+use agent_wrangler_ui::{ansi, selection, tree, Rect};
+
 use zellij_agent_wrangler::agents;
 use zellij_agent_wrangler::calls::Answered;
 use zellij_agent_wrangler::client::Client;
-use zellij_agent_wrangler::model::{Notification, Row, RowContent, RowKey};
 use zellij_agent_wrangler::options::Options;
-use zellij_agent_wrangler::render::{notification_body_field, notification_rows, paint, wrap};
-use zellij_agent_wrangler::selection;
 use zellij_agent_wrangler::session::{self, Focus};
-use zellij_agent_wrangler::tree;
 
 /// The message the sidebars of one session carry their shared selection in.
 ///
@@ -66,9 +62,6 @@ const UNREACHABLE: &str = "the sidebar could not run its client";
 
 /// What a refused sidebar says beneath its heading.
 const REFUSED: &str = "the sidebar cannot read the session";
-
-/// The heading the notification area is drawn under.
-const NOTIFICATIONS_HEADING: &str = "notifications";
 
 #[derive(Default)]
 struct State {
@@ -148,6 +141,16 @@ struct State {
 
 register_plugin!(State);
 
+/// A count of lines or columns zellij reports, as the measure a pane is drawn
+/// in.
+///
+/// Saturating rather than truncating: a pane larger than this does not exist,
+/// and one drawn as the remainder would be a frame composed for a pane that is
+/// not the one being printed into.
+fn cells(count: usize) -> u16 {
+    u16::try_from(count).unwrap_or(u16::MAX)
+}
+
 /// Ask zellij where this plugin's client is, which is one synchronous round
 /// trip and the only reading the sidebar does outside its subscriptions.
 fn focus() -> Option<Focus> {
@@ -199,18 +202,6 @@ impl Voice {
     fn say(&self, message: MessageToPlugin) {
         pipe_message_to_plugin(message);
     }
-}
-
-/// A heading over a wrapped message: how the sidebar says something about
-/// itself, where every other row says something about the session.
-fn notice(heading: &str, text: &str, width: usize) -> Vec<Row> {
-    let mut rows = vec![Row::new(RowContent::Header {
-        text: heading.to_string(),
-    })];
-    for line in wrap(text, notification_body_field(width)) {
-        rows.push(Row::new(RowContent::NotificationBody { text: line }));
-    }
-    rows
 }
 
 impl State {
@@ -380,7 +371,7 @@ impl State {
         let mut resolved = session::session(&self.tabs, &self.panes, focus);
         self.leave_if_alone(&resolved);
         agents::place(&mut resolved, &self.registry);
-        let rows = tree::build_tree(&resolved, &self.options);
+        let rows = tree::build_tree(&resolved, &self.options.view);
         let notices = self.notifications();
         // Whether the keys are coming here is drawn as well as the rows are, so
         // it is a change to what the pane shows even when no row moved.
@@ -457,7 +448,7 @@ impl State {
     /// The selection: what this sidebar holds, resolved against everything it
     /// can currently point at.
     fn selection(&self) -> Option<RowKey> {
-        let keys = selection::keys(&self.rows, &self.registry, &self.options);
+        let keys = selection::keys(&self.rows, &self.registry, &self.options.view);
         selection::selected(&keys, self.selected.as_ref())
     }
 
@@ -475,7 +466,7 @@ impl State {
             .map(|agent| Notification {
                 session: agent.session.clone(),
                 agent: agent.agent.clone(),
-                color: agents::color(agent),
+                color: NamedColor::of(agent),
                 message: self.where_it_is(agent),
             })
             .collect()
@@ -489,7 +480,7 @@ impl State {
             .and_then(|position| self.tabs.iter().find(|tab| tab.position == position))
             .map(|tab| tab.name.clone())
             .unwrap_or_default();
-        let label = agents::label(agent, self.options.label);
+        let label = agents::label(agent, self.options.view.label);
         match (tab.is_empty(), label.is_empty()) {
             (true, _) => label,
             (false, true) => tab,
@@ -497,53 +488,38 @@ impl State {
         }
     }
 
-    /// The notification area for a pane `width` columns wide, given `cap` lines
-    /// to fill. Empty when that leaves no room for the heading and one whole
-    /// entry beside it, and when the sidebar was asked not to list the calls at
-    /// all.
-    fn notification_area(&self, width: usize, cap: usize) -> Vec<Row> {
-        if !self.options.notifications {
-            return Vec::new();
-        }
-        let mut rows = vec![Row::new(RowContent::Header {
-            text: NOTIFICATIONS_HEADING.to_string(),
-        })];
-        for entry in &self.notices {
-            let entry = notification_rows(entry, width);
-            if rows.len() + entry.len() > cap {
-                break;
-            }
-            rows.extend(entry);
-        }
-        if rows.len() < 2 {
-            return Vec::new();
-        }
-        rows
-    }
-
-    /// Every line of the pane, in the order it is drawn and navigated: the tree,
-    /// then enough blank padding to hold the notification area at the foot.
+    /// Every line of the pane, in the order it is drawn and navigated.
     ///
     /// What the sidebar has to say about itself leads, since that is why the
     /// tree beneath it is missing rows: a hook client of another version, and a
-    /// client that could not be run at all.
-    fn lines(&self, width: usize, height: usize) -> Vec<Row> {
-        let area = self.notification_area(width, height / 4);
-        let mut rows = match self.mismatched {
-            true => notice("out of step", MISMATCH, width),
-            false => Vec::new(),
-        };
-        if let Some(why) = self.client.why() {
-            rows.extend(notice("no client", &format!("{UNREACHABLE}. {why}"), width));
+    /// client that could not be run at all. A sidebar zellij has refused says
+    /// that and nothing else, because without the permission it has read
+    /// nothing to draw.
+    fn frame(&self, area: Rect) -> Frame {
+        if self.permission == Some(PermissionStatus::Denied) {
+            let refused = [Note {
+                heading: "no permission",
+                text: REFUSED,
+            }];
+            return compose(&refused, &[], &[], area, &self.options.view);
         }
-        rows.extend(self.rows.iter().cloned());
-        rows.truncate(height.saturating_sub(area.len()));
-        rows.resize(
-            height.saturating_sub(area.len()),
-            Row::new(RowContent::Blank),
-        );
-        rows.extend(area);
-        rows
+        // Held rather than named inline: a note borrows its text, and the only
+        // one composed here is composed from two pieces.
+        let unreachable = self.client.why().map(|why| format!("{UNREACHABLE}. {why}"));
+        let mut notes: Vec<Note> = Vec::new();
+        if self.mismatched {
+            notes.push(Note {
+                heading: "out of step",
+                text: MISMATCH,
+            });
+        }
+        if let Some(text) = &unreachable {
+            notes.push(Note {
+                heading: "no client",
+                text,
+            });
+        }
+        compose(&notes, &self.rows, &self.notices, area, &self.options.view)
     }
 
     /// Go to what the selected row points at.
@@ -833,26 +809,13 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
-        if self.permission == Some(PermissionStatus::Denied) {
-            let rows: Vec<String> = notice("no permission", REFUSED, cols)
-                .iter()
-                .map(|row| paint(row, cols, false))
-                .collect();
-            print!("{}", rows.join("\r\n"));
-            self.painted.clear();
-            return;
-        }
-
-        let lines = self.lines(cols, rows);
-        self.painted = lines.iter().map(|row| row.key.clone()).collect();
+        let pane = Rect::new(0, 0, cells(cols), cells(rows));
+        let frame = self.frame(pane);
+        self.painted = frame.keys();
         // The bar says where a keystroke would land, so a sidebar the keys are
         // not reaching draws none: the gutter is what says where you are, and
         // it keeps saying so from every tab.
         let selected = self.focused.then(|| self.selection()).flatten();
-        let painted: Vec<String> = lines
-            .iter()
-            .map(|row| paint(row, cols, row.key.is_some() && row.key == selected))
-            .collect();
-        print!("{}", painted.join("\r\n"));
+        print!("{}", ansi::pane(&frame, selected.as_ref()));
     }
 }

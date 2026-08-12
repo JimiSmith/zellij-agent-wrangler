@@ -6,7 +6,7 @@
 
 use zellij_tile::prelude::{PaneId, PaneInfo, PaneManifest, TabInfo};
 
-use crate::tree::{Pane, Tab};
+use agent_wrangler_ui::tree::{Pane, Tab};
 
 /// Whether the sidebar lists this pane.
 ///

@@ -20,3 +20,7 @@ zellij-tile = "0.44.3"
 # The types alone. Off wasm, reading an agent's files pulls in JSON that the
 # sidebar has no use for: it is handed records, it does not find them.
 agent-wrangler-core = { path = "../agent-wrangler-core", default-features = false }
+# What the sidebar draws, which is the half of it that is not about zellij. The
+# plugin's own share is where the session's shape comes from and getting the
+# finished cells onto the pane.
+agent-wrangler-ui = { path = "../agent-wrangler-ui" }

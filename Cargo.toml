@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/agent-wrangler-core",
+    "crates/agent-wrangler-ui",
     "crates/agent-wrangler",
     "crates/zellij-agent-wrangler",
 ]

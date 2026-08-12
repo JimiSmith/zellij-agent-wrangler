@@ -1,4 +1,4 @@
-//! What the sidebar can point at, and which of those the selection is on.
+//! What a client can point at, and which of those the selection is on.
 //!
 //! The two regions of the pane are built at different times: the tree is
 //! resolved whenever the session changes, and the notification area is composed
@@ -7,16 +7,16 @@
 //! worked out here for both regions at once.
 
 use crate::model::{Row, RowKey};
-use crate::options::Options;
+use crate::options::View;
 use agent_wrangler_core::registry::Registry;
 
-/// Every key the sidebar can put on screen, in the order they are drawn: the
+/// Every key a client can put on screen, in the order they are drawn: the
 /// tree's, then one for each call listed at the foot.
 ///
 /// A key missing from this list is read as a row that has gone, so the list has
 /// to cover both regions: leaving the calls out would make a selected entry
 /// look like an entry that had been dismissed.
-pub fn keys(rows: &[Row], registry: &Registry, options: &Options) -> Vec<RowKey> {
+pub fn keys(rows: &[Row], registry: &Registry, options: &View) -> Vec<RowKey> {
     let mut keys: Vec<RowKey> = rows.iter().filter_map(|row| row.key.clone()).collect();
     if options.notifications {
         keys.extend(
@@ -45,9 +45,13 @@ pub fn selected(keys: &[RowKey], held: Option<&RowKey>) -> Option<RowKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::tests::{at_pane, session};
     use crate::model::{Placement, RowContent};
-    use agent_wrangler_core::agent::{Agent, Meta, Turn};
+    use agent_wrangler_core::agent::{Agent, Meta, SessionId, Turn};
+    use agent_wrangler_core::origin::Origin;
+
+    fn session(text: &str) -> SessionId {
+        SessionId::new(text).unwrap()
+    }
 
     fn tree() -> Vec<Row> {
         vec![
@@ -67,14 +71,14 @@ mod tests {
         registry.report(Agent {
             turn: Turn::Attention,
             raised: 1,
-            ..Agent::new(session(id), "claude", Meta::default(), at_pane(1))
+            ..Agent::new(session(id), "claude", Meta::default(), Origin::default())
         });
         registry
     }
 
     #[test]
     fn the_calls_at_the_foot_are_keys_like_any_other() {
-        let keys = keys(&tree(), &calling("one"), &Options::default());
+        let keys = keys(&tree(), &calling("one"), &View::default());
         assert_eq!(
             keys,
             vec![RowKey::Tab(0), RowKey::Notification(session("one")),]
@@ -88,15 +92,15 @@ mod tests {
         // at the top - and opening it goes to the first tab instead of to the
         // agent.
         let held = RowKey::Notification(session("one"));
-        let keys = keys(&tree(), &calling("one"), &Options::default());
+        let keys = keys(&tree(), &calling("one"), &View::default());
         assert_eq!(selected(&keys, Some(&held)), Some(held));
     }
 
     #[test]
     fn a_call_that_is_not_listed_cannot_be_selected() {
-        let quiet = Options {
+        let quiet = View {
             notifications: false,
-            ..Options::default()
+            ..View::default()
         };
         let keys = keys(&tree(), &calling("one"), &quiet);
         assert_eq!(keys, vec![RowKey::Tab(0)]);
@@ -106,7 +110,7 @@ mod tests {
 
     #[test]
     fn a_selection_on_a_row_that_has_gone_falls_back_to_the_first() {
-        let keys = keys(&tree(), &Registry::default(), &Options::default());
+        let keys = keys(&tree(), &Registry::default(), &View::default());
         assert_eq!(
             selected(&keys, Some(&RowKey::Pane(9))),
             Some(RowKey::Tab(0))
@@ -115,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sidebar_with_nothing_to_point_at_has_no_selection() {
+    fn a_client_with_nothing_to_point_at_has_no_selection() {
         assert_eq!(selected(&[], Some(&RowKey::Tab(0))), None);
     }
 }
