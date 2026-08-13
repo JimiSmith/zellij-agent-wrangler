@@ -42,7 +42,7 @@ Put the block in your layout inside both `default_tab_template` and
 
 ```kdl
 pane size=32 borderless=true {
-    plugin location="https://github.com/JimiSmith/zellij-agent-wrangler/releases/download/v0.1.8/zellij-agent-wrangler-v0.1.8.wasm" {
+    plugin location="https://github.com/JimiSmith/zellij-agent-wrangler/releases/download/v0.1.9/zellij-agent-wrangler-v0.1.9.wasm" {
         install_hooks "/home/you/.local/bin/agent-wrangler"
     }
 }
