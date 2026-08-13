@@ -77,6 +77,7 @@ pub(crate) mod tests {
     use agent_wrangler_core::agent::{Meta, SessionId};
     use agent_wrangler_core::origin::Origin;
 
+    use agent_wrangler_ui::model::TabPosition;
     use agent_wrangler_ui::tree::Pane;
 
     /// The zellij session every record in these tests was raised in, so that a
@@ -118,7 +119,7 @@ pub(crate) mod tests {
 
     fn tabs() -> Vec<Tab> {
         vec![Tab {
-            position: 0,
+            position: TabPosition::at(0),
             name: "one".to_string(),
             active: true,
             panes: vec![Pane::new(1, "bash", false), Pane::new(2, "nvim", true)],

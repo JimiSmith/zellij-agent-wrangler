@@ -10,6 +10,33 @@
 
 use agent_wrangler_core::agent::{Agent, SessionId};
 
+/// Where a tab sits in the tab bar, counted from zero.
+///
+/// A position is not a name: closing a tab moves every tab after it along, so
+/// the tab at a position is only the tab that was there while nothing before it
+/// has opened or closed. It is what orders the tabs, what labels their rows, and
+/// what a client means when it points at one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TabPosition(usize);
+
+impl TabPosition {
+    /// The tab sitting at this place in the bar.
+    pub const fn at(position: usize) -> Self {
+        TabPosition(position)
+    }
+
+    /// The place itself, for whoever else counts tabs from zero.
+    pub const fn zero_based(self) -> usize {
+        self.0
+    }
+
+    /// The number this tab is called by, which counts from one: tabs are the one
+    /// thing the user is shown numbered that way.
+    pub const fn one_based(self) -> usize {
+        self.0 + 1
+    }
+}
+
 /// A child's position in its tab: the last one closes the tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Branch {
@@ -111,7 +138,7 @@ impl Indicator {
 /// the selection off the thing it was on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowKey {
-    Tab(usize),
+    Tab(TabPosition),
     Pane(u32),
     Agent(SessionId),
     /// The same session as [`RowKey::Agent`], drawn a second time under the
@@ -130,7 +157,7 @@ impl RowKey {
     /// clients sharing a selection.
     pub fn encode(&self) -> String {
         match self {
-            RowKey::Tab(position) => format!("tab:{position}"),
+            RowKey::Tab(position) => format!("tab:{}", position.zero_based()),
             RowKey::Pane(id) => format!("pane:{id}"),
             RowKey::Agent(session) => format!("agent:{}", session.as_str()),
             RowKey::Section(session) => format!("section:{}", session.as_str()),
@@ -143,7 +170,10 @@ impl RowKey {
     pub fn decode(text: &str) -> Option<Self> {
         let (kind, value) = text.split_once(':')?;
         match kind {
-            "tab" => value.parse().ok().map(RowKey::Tab),
+            "tab" => value
+                .parse()
+                .ok()
+                .map(|position| RowKey::Tab(TabPosition::at(position))),
             "pane" => value.parse().ok().map(RowKey::Pane),
             "agent" => SessionId::new(value).map(RowKey::Agent),
             "section" => SessionId::new(value).map(RowKey::Section),
@@ -280,8 +310,8 @@ mod tests {
     #[test]
     fn a_key_survives_the_round_trip() {
         for key in [
-            RowKey::Tab(0),
-            RowKey::Tab(12),
+            RowKey::Tab(TabPosition::at(0)),
+            RowKey::Tab(TabPosition::at(12)),
             RowKey::Pane(7),
             RowKey::Agent(SessionId::new("9f3c-1a").unwrap()),
             RowKey::Section(SessionId::new("9f3c-1a").unwrap()),
