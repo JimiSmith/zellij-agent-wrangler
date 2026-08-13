@@ -8,7 +8,9 @@
 use agent_wrangler_core::agent::{Agent, Turn};
 use agent_wrangler_core::label::label;
 
-use crate::model::{Branch, Indicator, NamedColor, Placement, Row, RowContent, RowKey};
+use crate::model::{
+    Branch, Indicator, NamedColor, Placement, Row, RowContent, RowKey, TabPosition,
+};
 use crate::options::View;
 
 /// The marker an agent's row carries at its right edge, which is nothing at all
@@ -67,7 +69,7 @@ impl Pane {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tab {
     /// The tab's own position, which is also what labels its row.
-    pub position: usize,
+    pub position: TabPosition,
     pub name: String,
     pub active: bool,
     pub panes: Vec<Pane>,
@@ -122,7 +124,7 @@ fn children(tab: &Tab) -> Vec<Child<'_>> {
 /// The row a tab draws for itself.
 fn window_row(tab: &Tab) -> Row {
     Row::new(RowContent::Window {
-        index: (tab.position + 1).to_string(),
+        index: tab.position.one_based().to_string(),
         name: tab.name.clone(),
         placement: tab_placement(tab.active),
         color: None,
@@ -286,7 +288,7 @@ mod tests {
 
     fn tab(position: usize, name: &str, active: bool, panes: Vec<Pane>) -> Tab {
         Tab {
-            position,
+            position: TabPosition::at(position),
             name: name.to_string(),
             active,
             panes,
@@ -323,10 +325,10 @@ mod tests {
         assert_eq!(
             keys,
             vec![
-                Some(RowKey::Tab(0)),
+                Some(RowKey::Tab(TabPosition::at(0))),
                 Some(RowKey::Pane(1)),
                 Some(RowKey::Pane(2)),
-                Some(RowKey::Tab(1)),
+                Some(RowKey::Tab(TabPosition::at(1))),
                 Some(RowKey::Pane(3)),
             ]
         );
@@ -473,7 +475,7 @@ mod tests {
     fn a_tab_with_no_panes_still_draws_its_own_row() {
         let rows = tree(&[tab(0, "empty", false, vec![])]);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].key, Some(RowKey::Tab(0)));
+        assert_eq!(rows[0].key, Some(RowKey::Tab(TabPosition::at(0))));
     }
 
     #[test]

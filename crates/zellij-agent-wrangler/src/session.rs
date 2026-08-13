@@ -6,7 +6,30 @@
 
 use zellij_tile::prelude::{PaneId, PaneInfo, PaneManifest, TabInfo};
 
+use agent_wrangler_ui::model::TabPosition;
 use agent_wrangler_ui::tree::{Pane, Tab};
+
+/// Zellij's own name for a tab, which stays with it for as long as it is open.
+///
+/// An id is not a position. Zellij hands them out in one rising sequence and
+/// never reuses one, so closing any tab but the last leaves the two apart for
+/// the rest of the session: three tabs whose middle one has gone are ids 0, 2
+/// and 3 sitting at positions 0, 1 and 2.
+///
+/// Only one thing the sidebar reads is in this currency, and it is the one thing
+/// it cannot do without: zellij reports the focus against the tab's id and
+/// everything else, the pane manifest and the tabs themselves, against its
+/// position. Keeping the two in separate types is what stops the number arriving
+/// from one being read as the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TabId(usize);
+
+impl TabId {
+    /// The id zellij gave a tab, as it reports it.
+    pub const fn new(id: usize) -> Self {
+        TabId(id)
+    }
+}
 
 /// Whether the sidebar lists this pane.
 ///
@@ -33,30 +56,30 @@ fn panes_of(panes: &[PaneInfo]) -> Vec<Pane> {
 
 /// Which tab a plugin pane is in, found by the plugin's own id. `None` until the
 /// manifest has caught up with the pane's existence.
-pub fn tab_of_plugin(manifest: &PaneManifest, plugin_id: u32) -> Option<usize> {
+pub fn tab_of_plugin(manifest: &PaneManifest, plugin_id: u32) -> Option<TabPosition> {
     manifest.panes.iter().find_map(|(tab, panes)| {
         panes
             .iter()
             .any(|pane| pane.is_plugin && pane.id == plugin_id)
-            .then_some(*tab)
+            .then(|| TabPosition::at(*tab))
     })
 }
 
 /// The first pane a tab lists, in the order the sidebar draws them. `None` for a
 /// tab holding nothing but the panes the sidebar leaves out.
-pub fn first_pane(manifest: &PaneManifest, tab: usize) -> Option<u32> {
-    let panes = manifest.panes.get(&tab)?;
+pub fn first_pane(manifest: &PaneManifest, tab: TabPosition) -> Option<u32> {
+    let panes = manifest.panes.get(&tab.zero_based())?;
     panes_of(panes).first().map(|pane| pane.id)
 }
 
 /// Which tab a terminal pane is in, found by its id. `None` until the manifest
 /// has caught up with the pane's existence.
-pub fn tab_of_pane(manifest: &PaneManifest, pane_id: u32) -> Option<usize> {
+pub fn tab_of_pane(manifest: &PaneManifest, pane_id: u32) -> Option<TabPosition> {
     manifest.panes.iter().find_map(|(tab, panes)| {
         panes
             .iter()
             .any(|pane| !pane.is_plugin && pane.id == pane_id)
-            .then_some(*tab)
+            .then(|| TabPosition::at(*tab))
     })
 }
 
@@ -66,13 +89,30 @@ pub fn tab_of_pane(manifest: &PaneManifest, pane_id: u32) -> Option<usize> {
 /// one - the sidebar itself, most of all. Carrying zellij's own id keeps those
 /// two apart, where an id alone could not: zellij numbers plugin panes and
 /// terminal panes in separate sequences, so the same number means two panes.
+///
+/// The tab is held as the id it arrived as. Turning it into the position the rest
+/// of the sidebar counts in needs the reported tabs, so it is done where they are
+/// to hand: see [`Focus::at`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Focus {
-    pub tab: usize,
+    pub tab: TabId,
     pub pane: PaneId,
 }
 
 impl Focus {
+    /// Where the tab the user is in sits, which is the currency everything drawn
+    /// is counted in.
+    ///
+    /// `None` for a tab the reported tabs say nothing about, which is the gap
+    /// between a tab being opened and being described. There is nothing to say
+    /// about a focus that cannot be placed, so callers fall back to what the
+    /// tabs and panes claim about themselves.
+    pub fn at(self, tabs: &[TabInfo]) -> Option<TabPosition> {
+        tabs.iter()
+            .find(|tab| TabId::new(tab.tab_id) == self.tab)
+            .map(|tab| TabPosition::at(tab.position))
+    }
+
     /// The focused pane, when it is one the sidebar lists. A plugin pane is not.
     pub fn listed(self) -> Option<u32> {
         match self.pane {
@@ -96,13 +136,20 @@ impl Focus {
 /// whole point: opening a row focuses the sidebar first, and what is wanted is
 /// where the user was before they came to it. Anywhere else leaves what is held
 /// standing, because the user is coming back to this tab from it.
+///
+/// A sidebar the manifest has not placed yet, and a focus the tabs cannot place,
+/// both leave what is held standing: neither says the user is here.
 pub fn left_behind_by(
+    tabs: &[TabInfo],
     manifest: &PaneManifest,
     plugin_id: u32,
     now: Focus,
     held: Option<u32>,
 ) -> Option<u32> {
-    if tab_of_plugin(manifest, plugin_id) != Some(now.tab) {
+    let Some(mine) = tab_of_plugin(manifest, plugin_id) else {
+        return held;
+    };
+    if now.at(tabs) != Some(mine) {
         return held;
     }
     now.listed().or(held)
@@ -129,7 +176,7 @@ pub fn stand_down_to(
     manifest: &PaneManifest,
     plugin_id: u32,
     left_behind: Option<u32>,
-    going_to: usize,
+    going_to: TabPosition,
 ) -> Option<u32> {
     let mine = tab_of_plugin(manifest, plugin_id)?;
     if mine == going_to {
@@ -146,28 +193,32 @@ pub fn stand_down_to(
 /// because those flags go stale: closing the focused pane leaves the surviving
 /// pane reported as unfocused until something moves the focus again. Passing
 /// `None` falls back to them, which is all there is when the focus cannot be
-/// resolved.
+/// resolved - and so does a focus these tabs cannot place, since half of a focus
+/// is no better than none.
 pub fn session(tabs: &[TabInfo], manifest: &PaneManifest, focus: Option<Focus>) -> Vec<Tab> {
+    let here = focus.and_then(|focus| focus.at(tabs));
+    let on = focus.and_then(Focus::listed);
     let mut tabs: Vec<&TabInfo> = tabs.iter().collect();
     tabs.sort_by_key(|tab| tab.position);
     tabs.into_iter()
         .map(|tab| {
-            let active = match focus {
-                Some(focus) => focus.tab == tab.position,
+            let position = TabPosition::at(tab.position);
+            let active = match here {
+                Some(here) => here == position,
                 None => tab.active,
             };
             let mut panes = manifest
                 .panes
-                .get(&tab.position)
+                .get(&position.zero_based())
                 .map(|panes| panes_of(panes))
                 .unwrap_or_default();
-            if let Some(focus) = focus {
+            if here.is_some() {
                 for pane in &mut panes {
-                    pane.focused = active && focus.listed() == Some(pane.id);
+                    pane.focused = active && on == Some(pane.id);
                 }
             }
             Tab {
-                position: tab.position,
+                position,
                 name: tab.name.clone(),
                 active,
                 panes,
@@ -192,12 +243,31 @@ mod tests {
         }
     }
 
+    /// A tab of a session nothing has been closed in, where a tab's id and its
+    /// position are still the same number.
     fn tab(position: usize, name: &str) -> TabInfo {
+        numbered(position, position, name)
+    }
+
+    /// A tab carrying the id zellij gave it and the position it now sits at,
+    /// which part company as soon as a tab before it is closed.
+    fn numbered(id: usize, position: usize, name: &str) -> TabInfo {
         TabInfo {
             position,
+            tab_id: id,
             name: name.to_string(),
             ..Default::default()
         }
+    }
+
+    /// Three tabs whose middle one has been closed: ids 0, 2 and 3 sitting at
+    /// positions 0, 1 and 2.
+    fn reshuffled() -> Vec<TabInfo> {
+        vec![
+            numbered(0, 0, "first"),
+            numbered(2, 1, "third"),
+            numbered(3, 2, "fourth"),
+        ]
     }
 
     fn manifest(panes: Vec<(usize, Vec<PaneInfo>)>) -> PaneManifest {
@@ -298,7 +368,7 @@ mod tests {
             ..Default::default()
         };
         let manifest = manifest(vec![(0, vec![namesake]), (1, vec![mine])]);
-        assert_eq!(tab_of_plugin(&manifest, 7), Some(1));
+        assert_eq!(tab_of_plugin(&manifest, 7), Some(TabPosition::at(1)));
         assert_eq!(tab_of_plugin(&manifest, 8), None);
     }
 
@@ -309,7 +379,7 @@ mod tests {
         let mut stale = pane(1, "survivor", 0, 0);
         stale.is_focused = false;
         let focus = Focus {
-            tab: 0,
+            tab: TabId::new(0),
             pane: PaneId::Terminal(1),
         };
         let session = session(
@@ -325,7 +395,7 @@ mod tests {
     fn a_focused_plugin_pane_leaves_the_tab_active_and_no_pane_focused() {
         let panes = vec![pane(1, "bash", 0, 0)];
         let focus = Focus {
-            tab: 0,
+            tab: TabId::new(0),
             pane: PaneId::Plugin(1),
         };
         let session = session(&[tab(0, "one")], &manifest(vec![(0, panes)]), Some(focus));
@@ -338,16 +408,77 @@ mod tests {
         let mut claims_focus = pane(1, "elsewhere", 0, 0);
         claims_focus.is_focused = true;
         let focus = Focus {
-            tab: 1,
+            tab: TabId::new(1),
             pane: PaneId::Terminal(9),
         };
         let session = session(
-            &[tab(0, "one")],
+            &[tab(0, "one"), tab(1, "two")],
             &manifest(vec![(0, vec![claims_focus])]),
             Some(focus),
         );
         assert!(!session[0].active);
         assert!(!session[0].panes[0].focused);
+    }
+
+    #[test]
+    fn the_focused_tab_is_the_one_whose_id_it_names_rather_than_that_position() {
+        // The whole of the bug: with the middle tab closed, the focused tab's id
+        // is the position of a tab two along from it, and the id of the last tab
+        // is a position no tab sits at.
+        let panes = manifest(vec![(0, vec![pane(1, "first", 0, 0)])]);
+        for (id, focused) in [(0, 0), (2, 1), (3, 2)] {
+            let focus = Focus {
+                tab: TabId::new(id),
+                pane: PaneId::Terminal(1),
+            };
+            let session = session(&reshuffled(), &panes, Some(focus));
+            let active: Vec<bool> = session.iter().map(|tab| tab.active).collect();
+            let mut want = vec![false; 3];
+            want[focused] = true;
+            assert_eq!(active, want, "tab id {id}");
+        }
+    }
+
+    #[test]
+    fn the_focused_pane_is_focused_in_the_tab_the_focus_places_it_in() {
+        // Its pane is drawn focused only under the tab the user is actually in,
+        // and the panes are the ones reported against that tab's position.
+        let panes = manifest(vec![
+            (0, vec![pane(1, "first", 0, 0)]),
+            (1, vec![pane(2, "third", 0, 0)]),
+            (2, vec![pane(3, "fourth", 0, 0)]),
+        ]);
+        let focus = Focus {
+            tab: TabId::new(3),
+            pane: PaneId::Terminal(3),
+        };
+        let session = session(&reshuffled(), &panes, Some(focus));
+        assert!(session[2].active);
+        assert_eq!(session[2].panes[0].title, "fourth");
+        assert!(session[2].panes[0].focused);
+        assert!(!session[1].panes[0].focused);
+    }
+
+    #[test]
+    fn a_focus_these_tabs_cannot_place_leaves_them_to_say_where_the_user_is() {
+        // A tab that has been opened but not yet described is the one moment the
+        // focus names an id nothing here holds, and the reported flags are all
+        // there is to go on until the tabs catch up.
+        let mut reported = tab(0, "one");
+        reported.active = true;
+        let mut focused = pane(1, "bash", 0, 0);
+        focused.is_focused = true;
+        let focus = Focus {
+            tab: TabId::new(9),
+            pane: PaneId::Terminal(7),
+        };
+        let session = session(
+            &[reported],
+            &manifest(vec![(0, vec![focused])]),
+            Some(focus),
+        );
+        assert!(session[0].active);
+        assert!(session[0].panes[0].focused);
     }
 
     /// A sidebar in tab 0 beside pane 2, with pane 9 over in tab 1.
@@ -367,14 +498,50 @@ mod tests {
         ])
     }
 
+    /// The same two tabs as zellij reports them, in a session nothing has been
+    /// closed in.
+    fn two_tabs_reported() -> Vec<TabInfo> {
+        vec![tab(0, "mine"), tab(1, "theirs")]
+    }
+
     fn at(tab: usize, pane: PaneId) -> Focus {
-        Focus { tab, pane }
+        Focus {
+            tab: TabId::new(tab),
+            pane,
+        }
     }
 
     #[test]
     fn the_pane_the_user_is_on_in_this_tab_is_what_is_held() {
-        let held = left_behind_by(&two_tabs(), 1, at(0, PaneId::Terminal(3)), Some(2));
+        let held = left_behind_by(
+            &two_tabs_reported(),
+            &two_tabs(),
+            1,
+            at(0, PaneId::Terminal(3)),
+            Some(2),
+        );
         assert_eq!(held, Some(3));
+    }
+
+    #[test]
+    fn where_the_user_is_is_read_off_the_tab_the_focused_id_names() {
+        // The sidebar is in the tab at position 1, which is tab id 2 once the
+        // tab before it has been closed. A focus on id 1 is a focus on nothing,
+        // and one on id 2 is the user standing beside this sidebar.
+        let sidebar = PaneInfo {
+            id: 1,
+            is_plugin: true,
+            is_selectable: true,
+            ..Default::default()
+        };
+        let manifest = manifest(vec![
+            (0, vec![pane(2, "first", 0, 0)]),
+            (1, vec![sidebar, pane(3, "third", 0, 0)]),
+        ]);
+        let tabs = reshuffled();
+        let held = |id| left_behind_by(&tabs, &manifest, 1, at(id, PaneId::Terminal(3)), Some(9));
+        assert_eq!(held(2), Some(3));
+        assert_eq!(held(1), Some(9));
     }
 
     #[test]
@@ -382,43 +549,77 @@ mod tests {
         // The click that opens a row focuses the sidebar, so this is the state
         // the tab is handed back from. Taking it as where they were would hand
         // the tab back to the sidebar, which is the whole complaint.
-        let held = left_behind_by(&two_tabs(), 1, at(0, PaneId::Plugin(1)), Some(2));
+        let held = left_behind_by(
+            &two_tabs_reported(),
+            &two_tabs(),
+            1,
+            at(0, PaneId::Plugin(1)),
+            Some(2),
+        );
         assert_eq!(held, Some(2));
     }
 
     #[test]
     fn a_pane_in_another_tab_is_not_where_they_were_in_this_one() {
-        let held = left_behind_by(&two_tabs(), 1, at(1, PaneId::Terminal(9)), Some(2));
+        let held = left_behind_by(
+            &two_tabs_reported(),
+            &two_tabs(),
+            1,
+            at(1, PaneId::Terminal(9)),
+            Some(2),
+        );
         assert_eq!(held, Some(2));
     }
 
     #[test]
     fn a_sidebar_the_manifest_has_not_placed_yet_holds_what_it_had() {
-        let held = left_behind_by(&two_tabs(), 7, at(0, PaneId::Terminal(3)), Some(2));
+        let held = left_behind_by(
+            &two_tabs_reported(),
+            &two_tabs(),
+            7,
+            at(0, PaneId::Terminal(3)),
+            Some(2),
+        );
         assert_eq!(held, Some(2));
+    }
+
+    #[test]
+    fn a_focus_the_tabs_cannot_place_holds_what_it_had() {
+        let held = left_behind_by(
+            &two_tabs_reported(),
+            &two_tabs(),
+            1,
+            at(9, PaneId::Terminal(3)),
+            None,
+        );
+        assert_eq!(held, None);
     }
 
     #[test]
     fn leaving_a_tab_puts_the_user_back_where_they_were_in_it() {
         // The whole point: zellij returns to a tab's last focused pane, and
         // that must not be the sidebar the user only passed through.
-        assert_eq!(stand_down_to(&two_tabs(), 1, Some(3), 1), Some(3));
+        let going_to = TabPosition::at(1);
+        assert_eq!(stand_down_to(&two_tabs(), 1, Some(3), going_to), Some(3));
     }
 
     #[test]
     fn a_tab_the_user_was_never_seen_in_falls_back_to_its_first_pane() {
-        assert_eq!(stand_down_to(&two_tabs(), 1, None, 1), Some(2));
+        let going_to = TabPosition::at(1);
+        assert_eq!(stand_down_to(&two_tabs(), 1, None, going_to), Some(2));
     }
 
     #[test]
     fn going_somewhere_in_this_tab_leaves_nothing_behind() {
         // The tab is not being left, so what it returns to is not in question.
-        assert_eq!(stand_down_to(&two_tabs(), 1, Some(3), 0), None);
+        let going_to = TabPosition::at(0);
+        assert_eq!(stand_down_to(&two_tabs(), 1, Some(3), going_to), None);
     }
 
     #[test]
     fn a_sidebar_the_manifest_has_not_placed_yet_leaves_nothing_behind() {
-        assert_eq!(stand_down_to(&two_tabs(), 7, Some(3), 1), None);
+        let going_to = TabPosition::at(1);
+        assert_eq!(stand_down_to(&two_tabs(), 7, Some(3), going_to), None);
     }
 
     #[test]
@@ -431,11 +632,11 @@ mod tests {
         };
         let panes = vec![ui, pane(2, "bottom", 10, 0), pane(3, "top", 0, 0)];
         let manifest = manifest(vec![(0, panes), (1, vec![])]);
-        assert_eq!(first_pane(&manifest, 0), Some(3));
+        assert_eq!(first_pane(&manifest, TabPosition::at(0)), Some(3));
         // A tab holding nothing the sidebar lists, and a tab it has not been
         // told about, both have no pane to go to.
-        assert_eq!(first_pane(&manifest, 1), None);
-        assert_eq!(first_pane(&manifest, 9), None);
+        assert_eq!(first_pane(&manifest, TabPosition::at(1)), None);
+        assert_eq!(first_pane(&manifest, TabPosition::at(9)), None);
     }
 
     #[test]
@@ -443,11 +644,11 @@ mod tests {
         // Zellij counts the two kinds separately, so the number alone says
         // nothing about which pane holds the focus.
         let mine = Focus {
-            tab: 0,
+            tab: TabId::new(0),
             pane: PaneId::Plugin(7),
         };
         let theirs = Focus {
-            tab: 0,
+            tab: TabId::new(0),
             pane: PaneId::Terminal(7),
         };
         assert!(mine.is_plugin(7));

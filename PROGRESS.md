@@ -217,6 +217,19 @@ selection bar be drawn by the one sidebar a keystroke would reach: the number
 alone could not, since zellij counts plugin panes and terminal panes in separate
 sequences and the same number is two different panes.
 
+**The tab it answers with is the tab's id, and everything else zellij says about
+tabs is a position.** The two are the same number until a tab that is not the
+last one is closed: ids are handed out as `last + 1` and never reused, while
+`close_tab_by_id` shifts the positions of everything after the tab it removed.
+Three tabs whose middle one has gone are ids 0, 2 and 3 sitting at positions 0, 1
+and 2. `PaneManifest` is keyed by position, `TabInfo.position` is a position, and
+`switch_tab_to` counts positions from one; only the focus is an id, and
+`TabInfo.tab_id` is what turns it back into a position. Reading the id as a
+position drew the wrong tab as the focused one, or no tab at all, and quietly
+moved which sidebar believed it was the one the user was standing in. That is why
+`TabId` and `TabPosition` are separate types: the mistake is a number matching a
+number, and nothing but the type system was ever going to catch it.
+
 **Rendering is all-or-nothing.** Every render reprints the whole pane, so an
 animated indicator at 16fps cost 19% of a core. Turn state is two static glyphs
 for that reason, and the plugin subscribes to no clock.

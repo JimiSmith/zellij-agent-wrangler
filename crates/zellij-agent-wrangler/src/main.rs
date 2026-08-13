@@ -17,14 +17,14 @@ use agent_wrangler_core::agent::{self, Agent, Turn, AGENTS_MESSAGE};
 use agent_wrangler_core::registry::Registry;
 
 use agent_wrangler_ui::frame::{compose, Frame, Note};
-use agent_wrangler_ui::model::{NamedColor, Notification, Row, RowKey};
+use agent_wrangler_ui::model::{NamedColor, Notification, Row, RowKey, TabPosition};
 use agent_wrangler_ui::{ansi, selection, tree, Rect};
 
 use zellij_agent_wrangler::agents;
 use zellij_agent_wrangler::calls::Answered;
 use zellij_agent_wrangler::client::Client;
 use zellij_agent_wrangler::options::Options;
-use zellij_agent_wrangler::session::{self, Focus};
+use zellij_agent_wrangler::session::{self, Focus, TabId};
 
 /// The message the sidebars of one session carry their shared selection in.
 ///
@@ -153,10 +153,14 @@ fn cells(count: usize) -> u16 {
 
 /// Ask zellij where this plugin's client is, which is one synchronous round
 /// trip and the only reading the sidebar does outside its subscriptions.
+///
+/// The tab this answers with is zellij's own id for it rather than where it sits:
+/// see [`TabId`].
 fn focus() -> Option<Focus> {
-    get_focused_pane_info()
-        .ok()
-        .map(|(tab, pane)| Focus { tab, pane })
+    get_focused_pane_info().ok().map(|(tab, pane)| Focus {
+        tab: TabId::new(tab),
+        pane,
+    })
 }
 
 /// What the sidebar says when the hook client reporting to it was built against
@@ -278,8 +282,13 @@ impl State {
     fn resolve_asking(&mut self) -> bool {
         if let Some(fresh) = focus() {
             self.focus = Some(fresh);
-            self.left_behind =
-                session::left_behind_by(&self.panes, self.plugin_id, fresh, self.left_behind);
+            self.left_behind = session::left_behind_by(
+                &self.tabs,
+                &self.panes,
+                self.plugin_id,
+                fresh,
+                self.left_behind,
+            );
         }
         self.answer();
         self.resolve()
@@ -398,7 +407,7 @@ impl State {
     /// current.
     fn is_where_the_user_is(&self) -> bool {
         match session::tab_of_plugin(&self.panes, self.plugin_id) {
-            Some(mine) => self.focus.map(|focus| focus.tab) == Some(mine),
+            Some(mine) => self.focus.and_then(|focus| focus.at(&self.tabs)) == Some(mine),
             None => false,
         }
     }
@@ -477,7 +486,7 @@ impl State {
     fn where_it_is(&self, agent: &Agent) -> String {
         let tab = agents::pane(agent)
             .and_then(|pane| session::tab_of_pane(&self.panes, pane))
-            .and_then(|position| self.tabs.iter().find(|tab| tab.position == position))
+            .and_then(|at| self.tabs.iter().find(|tab| tab.position == at.zero_based()))
             .map(|tab| tab.name.clone())
             .unwrap_or_default();
         let label = agents::label(agent, self.options.view.label);
@@ -542,7 +551,7 @@ impl State {
                 // the sidebar handles them.
                 None => {
                     self.stand_down(position);
-                    switch_tab_to(position as u32 + 1);
+                    switch_tab_to(position.one_based() as u32);
                 }
             },
             // Opening an entry goes where the agent is now. Arriving is what
@@ -578,7 +587,7 @@ impl State {
     ///
     /// Side effect: moves the focus within this tab. Nothing moves when the
     /// destination is this tab, since that leaves nothing behind.
-    fn stand_down(&self, going_to: usize) {
+    fn stand_down(&self, going_to: TabPosition) {
         let back = session::stand_down_to(&self.panes, self.plugin_id, self.left_behind, going_to);
         if let Some(id) = back {
             focus_pane_with_id(PaneId::Terminal(id), false, false);
