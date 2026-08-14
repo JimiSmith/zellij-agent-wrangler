@@ -72,7 +72,7 @@ impl Application {
             Input::User(action) => self.user(action),
             Input::Message(message) => self.message(message),
             Input::Agents(snapshot) => self.adopt(snapshot),
-            Input::EventSettled => self.install_hooks(),
+            Input::EventSettled => self.confirmed_effects(),
         }
     }
 
@@ -164,15 +164,8 @@ impl Application {
         let changed = self.observed_focus != fresh || self.focus_refresh_pending;
         self.focus_refresh_pending = false;
         self.observed_focus = fresh;
-        let reconciled = self.reconciled_session();
-        if let session::ReconciledFocus::Confirmed(fresh) = &reconciled.focus {
-            self.left_behind =
-                session::left_behind_by(&self.tabs, &self.panes, fresh, self.left_behind.clone());
-        }
-        let mut decision = Decision::default();
-        let answered = self.answer(&mut decision);
-        self.leave_if_alone(&reconciled.tabs, &mut decision);
-        decision.request_repaint(changed | answered);
+        let mut decision = self.confirmed_effects();
+        decision.request_repaint(changed);
         decision
     }
 
@@ -224,28 +217,14 @@ impl Application {
         self.run("register", &borrowed, decision);
     }
 
-    fn is_where_the_user_is(&self) -> bool {
-        match (self.panes.sidebar_tab, self.observed_focus.as_ref()) {
-            (Some(mine), Some(focus)) => session::position_of(&self.tabs, &focus.tab) == Some(mine),
-            _ => false,
-        }
-    }
-
-    fn answer(&mut self, decision: &mut Decision) -> bool {
-        let Some(pane) = self
-            .observed_focus
-            .as_ref()
-            .and_then(|focus| match &focus.target {
-                FocusTarget::Content(pane) => Some(pane.clone()),
-                FocusTarget::Sidebar | FocusTarget::Other => None,
-            })
-        else {
+    fn answer(&mut self, focus: &Focus, decision: &mut Decision) -> bool {
+        let FocusTarget::Content(pane) = &focus.target else {
             return false;
         };
         let calling: Vec<Agent> = self
             .registry
             .iter()
-            .filter(|agent| self.agent_panes.get(&agent.session) == Some(&pane))
+            .filter(|agent| self.agent_panes.get(&agent.session) == Some(pane))
             .filter(|agent| agent.turn == Turn::Attention)
             .cloned()
             .collect();
@@ -254,7 +233,7 @@ impl Application {
             self.answered.answer(agent);
             changed |= self.registry.seen(&agent.session);
         }
-        if self.allowed() && self.is_where_the_user_is() {
+        if self.allowed() {
             for agent in &calling {
                 self.run("seen", &["seen", agent.session.as_str()], decision);
             }
@@ -291,6 +270,21 @@ impl Application {
         resolved
     }
 
+    fn confirmed_effects(&mut self) -> Decision {
+        let resolved = self.reconciled_session();
+        let session::ReconciledFocus::Confirmed(focus) = resolved.focus else {
+            return Decision::default();
+        };
+        self.left_behind =
+            session::left_behind_by(&self.tabs, &self.panes, &focus, self.left_behind.clone());
+        let mut decision = Decision::default();
+        let answered = self.answer(&focus, &mut decision);
+        self.leave_if_alone(&resolved.tabs, &mut decision);
+        self.install_hooks(&mut decision);
+        decision.request_repaint(answered);
+        decision
+    }
+
     fn leave_if_alone(&mut self, resolved: &[tree::Tab], decision: &mut Decision) {
         let Some(mine) = self.panes.sidebar_tab else {
             return;
@@ -305,21 +299,15 @@ impl Application {
         }
     }
 
-    fn install_hooks(&mut self) -> Decision {
-        if self.options.install_hooks.is_none()
-            || self.installed
-            || !self.allowed()
-            || !self.is_where_the_user_is()
-        {
-            return Decision::default();
+    fn install_hooks(&mut self, decision: &mut Decision) {
+        if self.options.install_hooks.is_none() || self.installed || !self.allowed() {
+            return;
         }
         self.installed = true;
-        let mut decision = Decision::default();
-        self.run("install-hooks", &["install-hooks"], &mut decision);
+        self.run("install-hooks", &["install-hooks"], decision);
         decision
             .effects
             .push(Effect::Broadcast(Broadcast::HooksInstalled));
-        decision
     }
 
     fn adopt(&mut self, snapshot: AgentSnapshot) -> Decision {
@@ -335,11 +323,8 @@ impl Application {
                 self.registry = registry;
                 self.agent_panes = panes;
                 changed |= self.suppress();
-                let mut decision = Decision::default();
-                changed |= self.answer(&mut decision);
+                let mut decision = self.confirmed_effects();
                 self.answered.prune(&self.registry);
-                let resolved = self.reconciled_session();
-                self.leave_if_alone(&resolved.tabs, &mut decision);
                 decision.request_repaint(changed);
                 decision
             }
@@ -808,6 +793,7 @@ mod tests {
             ..Options::default()
         };
         let mut app = Application::new(options, "zellij");
+        app.reduce(Input::VisibilityChanged(true));
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
         app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
         app.reduce(focus("10", FocusTarget::Sidebar));
@@ -819,6 +805,33 @@ mod tests {
             [Effect::Run(_), Effect::Broadcast(Broadcast::HooksInstalled)]
         ));
         assert!(app.reduce(Input::EventSettled).effects.is_empty());
+    }
+
+    #[test]
+    fn hook_installation_waits_for_confirmed_visible_focus() {
+        let options = Options {
+            install_hooks: Some("agent-wrangler".to_string()),
+            ..Options::default()
+        };
+        let mut app = Application::new(options, "zellij");
+        app.reduce(Input::VisibilityChanged(true));
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(Input::PermissionReported(Permission::Granted));
+
+        assert_eq!(app.reduce(Input::EventSettled), Decision::default());
+        assert!(!app.installed);
+
+        let confirmed = app.reduce(focus("10", FocusTarget::Sidebar));
+        assert!(matches!(
+            confirmed.effects.as_slice(),
+            [
+                Effect::Run(_),
+                Effect::Broadcast(Broadcast::HooksInstalled),
+                Effect::Repaint
+            ]
+        ));
+        assert!(app.installed);
     }
 
     #[test]
@@ -904,6 +917,58 @@ mod tests {
     }
 
     #[test]
+    fn a_call_waits_for_pending_focus_to_be_confirmed() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(Input::PermissionReported(Permission::Granted));
+        app.reduce(focus("10", FocusTarget::Content(PaneId::new("7"))));
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        let session = SessionId::new("call").unwrap();
+
+        let pending = app.reduce(Input::Agents(agents(&[("call", "7", Turn::Attention)])));
+        assert!(!pending.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Run(Command { call, .. }) if call == "seen"
+        )));
+        assert_eq!(app.registry.get(&session).unwrap().turn, Turn::Attention);
+
+        let confirmed = app.reduce(focus("10", FocusTarget::Content(PaneId::new("7"))));
+        assert!(confirmed.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Run(Command { call, args, .. }) if call == "seen" && args == &["seen", "call"]
+        )));
+        assert_eq!(app.registry.get(&session).unwrap().turn, Turn::Idle);
+        assert!(!app
+            .reduce(focus("10", FocusTarget::Content(PaneId::new("7"))))
+            .effects
+            .iter()
+            .any(|effect| matches!(
+                effect,
+                Effect::Run(Command { call, .. }) if call == "seen"
+            )));
+    }
+
+    #[test]
+    fn a_hidden_sidebar_does_not_answer_from_stale_focus() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(Input::PermissionReported(Permission::Granted));
+        app.reduce(focus("10", FocusTarget::Content(PaneId::new("7"))));
+        app.reduce(Input::VisibilityChanged(false));
+        let session = SessionId::new("call").unwrap();
+
+        let decision = app.reduce(Input::Agents(agents(&[("call", "7", Turn::Attention)])));
+        assert!(!decision.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Run(Command { call, .. }) if call == "seen"
+        )));
+        assert_eq!(app.registry.get(&session).unwrap().turn, Turn::Attention);
+        assert!(app.answered.settled(&app.registry).is_empty());
+    }
+
+    #[test]
     fn a_sidebar_closes_only_after_its_tab_has_had_company() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
@@ -912,6 +977,38 @@ mod tests {
         app.reduce(Input::PanesReported(snapshot(0, &[(0, &[])])));
         let decision = app.reduce(focus("10", FocusTarget::Sidebar));
         assert!(decision.effects.contains(&Effect::CloseSidebar));
+    }
+
+    #[test]
+    fn an_empty_tab_does_not_close_while_topology_is_pending() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        assert!(app.had_company);
+
+        let report = app.reduce(Input::PanesReported(snapshot(0, &[(0, &[])])));
+        assert!(!report.effects.contains(&Effect::CloseSidebar));
+        assert!(!app
+            .reduce(Input::EventSettled)
+            .effects
+            .contains(&Effect::CloseSidebar));
+
+        let confirmed = app.reduce(focus("10", FocusTarget::Sidebar));
+        assert!(confirmed.effects.contains(&Effect::CloseSidebar));
+    }
+
+    #[test]
+    fn company_is_recorded_only_from_confirmed_topology() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+
+        app.reduce(Input::EventSettled);
+        assert!(!app.had_company);
+
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        assert!(app.had_company);
     }
 
     #[test]
