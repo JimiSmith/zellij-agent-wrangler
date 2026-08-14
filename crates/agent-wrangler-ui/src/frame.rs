@@ -6,10 +6,9 @@
 //! regions are navigated in one order, and every line of a notification entry
 //! carries that entry's key, so a click anywhere in it selects the same thing.
 //!
-//! How many lines an entry takes depends on the width, which is why this is
-//! composed at paint time rather than held: the tree above it is resolved when
-//! the session changes, and neither knows what the other needs until there is a
-//! pane to divide.
+//! How many lines an entry takes depends on the width, which is why the entire
+//! frame is composed together for each paint. Neither region knows what the
+//! other needs until there is a pane to divide.
 
 use ratatui_core::layout::Rect;
 

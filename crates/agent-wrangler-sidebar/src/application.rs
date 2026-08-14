@@ -4,14 +4,15 @@ use agent_wrangler_core::agent::{Agent, SessionId, Turn};
 use agent_wrangler_core::label::label;
 use agent_wrangler_core::registry::Registry;
 use agent_wrangler_ui::frame::{compose, Frame, Note};
-use agent_wrangler_ui::model::{NamedColor, Notification, PaneId, Row, RowKey, TabPosition};
+use agent_wrangler_ui::model::{NamedColor, Notification, PaneId, RowKey, TabPosition};
 use agent_wrangler_ui::{selection, tree, Rect};
 
 use crate::calls::Answered;
 use crate::client::Client;
 use crate::model::{
-    AgentSnapshot, Broadcast, Command, Decision, Effect, Focus, FocusTarget, Input, PaneSnapshot,
-    Permission, RenderedView, TabId, TabReport, UserAction,
+    AgentSnapshot, Broadcast, Command, Decision, Effect, Focus, FocusTarget, Input,
+    InteractionItem, PaneSnapshot, Permission, RenderedView, TabId, TabReport, UserAction,
+    ViewAction,
 };
 use crate::options::Options;
 use crate::session;
@@ -26,8 +27,6 @@ pub struct Application {
     multiplexer: String,
     tabs: Vec<TabReport>,
     panes: PaneSnapshot,
-    rows: Vec<Row>,
-    notices: Vec<Notification>,
     registry: Registry,
     agent_panes: BTreeMap<SessionId, PaneId>,
     answered: Answered,
@@ -36,13 +35,12 @@ pub struct Application {
     registered: bool,
     selected: Option<RowKey>,
     permission: Option<Permission>,
-    painted: Vec<Option<RowKey>>,
+    rendered: Option<RenderedView>,
     focus: Option<Focus>,
     left_behind: Option<PaneId>,
     had_company: bool,
     installed: bool,
     mismatched: bool,
-    focused: bool,
 }
 
 impl Application {
@@ -59,24 +57,34 @@ impl Application {
     pub fn reduce(&mut self, input: Input) -> Decision {
         match input {
             Input::TabsReported(tabs) => {
+                let changed = self.tabs != tabs;
                 self.tabs = tabs;
-                Decision::effect(Effect::RefreshFocus)
+                let mut decision = Decision::effect(Effect::RefreshFocus);
+                decision.request_repaint(changed);
+                decision
             }
             Input::PanesReported(panes) => {
+                let changed = self.panes != panes;
                 self.panes = panes;
-                Decision::effect(Effect::RefreshFocus)
+                let mut decision = Decision::effect(Effect::RefreshFocus);
+                decision.request_repaint(changed);
+                decision
             }
             Input::PaneChanged(pane) => Decision::effect(Effect::RefreshPaneTitle(pane)),
             Input::PaneTitleObserved { pane, title } => match title {
                 Some(title) => {
+                    let mut changed = false;
                     for tab in &mut self.panes.tabs {
                         for candidate in &mut tab.panes {
-                            if candidate.id == pane {
+                            if candidate.id == pane && candidate.title != title {
                                 candidate.title = title.clone();
+                                changed = true;
                             }
                         }
                     }
-                    Decision::effect(Effect::RefreshFocus)
+                    let mut decision = Decision::effect(Effect::RefreshFocus);
+                    decision.request_repaint(changed);
+                    decision
                 }
                 None => Decision::default(),
             },
@@ -88,15 +96,19 @@ impl Application {
                 decision
             }
             Input::PermissionReported(permission) => {
+                let changed = self.permission != Some(permission);
                 self.permission = Some(permission);
-                let mut decision = Decision::repaint();
+                let mut decision = Decision::default();
+                decision.request_repaint(changed);
                 self.register(&mut decision);
                 decision
             }
-            Input::CommandFinished { exit, stderr, call } => Decision {
-                repaint: self.ran(exit, &stderr, &call),
-                effects: Vec::new(),
-            },
+            Input::CommandFinished { exit, stderr, call } => {
+                let changed = self.ran(exit, &stderr, &call);
+                let mut decision = Decision::default();
+                decision.request_repaint(changed);
+                decision
+            }
             Input::User(action) => self.user(action),
             Input::Message(message) => self.message(message),
             Input::Agents(snapshot) => self.adopt(snapshot),
@@ -109,10 +121,9 @@ impl Application {
     }
 
     pub fn render(&mut self, area: Rect) -> RenderedView {
-        let frame = self.frame(area);
-        self.painted = frame.keys();
-        let selection = self.focused.then(|| self.selection()).flatten();
-        RenderedView { frame, selection }
+        let rendered = self.view(area);
+        self.rendered = Some(rendered.clone());
+        rendered
     }
 
     pub fn session_name(&self) -> Option<&str> {
@@ -128,14 +139,18 @@ impl Application {
     }
 
     fn observe_focus(&mut self, fresh: Option<Focus>) -> Decision {
+        let mut changed = false;
         if let Some(fresh) = fresh {
+            changed = self.focus.as_ref() != Some(&fresh);
             self.left_behind =
                 session::left_behind_by(&self.tabs, &self.panes, &fresh, self.left_behind.clone());
             self.focus = Some(fresh);
         }
         let mut decision = Decision::default();
         let answered = self.answer(&mut decision);
-        decision.repaint = answered | self.resolve(&mut decision);
+        let resolved = self.session();
+        self.leave_if_alone(&resolved, &mut decision);
+        decision.request_repaint(changed | answered);
         decision
     }
 
@@ -226,9 +241,8 @@ impl Application {
         changed
     }
 
-    fn resolve(&mut self, decision: &mut Decision) -> bool {
+    fn session(&self) -> Vec<tree::Tab> {
         let mut resolved = session::session(&self.tabs, &self.panes, self.focus.as_ref());
-        self.leave_if_alone(&resolved, decision);
         for tab in &mut resolved {
             for pane in &mut tab.panes {
                 pane.agents = self
@@ -239,18 +253,7 @@ impl Application {
                     .collect();
             }
         }
-        let rows = tree::build_tree(&resolved, &self.options.view);
-        let notices = self.notifications();
-        let focused = self
-            .focus
-            .as_ref()
-            .map(|focus| focus.target == FocusTarget::Sidebar)
-            == Some(true);
-        let changed = rows != self.rows || notices != self.notices || focused != self.focused;
-        self.rows = rows;
-        self.notices = notices;
-        self.focused = focused;
-        changed
+        resolved
     }
 
     fn leave_if_alone(&mut self, resolved: &[tree::Tab], decision: &mut Decision) {
@@ -286,10 +289,9 @@ impl Application {
         match snapshot {
             AgentSnapshot::Incompatible => {
                 let changed = !std::mem::replace(&mut self.mismatched, true);
-                Decision {
-                    repaint: changed,
-                    effects: Vec::new(),
-                }
+                let mut decision = Decision::default();
+                decision.request_repaint(changed);
+                decision
             }
             AgentSnapshot::Compatible { registry, panes } => {
                 let mut changed = self.registry != registry || self.agent_panes != panes;
@@ -299,7 +301,9 @@ impl Application {
                 let mut decision = Decision::default();
                 changed |= self.answer(&mut decision);
                 self.answered.prune(&self.registry);
-                decision.repaint = changed && self.resolve(&mut decision);
+                let resolved = self.session();
+                self.leave_if_alone(&resolved, &mut decision);
+                decision.request_repaint(changed);
                 decision
             }
         }
@@ -308,21 +312,20 @@ impl Application {
     fn user(&mut self, action: UserAction) -> Decision {
         let mut decision = Decision::default();
         match action {
-            UserAction::Next => {
-                self.step(1, &mut decision);
-                decision.repaint = true;
-            }
-            UserAction::Previous => {
-                self.step(-1, &mut decision);
-                decision.repaint = true;
-            }
+            UserAction::Next => self.step(1, &mut decision),
+            UserAction::Previous => self.step(-1, &mut decision),
             UserAction::Activate => self.activate(&mut decision),
             UserAction::Quit => decision.effects.push(Effect::Broadcast(Broadcast::Off)),
             UserAction::Click(line) => {
-                if let Some(Some(key)) = self.painted.get(line).cloned() {
-                    self.select(Some(key), &mut decision);
-                    self.activate(&mut decision);
-                    decision.repaint = true;
+                let item = self
+                    .rendered
+                    .as_ref()
+                    .and_then(|view| view.item_at(line))
+                    .cloned();
+                if let Some(item) = item {
+                    self.select(Some(item.key), &mut decision);
+                    self.activate_action(&item.action, &mut decision);
+                    decision.request_repaint(true);
                 }
             }
         }
@@ -337,15 +340,13 @@ impl Application {
                 Decision::default()
             }
             Broadcast::Selection(key) => {
+                let changed = self.selected.as_ref() != Some(&key);
                 self.selected = Some(key);
-                Decision::repaint()
+                let mut decision = Decision::default();
+                decision.request_repaint(changed);
+                decision
             }
         }
-    }
-
-    fn selection(&self) -> Option<RowKey> {
-        let keys = selection::keys(&self.rows, &self.registry, &self.options.view);
-        selection::selected(&keys, self.selected.as_ref())
     }
 
     fn select(&mut self, key: Option<RowKey>, decision: &mut Decision) {
@@ -358,44 +359,61 @@ impl Application {
     }
 
     fn step(&mut self, step: isize, decision: &mut Decision) {
-        let mut keys = Vec::new();
-        for key in self.painted.iter().flatten() {
-            if keys.last() != Some(key) {
-                keys.push(key.clone());
-            }
-        }
-        let selection = self.selection();
-        let Some(at) = keys.iter().position(|key| Some(key) == selection.as_ref()) else {
-            self.select(keys.first().cloned(), decision);
+        let Some(view) = self.rendered.as_ref() else {
             return;
         };
-        let next = (at as isize + step).clamp(0, keys.len() as isize - 1) as usize;
-        self.select(keys.get(next).cloned(), decision);
+        let items = view.selectable_items();
+        let selection = view.selection.as_ref();
+        let next = match items.iter().position(|item| Some(&item.key) == selection) {
+            Some(at) => (at as isize + step).clamp(0, items.len() as isize - 1) as usize,
+            None => 0,
+        };
+        let key = items.get(next).map(|item| item.key.clone());
+        if key.is_some() {
+            self.select(key, decision);
+            decision.request_repaint(true);
+        }
     }
 
     fn activate(&self, decision: &mut Decision) {
-        match self.selection() {
-            Some(RowKey::Pane(pane)) => self.go_to_pane(pane, decision),
-            Some(RowKey::Tab(tab)) => {
-                let Some(position) = self.tab_position(&tab) else {
+        let action = self
+            .rendered
+            .as_ref()
+            .and_then(RenderedView::selected_item)
+            .map(|item| item.action.clone());
+        if let Some(action) = action {
+            self.activate_action(&action, decision);
+        }
+    }
+
+    fn activate_action(&self, action: &ViewAction, decision: &mut Decision) {
+        match action {
+            ViewAction::ActivatePane(pane) => {
+                if session::tab_of_pane(&self.panes, pane).is_some() {
+                    self.go_to_pane(pane.clone(), decision);
+                }
+            }
+            ViewAction::ActivateTab(tab) => {
+                let Some(position) = self.tab_position(tab) else {
                     return;
                 };
                 match session::first_pane(&self.panes, position) {
                     Some(pane) => self.go_to_pane(pane, decision),
                     None => {
                         self.stand_down(position, decision);
-                        decision.effects.push(Effect::SwitchTab(tab));
+                        decision.effects.push(Effect::SwitchTab(tab.clone()));
                     }
                 }
             }
-            Some(RowKey::Agent(agent))
-            | Some(RowKey::Section(agent))
-            | Some(RowKey::Notification(agent)) => {
-                if let Some(pane) = self.agent_panes.get(&agent) {
-                    self.go_to_pane(pane.clone(), decision);
+            ViewAction::ActivateAgent(agent) => {
+                if self.registry.get(agent).is_some() {
+                    if let Some(pane) = self.agent_panes.get(agent) {
+                        if session::tab_of_pane(&self.panes, pane).is_some() {
+                            self.go_to_pane(pane.clone(), decision);
+                        }
+                    }
                 }
             }
-            None => {}
         }
     }
 
@@ -442,6 +460,28 @@ impl Application {
         }
     }
 
+    fn view(&self, area: Rect) -> RenderedView {
+        let frame = self.frame(area);
+        let interactions: Vec<Option<InteractionItem>> = frame
+            .lines()
+            .iter()
+            .map(|row| row.key.as_ref().map(interaction))
+            .collect();
+        let visible = selection::keys(frame.lines());
+        let focused = self
+            .focus
+            .as_ref()
+            .is_some_and(|focus| focus.target == FocusTarget::Sidebar);
+        let selection = focused
+            .then(|| selection::selected(&visible, self.selected.as_ref()))
+            .flatten();
+        RenderedView {
+            frame,
+            interactions,
+            selection,
+        }
+    }
+
     fn frame(&self, area: Rect) -> Frame {
         if self.permission == Some(Permission::Denied) {
             return compose(
@@ -469,7 +509,23 @@ impl Application {
                 text,
             });
         }
-        compose(&notes, &self.rows, &self.notices, area, &self.options.view)
+        let rows = tree::build_tree(&self.session(), &self.options.view);
+        let notices = self.notifications();
+        compose(&notes, &rows, &notices, area, &self.options.view)
+    }
+}
+
+fn interaction(key: &RowKey) -> InteractionItem {
+    let action = match key {
+        RowKey::Tab(tab) => ViewAction::ActivateTab(tab.clone()),
+        RowKey::Pane(pane) => ViewAction::ActivatePane(pane.clone()),
+        RowKey::Agent(agent) | RowKey::Section(agent) | RowKey::Notification(agent) => {
+            ViewAction::ActivateAgent(agent.clone())
+        }
+    };
+    InteractionItem {
+        key: key.clone(),
+        action,
     }
 }
 
@@ -488,6 +544,7 @@ mod tests {
     use crate::model::{PaneReport, TabId, TabPanes};
     use agent_wrangler_core::agent::Meta;
     use agent_wrangler_core::origin::Origin;
+    use agent_wrangler_ui::ansi;
 
     fn tab(id: &str, position: usize) -> TabReport {
         TabReport {
@@ -529,16 +586,53 @@ mod tests {
         Application::new(Options::default(), "tmux")
     }
 
+    fn agent(id: &str, turn: Turn) -> Agent {
+        let mut agent = Agent::new(
+            SessionId::new(id).unwrap(),
+            "claude",
+            Meta::default(),
+            Origin::default(),
+        );
+        agent.turn = turn;
+        agent.raised = 1;
+        agent
+    }
+
+    fn agents(entries: &[(&str, &str, Turn)]) -> AgentSnapshot {
+        let mut registry = Registry::default();
+        let mut panes = BTreeMap::new();
+        for (id, pane, turn) in entries {
+            let agent = agent(id, *turn);
+            panes.insert(agent.session.clone(), PaneId::new(*pane));
+            registry.report(agent);
+        }
+        AgentSnapshot::Compatible { registry, panes }
+    }
+
+    fn repaints(decision: &Decision) -> bool {
+        decision.effects.contains(&Effect::Repaint)
+    }
+
     #[test]
     fn reports_store_facts_and_request_focus_as_an_effect() {
         let mut app = app();
         let decision = app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        assert_eq!(decision, Decision::effect(Effect::RefreshFocus));
+        assert_eq!(
+            decision,
+            Decision {
+                effects: vec![Effect::RefreshFocus, Effect::Repaint],
+            }
+        );
         assert_eq!(app.tabs[0].id, TabId::new("10"));
 
         let panes = snapshot(0, &[(0, &["%7"])]);
         let decision = app.reduce(Input::PanesReported(panes.clone()));
-        assert_eq!(decision, Decision::effect(Effect::RefreshFocus));
+        assert_eq!(
+            decision,
+            Decision {
+                effects: vec![Effect::RefreshFocus, Effect::Repaint],
+            }
+        );
         assert_eq!(app.panes, panes);
     }
 
@@ -607,8 +701,8 @@ mod tests {
         )));
         app.reduce(focus("10", FocusTarget::Content(PaneId::new("1"))));
         app.reduce(focus("10", FocusTarget::Sidebar));
-        app.render(Rect::new(0, 0, 30, 10));
         app.selected = Some(RowKey::Pane(PaneId::new("2")));
+        app.render(Rect::new(0, 0, 30, 10));
 
         let decision = app.reduce(Input::User(UserAction::Activate));
         assert_eq!(
@@ -628,12 +722,13 @@ mod tests {
         app.reduce(focus("10", FocusTarget::Content(PaneId::new("1"))));
         app.reduce(focus("10", FocusTarget::Sidebar));
         app.selected = Some(RowKey::Tab(TabId::new("20")));
+        let rendered = app.render(Rect::new(0, 0, 30, 10));
+        assert_eq!(rendered.selection, Some(RowKey::Tab(TabId::new("20"))));
 
         app.reduce(Input::TabsReported(vec![tab("20", 0), tab("10", 1)]));
         app.reduce(Input::PanesReported(snapshot(1, &[(0, &[]), (1, &["1"])])));
         app.reduce(focus("10", FocusTarget::Sidebar));
 
-        assert_eq!(app.selection(), Some(RowKey::Tab(TabId::new("20"))));
         assert_eq!(
             app.tab_position(&TabId::new("20")),
             Some(TabPosition::at(0))
@@ -700,32 +795,141 @@ mod tests {
     }
 
     #[test]
+    fn equal_state_and_area_produce_equal_views_and_ansi() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["1"])])));
+        app.reduce(focus("10", FocusTarget::Sidebar));
+
+        let first = app.render(Rect::new(0, 0, 30, 8));
+        let second = app.render(Rect::new(0, 0, 30, 8));
+        assert_eq!(first, second);
+        assert_eq!(
+            ansi::pane(&first.frame, first.selection.as_ref()),
+            ansi::pane(&second.frame, second.selection.as_ref())
+        );
+    }
+
+    #[test]
+    fn only_items_that_fit_in_the_frame_are_interactive() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
+        app.reduce(Input::PanesReported(snapshot(
+            0,
+            &[(0, &["1"]), (1, &["2"])],
+        )));
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        app.reduce(Input::Agents(agents(&[("call", "1", Turn::Attention)])));
+
+        let rendered = app.render(Rect::new(0, 0, 30, 2));
+        let keys: Vec<&RowKey> = rendered
+            .selectable_items()
+            .into_iter()
+            .map(|item| &item.key)
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                &RowKey::Tab(TabId::new("10")),
+                &RowKey::Agent(SessionId::new("call").unwrap()),
+            ]
+        );
+        assert!(!rendered.interactions.iter().flatten().any(|item| matches!(
+            item.key,
+            RowKey::Tab(ref tab) if tab == &TabId::new("20")
+        )));
+        assert!(!rendered
+            .interactions
+            .iter()
+            .flatten()
+            .any(|item| matches!(item.key, RowKey::Notification(_))));
+    }
+
+    #[test]
+    fn navigation_deduplicates_wrapped_notifications_in_screen_order() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["1", "2"])])));
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        app.reduce(Input::Agents(agents(&[
+            ("first", "1", Turn::Attention),
+            ("second", "2", Turn::Attention),
+        ])));
+        let first = SessionId::new("first").unwrap();
+        let second = SessionId::new("second").unwrap();
+        app.selected = Some(RowKey::Notification(first.clone()));
+
+        let rendered = app.render(Rect::new(0, 0, 30, 28));
+        let notifications: Vec<&InteractionItem> = rendered
+            .selectable_items()
+            .into_iter()
+            .filter(|item| matches!(item.key, RowKey::Notification(_)))
+            .collect();
+        assert_eq!(notifications.len(), 2);
+        assert_eq!(
+            notifications
+                .iter()
+                .map(|item| &item.key)
+                .collect::<Vec<_>>(),
+            vec![
+                &RowKey::Notification(first),
+                &RowKey::Notification(second.clone()),
+            ]
+        );
+
+        let decision = app.reduce(Input::User(UserAction::Next));
+        assert_eq!(
+            decision.effects,
+            vec![
+                Effect::Broadcast(Broadcast::Selection(RowKey::Notification(second))),
+                Effect::Repaint,
+            ]
+        );
+    }
+
+    #[test]
+    fn resizing_replaces_the_line_interaction_map() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
+        app.reduce(Input::PanesReported(snapshot(
+            0,
+            &[(0, &["1"]), (1, &["2"])],
+        )));
+        app.reduce(focus("10", FocusTarget::Sidebar));
+
+        let short = app.render(Rect::new(0, 0, 30, 2));
+        assert_eq!(short.interactions.len(), 2);
+        assert!(short
+            .selectable_items()
+            .iter()
+            .all(|item| item.key != RowKey::Tab(TabId::new("20"))));
+
+        let tall = app.render(Rect::new(0, 0, 30, 8));
+        assert_eq!(tall.interactions.len(), 8);
+        assert!(tall
+            .selectable_items()
+            .iter()
+            .any(|item| item.key == RowKey::Tab(TabId::new("20"))));
+    }
+
+    #[test]
     fn command_results_change_only_the_client_state_and_repaint_decision() {
         let mut app = app();
-        assert!(
-            app.reduce(Input::CommandFinished {
-                exit: Some(0),
-                stderr: Vec::new(),
-                call: "register".to_string(),
-            })
-            .repaint
-        );
-        assert!(
-            !app.reduce(Input::CommandFinished {
-                exit: Some(0),
-                stderr: Vec::new(),
-                call: "register".to_string(),
-            })
-            .repaint
-        );
-        assert!(
-            app.reduce(Input::CommandFinished {
-                exit: None,
-                stderr: b"busy\nmore detail".to_vec(),
-                call: "seen".to_string(),
-            })
-            .repaint
-        );
+        assert!(repaints(&app.reduce(Input::CommandFinished {
+            exit: Some(0),
+            stderr: Vec::new(),
+            call: "register".to_string(),
+        })));
+        assert!(!repaints(&app.reduce(Input::CommandFinished {
+            exit: Some(0),
+            stderr: Vec::new(),
+            call: "register".to_string(),
+        })));
+        assert!(repaints(&app.reduce(Input::CommandFinished {
+            exit: None,
+            stderr: b"busy\nmore detail".to_vec(),
+            call: "seen".to_string(),
+        })));
         assert_eq!(app.client.why(), None, "one transient failure is tolerated");
     }
 
@@ -734,8 +938,7 @@ mod tests {
         let mut app = app();
         let selected = RowKey::Pane(PaneId::new("%7"));
         let decision = app.reduce(Input::Message(Broadcast::Selection(selected.clone())));
-        assert!(decision.repaint);
-        assert!(decision.effects.is_empty());
+        assert_eq!(decision.effects, vec![Effect::Repaint]);
         assert_eq!(app.selected, Some(selected));
 
         assert_eq!(
@@ -769,9 +972,169 @@ mod tests {
             vec![
                 Effect::Broadcast(Broadcast::Selection(RowKey::Pane(PaneId::new("%7")))),
                 Effect::FocusPane(PaneId::new("%7")),
+                Effect::Repaint,
             ]
         );
-        assert!(decision.repaint);
+    }
+
+    #[test]
+    fn clicks_keep_the_last_rendered_meaning_until_repaint() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("old-tab", 0)]));
+        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["old-pane"])])));
+        app.reduce(focus("old-tab", FocusTarget::Sidebar));
+        app.render(Rect::new(0, 0, 30, 5));
+
+        app.reduce(Input::TabsReported(vec![tab("new-tab", 0)]));
+        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["new-pane"])])));
+        app.reduce(focus("new-tab", FocusTarget::Sidebar));
+        let decision = app.reduce(Input::User(UserAction::Click(1)));
+
+        assert_eq!(
+            decision.effects,
+            vec![
+                Effect::Broadcast(Broadcast::Selection(RowKey::Pane(PaneId::new("old-pane",)))),
+                Effect::Repaint,
+            ]
+        );
+    }
+
+    #[test]
+    fn interaction_before_the_first_render_is_a_no_op() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["1"])])));
+        app.reduce(focus("10", FocusTarget::Sidebar));
+
+        for action in [
+            UserAction::Next,
+            UserAction::Previous,
+            UserAction::Activate,
+            UserAction::Click(0),
+        ] {
+            assert_eq!(app.reduce(Input::User(action)), Decision::default());
+        }
+    }
+
+    #[test]
+    fn peer_selection_changes_interaction_only_after_rendering() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
+        app.reduce(Input::PanesReported(snapshot(
+            0,
+            &[(0, &["1"]), (1, &["2"])],
+        )));
+        app.reduce(focus("10", FocusTarget::Content(PaneId::new("1"))));
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        app.selected = Some(RowKey::Tab(TabId::new("10")));
+        app.render(Rect::new(0, 0, 30, 8));
+
+        app.reduce(Input::Message(Broadcast::Selection(RowKey::Pane(
+            PaneId::new("2"),
+        ))));
+        assert_eq!(
+            app.reduce(Input::User(UserAction::Activate)).effects,
+            vec![Effect::FocusPane(PaneId::new("1"))]
+        );
+
+        let rendered = app.render(Rect::new(0, 0, 30, 8));
+        assert_eq!(rendered.selection, Some(RowKey::Pane(PaneId::new("2"))));
+        assert_eq!(
+            app.reduce(Input::User(UserAction::Activate)).effects,
+            vec![
+                Effect::FocusPane(PaneId::new("1")),
+                Effect::FocusPane(PaneId::new("2")),
+            ]
+        );
+    }
+
+    #[test]
+    fn stale_tab_pane_and_agent_actions_are_safe_no_ops() {
+        let mut tab_app = app();
+        tab_app.reduce(Input::TabsReported(vec![tab("old", 0)]));
+        tab_app.reduce(Input::PanesReported(snapshot(0, &[(0, &[])])));
+        tab_app.reduce(focus("old", FocusTarget::Sidebar));
+        tab_app.render(Rect::new(0, 0, 30, 4));
+        tab_app.reduce(Input::TabsReported(vec![tab("replacement", 0)]));
+        assert!(tab_app
+            .reduce(Input::User(UserAction::Activate))
+            .effects
+            .is_empty());
+
+        let mut pane_app = app();
+        pane_app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        pane_app.reduce(Input::PanesReported(snapshot(0, &[(0, &["old"])])));
+        pane_app.reduce(focus("10", FocusTarget::Sidebar));
+        pane_app.selected = Some(RowKey::Pane(PaneId::new("old")));
+        pane_app.render(Rect::new(0, 0, 30, 4));
+        pane_app.reduce(Input::PanesReported(snapshot(0, &[(0, &["replacement"])])));
+        assert!(pane_app
+            .reduce(Input::User(UserAction::Activate))
+            .effects
+            .is_empty());
+
+        let mut agent_app = app();
+        agent_app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        agent_app.reduce(Input::PanesReported(snapshot(0, &[(0, &["1"])])));
+        agent_app.reduce(focus("10", FocusTarget::Sidebar));
+        let session = SessionId::new("agent").unwrap();
+        agent_app.reduce(Input::Agents(agents(&[("agent", "1", Turn::Idle)])));
+        agent_app.selected = Some(RowKey::Agent(session));
+        agent_app.render(Rect::new(0, 0, 30, 4));
+        agent_app.reduce(Input::Agents(AgentSnapshot::Compatible {
+            registry: Registry::default(),
+            panes: BTreeMap::new(),
+        }));
+        assert!(agent_app
+            .reduce(Input::User(UserAction::Activate))
+            .effects
+            .is_empty());
+    }
+
+    #[test]
+    fn moved_panes_and_agents_resolve_by_stable_id() {
+        let mut pane_app = app();
+        pane_app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
+        pane_app.reduce(Input::PanesReported(snapshot(
+            0,
+            &[(0, &["held", "moving"]), (1, &[])],
+        )));
+        pane_app.reduce(focus("10", FocusTarget::Content(PaneId::new("held"))));
+        pane_app.reduce(focus("10", FocusTarget::Sidebar));
+        pane_app.selected = Some(RowKey::Pane(PaneId::new("moving")));
+        pane_app.render(Rect::new(0, 0, 30, 8));
+        pane_app.reduce(Input::PanesReported(snapshot(
+            0,
+            &[(0, &["held"]), (1, &["moving"])],
+        )));
+        assert_eq!(
+            pane_app.reduce(Input::User(UserAction::Activate)).effects,
+            vec![
+                Effect::FocusPane(PaneId::new("held")),
+                Effect::FocusPane(PaneId::new("moving")),
+            ]
+        );
+
+        let mut agent_app = app();
+        agent_app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
+        agent_app.reduce(Input::PanesReported(snapshot(
+            0,
+            &[(0, &["held", "old-host"]), (1, &["new-host"])],
+        )));
+        agent_app.reduce(focus("10", FocusTarget::Content(PaneId::new("held"))));
+        agent_app.reduce(focus("10", FocusTarget::Sidebar));
+        let session = SessionId::new("agent").unwrap();
+        agent_app.reduce(Input::Agents(agents(&[("agent", "old-host", Turn::Idle)])));
+        agent_app.selected = Some(RowKey::Agent(session.clone()));
+        agent_app.render(Rect::new(0, 0, 30, 8));
+        agent_app.reduce(Input::Agents(agents(&[("agent", "new-host", Turn::Idle)])));
+        assert_eq!(
+            agent_app.reduce(Input::User(UserAction::Activate)).effects,
+            vec![
+                Effect::FocusPane(PaneId::new("held")),
+                Effect::FocusPane(PaneId::new("new-host")),
+            ]
+        );
     }
 
     #[test]
@@ -782,7 +1145,12 @@ mod tests {
             pane: PaneId::new("%7"),
             title: Some("editor".to_string()),
         });
-        assert_eq!(decision, Decision::effect(Effect::RefreshFocus));
+        assert_eq!(
+            decision,
+            Decision {
+                effects: vec![Effect::RefreshFocus, Effect::Repaint],
+            }
+        );
         assert_eq!(app.panes.tabs[0].panes[0].title, "editor");
 
         let decision = app.reduce(Input::PaneTitleObserved {
@@ -818,7 +1186,12 @@ mod tests {
             ]),
         }));
 
-        let keys: Vec<Option<RowKey>> = app.rows.iter().map(|row| row.key.clone()).collect();
+        let rendered = app.render(Rect::new(0, 0, 30, 10));
+        let keys: Vec<Option<RowKey>> = rendered
+            .interactions
+            .iter()
+            .map(|item| item.as_ref().map(|item| item.key.clone()))
+            .collect();
         assert!(keys.contains(&Some(RowKey::Agent(first))));
         assert!(keys.contains(&Some(RowKey::Agent(second))));
         assert!(!keys.contains(&Some(RowKey::Pane(PaneId::new("7")))));

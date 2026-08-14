@@ -2,9 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 
 use agent_wrangler_core::agent::AGENTS_MESSAGE;
-use agent_wrangler_sidebar::{
-    Application, Decision, Effect, Input, Options, PaneId, Permission, UserAction,
-};
+use agent_wrangler_sidebar::{Application, Effect, Input, Options, PaneId, Permission, UserAction};
 use agent_wrangler_ui::{ansi, Rect};
 use zellij_agent_wrangler::adapter;
 use zellij_tile::prelude::*;
@@ -34,39 +32,30 @@ impl Plugin {
     fn reduce(&mut self, input: Input, settle: bool) -> bool {
         let mut repaint = false;
         let mut effects = VecDeque::new();
-        Self::collect(self.application.reduce(input), &mut repaint, &mut effects);
+        effects.extend(self.application.reduce(input).effects);
         self.drain(&mut repaint, &mut effects);
         if settle {
-            Self::collect(
-                self.application.reduce(Input::EventSettled),
-                &mut repaint,
-                &mut effects,
-            );
+            effects.extend(self.application.reduce(Input::EventSettled).effects);
             self.drain(&mut repaint, &mut effects);
         }
         repaint
     }
 
-    fn settle(&mut self) -> bool {
-        self.reduce(Input::EventSettled, false)
-    }
-
-    fn collect(decision: Decision, repaint: &mut bool, effects: &mut VecDeque<Effect>) {
-        *repaint |= decision.repaint;
-        effects.extend(decision.effects);
-    }
-
     fn drain(&mut self, repaint: &mut bool, effects: &mut VecDeque<Effect>) {
         while let Some(effect) = effects.pop_front() {
+            if effect == Effect::Repaint {
+                *repaint = true;
+                continue;
+            }
             if let Some(observation) = self.execute(effect) {
-                let decision = self.application.reduce(observation);
-                Self::collect(decision, repaint, effects);
+                effects.extend(self.application.reduce(observation).effects);
             }
         }
     }
 
     fn execute(&self, effect: Effect) -> Option<Input> {
         match effect {
+            Effect::Repaint => None,
             Effect::RefreshFocus => {
                 Some(Input::FocusObserved(get_focused_pane_info().ok().map(
                     |(tab, pane)| adapter::focus(tab, pane, self.plugin_id),
@@ -188,7 +177,7 @@ impl ZellijPlugin for Plugin {
     fn update(&mut self, event: Event) -> bool {
         match self.update_input(event) {
             Some(input) => self.reduce(input, true),
-            None => self.settle(),
+            None => self.reduce(Input::EventSettled, false),
         }
     }
 

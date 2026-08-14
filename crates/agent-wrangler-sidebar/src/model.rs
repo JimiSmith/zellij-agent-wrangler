@@ -61,6 +61,25 @@ pub enum UserAction {
     Click(usize),
 }
 
+/// A host-neutral operation offered by one item in a rendered sidebar.
+///
+/// The target is always a stable identity. The application validates it
+/// against its latest authoritative state immediately before producing host
+/// effects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ViewAction {
+    ActivateTab(TabId),
+    ActivatePane(PaneId),
+    ActivateAgent(SessionId),
+}
+
+/// What one visible frame line means when the user interacts with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InteractionItem {
+    pub key: RowKey,
+    pub action: ViewAction,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Broadcast {
     Off,
@@ -109,6 +128,7 @@ pub struct Command {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
+    Repaint,
     RefreshFocus,
     RefreshPaneTitle(PaneId),
     Run(Command),
@@ -121,22 +141,23 @@ pub enum Effect {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Decision {
-    pub repaint: bool,
     pub effects: Vec<Effect>,
 }
 
 impl Decision {
     pub fn repaint() -> Self {
-        Decision {
-            repaint: true,
-            effects: Vec::new(),
-        }
+        Decision::effect(Effect::Repaint)
     }
 
     pub fn effect(effect: Effect) -> Self {
         Decision {
-            repaint: false,
             effects: vec![effect],
+        }
+    }
+
+    pub fn request_repaint(&mut self, repaint: bool) {
+        if repaint && !self.effects.contains(&Effect::Repaint) {
+            self.effects.push(Effect::Repaint);
         }
     }
 }
@@ -144,5 +165,41 @@ impl Decision {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenderedView {
     pub frame: Frame,
+    /// One entry per frame line. Non-interactive lines contain `None`.
+    pub interactions: Vec<Option<InteractionItem>>,
+    /// The selection resolved against this view's visible interactions.
     pub selection: Option<RowKey>,
+}
+
+impl RenderedView {
+    /// The interaction attached to a particular rendered line.
+    pub fn item_at(&self, line: usize) -> Option<&InteractionItem> {
+        self.interactions.get(line)?.as_ref()
+    }
+
+    /// The interaction whose key was visibly selected in this view.
+    pub fn selected_item(&self) -> Option<&InteractionItem> {
+        let selected = self.selection.as_ref()?;
+        self.interactions
+            .iter()
+            .flatten()
+            .find(|item| &item.key == selected)
+    }
+
+    /// Each distinct selectable item in visible screen order.
+    ///
+    /// Notification titles and their wrapped body lines share an item, so they
+    /// are returned once even though every one of their lines is clickable.
+    pub fn selectable_items(&self) -> Vec<&InteractionItem> {
+        let mut items = Vec::new();
+        for item in self.interactions.iter().flatten() {
+            if !items
+                .iter()
+                .any(|seen: &&InteractionItem| seen.key == item.key)
+            {
+                items.push(item);
+            }
+        }
+        items
+    }
 }
