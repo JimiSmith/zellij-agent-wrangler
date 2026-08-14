@@ -56,14 +56,6 @@ impl Plugin {
     fn execute(&self, effect: Effect) -> Option<Input> {
         match effect {
             Effect::Repaint => None,
-            Effect::RefreshFocus => {
-                // Zellij calls the tuple's first value a tab index, but the
-                // server actually returns the stable Tab.id stored in
-                // active_tab_ids, not the tab's visual position.
-                Some(Input::FocusObserved(get_focused_pane_info().ok().map(
-                    |(tab_id, pane)| adapter::focus(tab_id, pane, self.plugin_id),
-                )))
-            }
             Effect::RefreshPaneTitle(pane) => {
                 let title = adapter::numeric_pane(&pane)
                     .and_then(|id| get_pane_info(zellij_tile::prelude::PaneId::Terminal(id)))

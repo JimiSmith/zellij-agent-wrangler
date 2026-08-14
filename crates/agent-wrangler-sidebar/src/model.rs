@@ -22,13 +22,18 @@ pub struct PaneReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SidebarPaneReport;
+pub struct SidebarPaneReport {
+    /// Whether the host event reports this particular sidebar as focused.
+    pub focused: bool,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabLayout {
     pub position: TabPosition,
     pub content_panes: Vec<PaneReport>,
     pub sidebar_pane: Option<SidebarPaneReport>,
+    /// Whether the host event reports a different plugin pane as focused.
+    pub other_focused: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -133,7 +138,6 @@ pub struct Command {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     Repaint,
-    RefreshFocus,
     RefreshPaneTitle(PaneId),
     Run(Command),
     Broadcast(Broadcast),

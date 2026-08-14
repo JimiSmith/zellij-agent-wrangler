@@ -194,15 +194,17 @@ mod tests {
             tabs: vec![
                 TabLayout {
                     position: TabPosition::at(0),
+                    other_focused: false,
                     content_panes: vec![PaneReport {
                         id: PaneId::new("%1"),
                         title: "one".to_string(),
                         focused: false,
                     }],
-                    sidebar_pane: Some(SidebarPaneReport),
+                    sidebar_pane: Some(SidebarPaneReport { focused: false }),
                 },
                 TabLayout {
                     position: TabPosition::at(1),
+                    other_focused: false,
                     content_panes: vec![PaneReport {
                         id: PaneId::new("%2"),
                         title: "two".to_string(),
@@ -223,7 +225,7 @@ mod tests {
         let tabs = vec![tab("0", 0), tab("2", 1)];
         let mut layout = layout();
         layout.tabs[0].sidebar_pane = None;
-        layout.tabs[1].sidebar_pane = Some(SidebarPaneReport);
+        layout.tabs[1].sidebar_pane = Some(SidebarPaneReport { focused: false });
         let focus = Focus {
             tab: TabId::new("2"),
             target: FocusTarget::Content(PaneId::new("%2")),
@@ -435,7 +437,7 @@ mod tests {
     fn each_sidebar_is_resolved_against_its_own_tab() {
         let reports = vec![tab("first", 0), tab("second", 1)];
         let mut layout = layout();
-        layout.tabs[1].sidebar_pane = Some(SidebarPaneReport);
+        layout.tabs[1].sidebar_pane = Some(SidebarPaneReport { focused: false });
         let focus = Focus {
             tab: TabId::new("second"),
             target: FocusTarget::Content(PaneId::new("%2")),

@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use agent_wrangler_core::agent::{self, Agent, Record};
 use agent_wrangler_core::registry::Registry;
 use agent_wrangler_sidebar::{
-    AgentSnapshot, Broadcast, Focus, FocusTarget, PaneId, PaneReport, SessionLayout,
-    SidebarPaneReport, TabId, TabLayout, TabReport,
+    AgentSnapshot, Broadcast, PaneId, PaneReport, SessionLayout, SidebarPaneReport, TabId,
+    TabLayout, TabReport,
 };
 use agent_wrangler_ui::model::{RowKey, TabPosition};
-use zellij_tile::prelude::{PaneId as ZellijPaneId, PaneInfo, PaneManifest, TabInfo};
+use zellij_tile::prelude::{PaneInfo, PaneManifest, TabInfo};
 
 pub const SELECTION_MESSAGE: &str = "wrangler:selection";
 pub const OFF_MESSAGE: &str = "wrangler:off";
@@ -34,10 +34,15 @@ pub fn layout(manifest: PaneManifest, plugin_id: u32) -> SessionLayout {
         .into_iter()
         .map(|(position, panes)| TabLayout {
             position: TabPosition::at(position),
+            other_focused: panes
+                .iter()
+                .any(|pane| pane.is_plugin && pane.id != plugin_id && pane.is_focused),
             sidebar_pane: panes
                 .iter()
-                .any(|pane| pane.is_plugin && pane.id == plugin_id)
-                .then_some(SidebarPaneReport),
+                .find(|pane| pane.is_plugin && pane.id == plugin_id)
+                .map(|pane| SidebarPaneReport {
+                    focused: pane.is_focused,
+                }),
             content_panes: listed(panes),
         })
         .collect();
@@ -59,18 +64,6 @@ fn listed(panes: Vec<PaneInfo>) -> Vec<PaneReport> {
             focused: pane.is_focused,
         })
         .collect()
-}
-
-pub fn focus(tab_id: usize, pane: ZellijPaneId, plugin_id: u32) -> Focus {
-    let target = match pane {
-        ZellijPaneId::Terminal(id) => FocusTarget::Content(PaneId::new(id.to_string())),
-        ZellijPaneId::Plugin(id) if id == plugin_id => FocusTarget::Sidebar,
-        ZellijPaneId::Plugin(_) => FocusTarget::Other,
-    };
-    Focus {
-        tab: TabId::new(tab_id.to_string()),
-        target,
-    }
 }
 
 pub fn numeric_pane(id: &PaneId) -> Option<u32> {
@@ -175,30 +168,16 @@ mod tests {
             )]),
         };
         let normalized = layout(manifest, 7);
-        assert_eq!(normalized.tabs[0].sidebar_pane, Some(SidebarPaneReport));
+        assert_eq!(
+            normalized.tabs[0].sidebar_pane,
+            Some(SidebarPaneReport { focused: false })
+        );
         let ids: Vec<&str> = normalized.tabs[0]
             .content_panes
             .iter()
             .map(|pane| pane.id.as_str())
             .collect();
         assert_eq!(ids, ["1", "2", "3"]);
-    }
-
-    #[test]
-    fn focus_distinguishes_content_this_sidebar_and_other_ui() {
-        assert_eq!(focus(9, ZellijPaneId::Terminal(7), 7).tab, TabId::new("9"));
-        assert_eq!(
-            focus(4, ZellijPaneId::Terminal(7), 7).target,
-            FocusTarget::Content(PaneId::new("7"))
-        );
-        assert_eq!(
-            focus(4, ZellijPaneId::Plugin(7), 7).target,
-            FocusTarget::Sidebar
-        );
-        assert_eq!(
-            focus(4, ZellijPaneId::Plugin(9), 7).target,
-            FocusTarget::Other
-        );
     }
 
     #[test]
@@ -213,7 +192,10 @@ mod tests {
             panes: HashMap::from([(0, vec![pane(7, "terminal", 0, 0), sidebar])]),
         };
         let normalized = layout(manifest, 7);
-        assert_eq!(normalized.tabs[0].sidebar_pane, Some(SidebarPaneReport));
+        assert_eq!(
+            normalized.tabs[0].sidebar_pane,
+            Some(SidebarPaneReport { focused: false })
+        );
         assert_eq!(normalized.tabs[0].content_panes.len(), 1);
         assert_eq!(normalized.tabs[0].content_panes[0].id, PaneId::new("7"));
     }
@@ -234,7 +216,36 @@ mod tests {
         assert!(normalized
             .tabs
             .iter()
-            .all(|tab| tab.sidebar_pane == Some(SidebarPaneReport)));
+            .all(|tab| tab.sidebar_pane == Some(SidebarPaneReport { focused: false })));
+    }
+
+    #[test]
+    fn plugin_focus_is_preserved_for_this_sidebar_and_other_plugins() {
+        let mine = PaneInfo {
+            id: 7,
+            is_plugin: true,
+            is_focused: true,
+            ..PaneInfo::default()
+        };
+        let other = PaneInfo {
+            id: 8,
+            is_plugin: true,
+            is_focused: true,
+            ..PaneInfo::default()
+        };
+        let normalized = layout(
+            PaneManifest {
+                panes: HashMap::from([(0, vec![mine]), (1, vec![other])]),
+            },
+            7,
+        );
+
+        assert_eq!(
+            normalized.tabs[0].sidebar_pane,
+            Some(SidebarPaneReport { focused: true })
+        );
+        assert!(!normalized.tabs[0].other_focused);
+        assert!(normalized.tabs[1].other_focused);
     }
 
     #[test]
