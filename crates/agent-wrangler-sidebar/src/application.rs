@@ -56,67 +56,20 @@ impl Application {
 
     pub fn reduce(&mut self, input: Input) -> Decision {
         match input {
-            Input::TabsReported(tabs) => {
-                let changed = self.tabs != tabs;
-                self.tabs = tabs;
-                let mut decision = Decision::effect(Effect::RefreshFocus);
-                decision.request_repaint(changed);
-                decision
-            }
-            Input::PanesReported(panes) => {
-                let changed = self.panes != panes;
-                self.panes = panes;
-                let mut decision = Decision::effect(Effect::RefreshFocus);
-                decision.request_repaint(changed);
-                decision
-            }
+            Input::TabsReported(tabs) => self.report_tabs(tabs),
+            Input::PanesReported(panes) => self.report_panes(panes),
             Input::PaneChanged(pane) => Decision::effect(Effect::RefreshPaneTitle(pane)),
-            Input::PaneTitleObserved { pane, title } => match title {
-                Some(title) => {
-                    let mut changed = false;
-                    for tab in &mut self.panes.tabs {
-                        for candidate in &mut tab.panes {
-                            if candidate.id == pane && candidate.title != title {
-                                candidate.title = title.clone();
-                                changed = true;
-                            }
-                        }
-                    }
-                    let mut decision = Decision::effect(Effect::RefreshFocus);
-                    decision.request_repaint(changed);
-                    decision
-                }
-                None => Decision::default(),
-            },
+            Input::PaneTitleObserved { pane, title } => self.observe_pane_title(pane, title),
             Input::FocusObserved(focus) => self.observe_focus(focus),
-            Input::SessionNamed(name) => {
-                self.session_name = Some(name);
-                let mut decision = Decision::effect(Effect::StopSessionDiscovery);
-                self.register(&mut decision);
-                decision
-            }
-            Input::PermissionReported(permission) => {
-                let changed = self.permission != Some(permission);
-                self.permission = Some(permission);
-                let mut decision = Decision::default();
-                decision.request_repaint(changed);
-                self.register(&mut decision);
-                decision
-            }
+            Input::SessionNamed(name) => self.name_session(name),
+            Input::PermissionReported(permission) => self.report_permission(permission),
             Input::CommandFinished { exit, stderr, call } => {
-                let changed = self.ran(exit, &stderr, &call);
-                let mut decision = Decision::default();
-                decision.request_repaint(changed);
-                decision
+                self.finish_command(exit, &stderr, &call)
             }
             Input::User(action) => self.user(action),
             Input::Message(message) => self.message(message),
             Input::Agents(snapshot) => self.adopt(snapshot),
-            Input::EventSettled => {
-                let mut decision = Decision::default();
-                self.install_hooks(&mut decision);
-                decision
-            }
+            Input::EventSettled => self.install_hooks(),
         }
     }
 
@@ -138,6 +91,56 @@ impl Application {
         session::position_of(&self.tabs, id)
     }
 
+    fn report_tabs(&mut self, tabs: Vec<TabReport>) -> Decision {
+        let changed = self.tabs != tabs;
+        self.tabs = tabs;
+        let mut decision = Decision::effect(Effect::RefreshFocus);
+        decision.request_repaint(changed);
+        decision
+    }
+
+    fn report_panes(&mut self, panes: PaneSnapshot) -> Decision {
+        let changed = self.panes != panes;
+        self.panes = panes;
+        let mut decision = Decision::effect(Effect::RefreshFocus);
+        decision.request_repaint(changed);
+        decision
+    }
+
+    fn observe_pane_title(&mut self, pane: PaneId, title: Option<String>) -> Decision {
+        let Some(title) = title else {
+            return Decision::default();
+        };
+        let mut changed = false;
+        for tab in &mut self.panes.tabs {
+            for candidate in &mut tab.panes {
+                if candidate.id == pane && candidate.title != title {
+                    candidate.title = title.clone();
+                    changed = true;
+                }
+            }
+        }
+        let mut decision = Decision::effect(Effect::RefreshFocus);
+        decision.request_repaint(changed);
+        decision
+    }
+
+    fn name_session(&mut self, name: String) -> Decision {
+        self.session_name = Some(name);
+        let mut decision = Decision::effect(Effect::StopSessionDiscovery);
+        self.register(&mut decision);
+        decision
+    }
+
+    fn report_permission(&mut self, permission: Permission) -> Decision {
+        let changed = self.permission != Some(permission);
+        self.permission = Some(permission);
+        let mut decision = Decision::default();
+        decision.request_repaint(changed);
+        self.register(&mut decision);
+        decision
+    }
+
     fn observe_focus(&mut self, fresh: Option<Focus>) -> Decision {
         let mut changed = false;
         if let Some(fresh) = fresh {
@@ -154,11 +157,14 @@ impl Application {
         decision
     }
 
-    fn ran(&mut self, exit: Option<i32>, stderr: &[u8], call: &str) -> bool {
-        match exit {
+    fn finish_command(&mut self, exit: Option<i32>, stderr: &[u8], call: &str) -> Decision {
+        let changed = match exit {
             Some(0) => self.client.reached(),
             _ => self.client.failed(call, said(stderr)),
-        }
+        };
+        let mut decision = Decision::default();
+        decision.request_repaint(changed);
+        decision
     }
 
     fn allowed(&self) -> bool {
@@ -270,19 +276,21 @@ impl Application {
         }
     }
 
-    fn install_hooks(&mut self, decision: &mut Decision) {
+    fn install_hooks(&mut self) -> Decision {
         if self.options.install_hooks.is_none()
             || self.installed
             || !self.allowed()
             || !self.is_where_the_user_is()
         {
-            return;
+            return Decision::default();
         }
         self.installed = true;
-        self.run("install-hooks", &["install-hooks"], decision);
+        let mut decision = Decision::default();
+        self.run("install-hooks", &["install-hooks"], &mut decision);
         decision
             .effects
             .push(Effect::Broadcast(Broadcast::HooksInstalled));
+        decision
     }
 
     fn adopt(&mut self, snapshot: AgentSnapshot) -> Decision {
