@@ -11,7 +11,7 @@ use crate::calls::Answered;
 use crate::client::Client;
 use crate::model::{
     AgentSnapshot, Broadcast, Command, Decision, Effect, Focus, FocusTarget, Input, PaneSnapshot,
-    Permission, RenderedView, TabReport, UserAction,
+    Permission, RenderedView, TabId, TabReport, UserAction,
 };
 use crate::options::Options;
 use crate::session;
@@ -117,6 +117,14 @@ impl Application {
 
     pub fn session_name(&self) -> Option<&str> {
         self.session_name.as_deref()
+    }
+
+    /// The latest reported position of a stable tab identity.
+    ///
+    /// Positional host APIs resolve an id through this lookup immediately
+    /// before executing a tab effect.
+    pub fn tab_position(&self, id: &TabId) -> Option<TabPosition> {
+        session::position_of(&self.tabs, id)
     }
 
     fn observe_focus(&mut self, fresh: Option<Focus>) -> Decision {
@@ -368,13 +376,18 @@ impl Application {
     fn activate(&self, decision: &mut Decision) {
         match self.selection() {
             Some(RowKey::Pane(pane)) => self.go_to_pane(pane, decision),
-            Some(RowKey::Tab(position)) => match session::first_pane(&self.panes, position) {
-                Some(pane) => self.go_to_pane(pane, decision),
-                None => {
-                    self.stand_down(position, decision);
-                    decision.effects.push(Effect::SwitchTab(position));
+            Some(RowKey::Tab(tab)) => {
+                let Some(position) = self.tab_position(&tab) else {
+                    return;
+                };
+                match session::first_pane(&self.panes, position) {
+                    Some(pane) => self.go_to_pane(pane, decision),
+                    None => {
+                        self.stand_down(position, decision);
+                        decision.effects.push(Effect::SwitchTab(tab));
+                    }
                 }
-            },
+            }
             Some(RowKey::Agent(agent))
             | Some(RowKey::Section(agent))
             | Some(RowKey::Notification(agent)) => {
@@ -603,6 +616,34 @@ mod tests {
             vec![
                 Effect::FocusPane(PaneId::new("1")),
                 Effect::FocusPane(PaneId::new("2")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_selected_tab_survives_reordering_and_switches_by_stable_id() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
+        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["1"]), (1, &[])])));
+        app.reduce(focus("10", FocusTarget::Content(PaneId::new("1"))));
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        app.selected = Some(RowKey::Tab(TabId::new("20")));
+
+        app.reduce(Input::TabsReported(vec![tab("20", 0), tab("10", 1)]));
+        app.reduce(Input::PanesReported(snapshot(1, &[(0, &[]), (1, &["1"])])));
+        app.reduce(focus("10", FocusTarget::Sidebar));
+
+        assert_eq!(app.selection(), Some(RowKey::Tab(TabId::new("20"))));
+        assert_eq!(
+            app.tab_position(&TabId::new("20")),
+            Some(TabPosition::at(0))
+        );
+        assert_eq!(app.tab_position(&TabId::new("gone")), None);
+        assert_eq!(
+            app.reduce(Input::User(UserAction::Activate)).effects,
+            vec![
+                Effect::FocusPane(PaneId::new("1")),
+                Effect::SwitchTab(TabId::new("20")),
             ]
         );
     }

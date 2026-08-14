@@ -89,6 +89,7 @@ pub fn session(reports: &[TabReport], panes: &PaneSnapshot, focus: Option<&Focus
                 }
             }
             Tab {
+                id: report.id.clone(),
                 position: report.position,
                 name: report.name.clone(),
                 active,
@@ -192,6 +193,8 @@ mod tests {
         );
         let names: Vec<&str> = resolved.iter().map(|tab| tab.name.as_str()).collect();
         assert_eq!(names, ["first", "second", "third"]);
+        let ids: Vec<&str> = resolved.iter().map(|tab| tab.id.as_str()).collect();
+        assert_eq!(ids, ["first", "second", "third"]);
     }
 
     #[test]

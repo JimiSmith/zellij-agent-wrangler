@@ -3,21 +3,8 @@ use std::collections::BTreeMap;
 use agent_wrangler_core::agent::SessionId;
 use agent_wrangler_core::registry::Registry;
 use agent_wrangler_ui::frame::Frame;
-pub use agent_wrangler_ui::model::PaneId;
+pub use agent_wrangler_ui::model::{PaneId, TabId};
 use agent_wrangler_ui::model::{RowKey, TabPosition};
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TabId(String);
-
-impl TabId {
-    pub fn new(id: impl Into<String>) -> Self {
-        TabId(id.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabReport {
@@ -127,7 +114,7 @@ pub enum Effect {
     Run(Command),
     Broadcast(Broadcast),
     FocusPane(PaneId),
-    SwitchTab(TabPosition),
+    SwitchTab(TabId),
     StopSessionDiscovery,
     CloseSidebar,
 }

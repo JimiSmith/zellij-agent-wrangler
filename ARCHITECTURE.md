@@ -279,17 +279,18 @@ on them alone.
 
 ## Migration status
 
-Migration step 1 is complete. Multiplexer-neutral application state, reducer
-inputs, decisions, effects, and reconciliation live in `agent-wrangler-sidebar`;
-the Zellij plugin translates host reports and executes the resulting effects.
-Pane IDs are also opaque and stable across the portable boundary, and focus
-already distinguishes stable tab IDs from tab positions.
+Migration steps 1 and 2 are complete. Multiplexer-neutral application state,
+reducer inputs, decisions, effects, and reconciliation live in
+`agent-wrangler-sidebar`; the Zellij plugin translates host reports and executes
+the resulting effects. Pane and tab row keys are opaque and stable across the
+portable boundary. Tab-switch effects carry stable IDs, which Zellij resolves
+to the latest reported position only when it executes its positional host API.
 
-The rest of the document remains the target state. In particular, tab row keys
-are still positional, the last exact rendered view is not yet the source of all
-interaction, focus has no visibility or confidence state, lifecycle effects are
-not gated on confirmed focus/topology, and repaint decisions are not yet
-coalesced through a dirty-state scheduler.
+The rest of the document remains the target state. In particular, the last
+exact rendered view is not yet the source of all interaction, focus has no
+visibility or confidence state, lifecycle effects are not gated on confirmed
+focus/topology, and repaint decisions are not yet coalesced through a
+dirty-state scheduler.
 
 ## Migration direction
 

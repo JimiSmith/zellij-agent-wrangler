@@ -105,8 +105,10 @@ impl Plugin {
                 }
                 None
             }
-            Effect::SwitchTab(position) => {
-                switch_tab_to(position.one_based() as u32);
+            Effect::SwitchTab(tab) => {
+                if let Some(position) = self.application.tab_position(&tab) {
+                    switch_tab_to(position.one_based() as u32);
+                }
                 None
             }
             Effect::StopSessionDiscovery => {

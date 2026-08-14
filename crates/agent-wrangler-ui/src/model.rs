@@ -34,12 +34,30 @@ impl From<u32> for PaneId {
     }
 }
 
+/// A multiplexer tab's own stable name.
+///
+/// A tab's position can change whenever another tab opens or closes. This id
+/// names the tab itself, while [`TabPosition`] remains the metadata that orders
+/// and labels it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TabId(String);
+
+impl TabId {
+    pub fn new(id: impl Into<String>) -> Self {
+        TabId(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Where a tab sits in the tab bar, counted from zero.
 ///
 /// A position is not a name: closing a tab moves every tab after it along, so
 /// the tab at a position is only the tab that was there while nothing before it
-/// has opened or closed. It is what orders the tabs, what labels their rows, and
-/// what a client means when it points at one.
+/// has opened or closed. It orders the tabs, labels their rows, and is passed to
+/// host APIs that can address tabs only by position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TabPosition(usize);
 
@@ -162,7 +180,7 @@ impl Indicator {
 /// the selection off the thing it was on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowKey {
-    Tab(TabPosition),
+    Tab(TabId),
     Pane(PaneId),
     Agent(SessionId),
     /// The same session as [`RowKey::Agent`], drawn a second time under the
@@ -181,7 +199,7 @@ impl RowKey {
     /// clients sharing a selection.
     pub fn encode(&self) -> String {
         match self {
-            RowKey::Tab(position) => format!("tab:{}", position.zero_based()),
+            RowKey::Tab(id) => format!("tab-id:{}", id.as_str()),
             RowKey::Pane(id) => format!("pane:{}", id.as_str()),
             RowKey::Agent(session) => format!("agent:{}", session.as_str()),
             RowKey::Section(session) => format!("section:{}", session.as_str()),
@@ -194,10 +212,7 @@ impl RowKey {
     pub fn decode(text: &str) -> Option<Self> {
         let (kind, value) = text.split_once(':')?;
         match kind {
-            "tab" => value
-                .parse()
-                .ok()
-                .map(|position| RowKey::Tab(TabPosition::at(position))),
+            "tab-id" if !value.is_empty() => Some(RowKey::Tab(TabId::new(value))),
             "pane" if !value.is_empty() => Some(RowKey::Pane(PaneId::new(value))),
             "agent" => SessionId::new(value).map(RowKey::Agent),
             "section" => SessionId::new(value).map(RowKey::Section),
@@ -334,8 +349,8 @@ mod tests {
     #[test]
     fn a_key_survives_the_round_trip() {
         for key in [
-            RowKey::Tab(TabPosition::at(0)),
-            RowKey::Tab(TabPosition::at(12)),
+            RowKey::Tab(TabId::new("0")),
+            RowKey::Tab(TabId::new("tab-12")),
             RowKey::Pane(7.into()),
             RowKey::Pane(PaneId::new("%7")),
             RowKey::Agent(SessionId::new("9f3c-1a").unwrap()),
@@ -349,7 +364,7 @@ mod tests {
     #[test]
     fn anything_else_decodes_to_nothing() {
         for text in [
-            "", "tab", "tab:", "tab:x", "pane:", "agent:", "window:1", "1",
+            "", "tab", "tab:", "tab:0", "tab-id:", "pane:", "agent:", "window:1", "1",
         ] {
             assert_eq!(RowKey::decode(text), None, "{text}");
         }

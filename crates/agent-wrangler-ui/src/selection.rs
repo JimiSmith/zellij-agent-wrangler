@@ -45,7 +45,7 @@ pub fn selected(keys: &[RowKey], held: Option<&RowKey>) -> Option<RowKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Placement, RowContent, TabPosition};
+    use crate::model::{Placement, RowContent, TabId};
     use agent_wrangler_core::agent::{Agent, Meta, SessionId, Turn};
     use agent_wrangler_core::origin::Origin;
 
@@ -53,8 +53,8 @@ mod tests {
         SessionId::new(text).unwrap()
     }
 
-    fn tab(position: usize) -> RowKey {
-        RowKey::Tab(TabPosition::at(position))
+    fn tab(id: &str) -> RowKey {
+        RowKey::Tab(TabId::new(id))
     }
 
     fn tree() -> Vec<Row> {
@@ -65,7 +65,7 @@ mod tests {
                 placement: Placement::Here,
                 color: None,
             })
-            .at(tab(0)),
+            .at(tab("editor")),
             Row::new(RowContent::Blank),
         ]
     }
@@ -83,7 +83,10 @@ mod tests {
     #[test]
     fn the_calls_at_the_foot_are_keys_like_any_other() {
         let keys = keys(&tree(), &calling("one"), &View::default());
-        assert_eq!(keys, vec![tab(0), RowKey::Notification(session("one")),]);
+        assert_eq!(
+            keys,
+            vec![tab("editor"), RowKey::Notification(session("one")),]
+        );
     }
 
     #[test]
@@ -104,20 +107,23 @@ mod tests {
             ..View::default()
         };
         let keys = keys(&tree(), &calling("one"), &quiet);
-        assert_eq!(keys, vec![tab(0)]);
+        assert_eq!(keys, vec![tab("editor")]);
         let held = RowKey::Notification(session("one"));
-        assert_eq!(selected(&keys, Some(&held)), Some(tab(0)));
+        assert_eq!(selected(&keys, Some(&held)), Some(tab("editor")));
     }
 
     #[test]
     fn a_selection_on_a_row_that_has_gone_falls_back_to_the_first() {
         let keys = keys(&tree(), &Registry::default(), &View::default());
-        assert_eq!(selected(&keys, Some(&RowKey::Pane(9.into()))), Some(tab(0)));
-        assert_eq!(selected(&keys, None), Some(tab(0)));
+        assert_eq!(
+            selected(&keys, Some(&RowKey::Pane(9.into()))),
+            Some(tab("editor"))
+        );
+        assert_eq!(selected(&keys, None), Some(tab("editor")));
     }
 
     #[test]
     fn a_client_with_nothing_to_point_at_has_no_selection() {
-        assert_eq!(selected(&[], Some(&tab(0))), None);
+        assert_eq!(selected(&[], Some(&tab("editor"))), None);
     }
 }

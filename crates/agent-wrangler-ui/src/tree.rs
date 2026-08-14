@@ -9,7 +9,7 @@ use agent_wrangler_core::agent::{Agent, Turn};
 use agent_wrangler_core::label::label;
 
 use crate::model::{
-    Branch, Indicator, NamedColor, PaneId, Placement, Row, RowContent, RowKey, TabPosition,
+    Branch, Indicator, NamedColor, PaneId, Placement, Row, RowContent, RowKey, TabId, TabPosition,
 };
 use crate::options::View;
 
@@ -68,7 +68,9 @@ impl Pane {
 /// A tab and the panes it shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tab {
-    /// The tab's own position, which is also what labels its row.
+    /// The tab's own stable identity.
+    pub id: TabId,
+    /// The tab's current position, which orders and labels its row.
     pub position: TabPosition,
     pub name: String,
     pub active: bool,
@@ -142,7 +144,7 @@ fn branch_at(position: usize, last: usize) -> Branch {
 
 /// The rows for one tab: the tab itself, then a child per pane or agent.
 fn tab_rows(tab: &Tab, options: &View) -> Vec<Row> {
-    let mut rows = vec![window_row(tab).at(RowKey::Tab(tab.position))];
+    let mut rows = vec![window_row(tab).at(RowKey::Tab(tab.id.clone()))];
 
     let children = children(tab);
     let last = children.len().saturating_sub(1);
@@ -288,6 +290,7 @@ mod tests {
 
     fn tab(position: usize, name: &str, active: bool, panes: Vec<Pane>) -> Tab {
         Tab {
+            id: TabId::new(name),
             position: TabPosition::at(position),
             name: name.to_string(),
             active,
@@ -325,10 +328,10 @@ mod tests {
         assert_eq!(
             keys,
             vec![
-                Some(RowKey::Tab(TabPosition::at(0))),
+                Some(RowKey::Tab(TabId::new("editor"))),
                 Some(RowKey::Pane(1.into())),
                 Some(RowKey::Pane(2.into())),
-                Some(RowKey::Tab(TabPosition::at(1))),
+                Some(RowKey::Tab(TabId::new("server"))),
                 Some(RowKey::Pane(3.into())),
             ]
         );
@@ -365,6 +368,15 @@ mod tests {
     fn rows_are_labelled_with_their_one_based_position() {
         let rows = tree(&session());
         assert_eq!(indices(&rows), vec!["1", "1", "2", "2", "1"]);
+    }
+
+    #[test]
+    fn moving_a_tab_changes_its_label_but_not_its_key() {
+        let before = tree(&[tab(1, "editor", false, vec![])]);
+        let after = tree(&[tab(0, "editor", false, vec![])]);
+        assert_eq!(before[0].key, after[0].key);
+        assert_eq!(indices(&before), vec!["2"]);
+        assert_eq!(indices(&after), vec!["1"]);
     }
 
     fn indices(rows: &[Row]) -> Vec<&str> {
@@ -475,7 +487,7 @@ mod tests {
     fn a_tab_with_no_panes_still_draws_its_own_row() {
         let rows = tree(&[tab(0, "empty", false, vec![])]);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].key, Some(RowKey::Tab(TabPosition::at(0))));
+        assert_eq!(rows[0].key, Some(RowKey::Tab(TabId::new("empty"))));
     }
 
     #[test]

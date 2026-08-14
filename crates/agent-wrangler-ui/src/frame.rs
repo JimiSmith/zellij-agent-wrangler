@@ -156,7 +156,7 @@ mod tests {
 
     use agent_wrangler_core::agent::SessionId;
 
-    use crate::model::{Placement, RowContent, TabPosition};
+    use crate::model::{Placement, RowContent, TabId};
 
     fn call(id: &str, message: &str) -> Notification {
         Notification {
@@ -174,7 +174,7 @@ mod tests {
             placement: Placement::Here,
             color: None,
         })
-        .at(RowKey::Tab(TabPosition::at(0)))]
+        .at(RowKey::Tab(TabId::new("editor")))]
     }
 
     /// A pane 24 columns wide, which is about what a sidebar is given.

@@ -264,6 +264,15 @@ mod tests {
     }
 
     #[test]
+    fn tab_selections_use_an_unambiguous_stable_id_wire_key() {
+        let message = Broadcast::Selection(RowKey::Tab(TabId::new("9")));
+        let (name, payload) = encode_message(message.clone());
+        assert_eq!(payload.as_deref(), Some("tab-id:9"));
+        assert_eq!(decode_message(name, payload.as_deref()), Some(message));
+        assert_eq!(decode_message(name, Some("tab:0")), None);
+    }
+
+    #[test]
     fn malformed_agent_messages_are_ignored_and_other_formats_are_reported() {
         assert_eq!(agents("", "work"), None);
         assert_eq!(
