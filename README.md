@@ -329,20 +329,15 @@ instead if it is not there.
 
 ## Layout
 
-- `model.rs` — the row vocabulary: what a row is, where it sits, what its turn
-  state is.
-- `render.rs` — the line drawn for a row, and the styling of its pieces.
-- `session.rs` — the shape of the session, read out of what zellij reports. The
-  only place zellij's types meet the sidebar's, and the only module the `plugin`
-  feature gates.
-- `tree.rs` — the rows a session is drawn as.
-- `agents.rs` — the agent sessions, their wire format, and the panes they sit in.
-- `options.rs` — what the layout asks for, read into types.
-- `command.rs` — a command line written as one string, read into its words.
-- `payload.rs` — reading an agent's hook body. Native only.
-- `titles.rs` — what a session calls itself, read from the agent's own files.
-  Native only.
-- `install.rs` — writing the hooks into each agent's config. Native only.
-- `main.rs` — the plugin: the two regions, the nav order over them, and the
-  event handling.
-- `wrangler.rs` — the hook client.
+- `agent-wrangler-core` — agent records, the registry, labels, commands and
+  other logic shared by every client and the native daemon.
+- `agent-wrangler-ui` — the row vocabulary, tree and frame composition,
+  terminal styling, selection, and ANSI serialization.
+- `agent-wrangler-sidebar` — multiplexer-neutral application state, reducer
+  inputs, effects, session reconciliation, client state, and configuration.
+- `zellij-agent-wrangler/src/adapter.rs` — conversion between Zellij reports
+  and the portable sidebar vocabulary.
+- `zellij-agent-wrangler/src/main.rs` — Zellij subscriptions, effect execution,
+  observation feedback, and printing the rendered frame.
+- `agent-wrangler` — the native daemon, hook client, configuration installer,
+  and platform integration.

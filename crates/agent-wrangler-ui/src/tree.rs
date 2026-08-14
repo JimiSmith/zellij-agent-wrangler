@@ -9,7 +9,7 @@ use agent_wrangler_core::agent::{Agent, Turn};
 use agent_wrangler_core::label::label;
 
 use crate::model::{
-    Branch, Indicator, NamedColor, Placement, Row, RowContent, RowKey, TabPosition,
+    Branch, Indicator, NamedColor, PaneId, Placement, Row, RowContent, RowKey, TabPosition,
 };
 use crate::options::View;
 
@@ -44,7 +44,7 @@ fn agent_row(
 /// A pane, and the agent sessions running in it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pane {
-    pub id: u32,
+    pub id: PaneId,
     pub title: String,
     pub focused: bool,
     /// The agents this pane hosts. A pane hosting agents is drawn as them
@@ -55,9 +55,9 @@ pub struct Pane {
 
 impl Pane {
     /// A pane hosting nothing, which is how every pane starts out.
-    pub fn new(id: u32, title: &str, focused: bool) -> Self {
+    pub fn new(id: impl Into<PaneId>, title: &str, focused: bool) -> Self {
         Pane {
-            id,
+            id: id.into(),
             title: title.to_string(),
             focused,
             agents: Vec::new(),
@@ -157,7 +157,7 @@ fn tab_rows(tab: &Tab, options: &View) -> Vec<Row> {
                 placement: pane_placement(tab.active, pane.focused),
                 color: None,
             })
-            .at(RowKey::Pane(pane.id)),
+            .at(RowKey::Pane(pane.id.clone())),
             // An agent's placement is its pane's: the agent is where the pane
             // is, and pointing at it takes you to that pane.
             Child::Agent(pane, agent) => agent_row(
@@ -326,10 +326,10 @@ mod tests {
             keys,
             vec![
                 Some(RowKey::Tab(TabPosition::at(0))),
-                Some(RowKey::Pane(1)),
-                Some(RowKey::Pane(2)),
+                Some(RowKey::Pane(1.into())),
+                Some(RowKey::Pane(2.into())),
                 Some(RowKey::Tab(TabPosition::at(1))),
-                Some(RowKey::Pane(3)),
+                Some(RowKey::Pane(3.into())),
             ]
         );
     }

@@ -10,6 +10,30 @@
 
 use agent_wrangler_core::agent::{Agent, SessionId};
 
+/// A multiplexer pane's own stable name.
+///
+/// Multiplexers do not agree on the shape of pane ids. Keeping the native id
+/// as opaque text lets every adapter preserve it without allocating a second
+/// identity of its own.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PaneId(String);
+
+impl PaneId {
+    pub fn new(id: impl Into<String>) -> Self {
+        PaneId(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<u32> for PaneId {
+    fn from(id: u32) -> Self {
+        PaneId::new(id.to_string())
+    }
+}
+
 /// Where a tab sits in the tab bar, counted from zero.
 ///
 /// A position is not a name: closing a tab moves every tab after it along, so
@@ -139,7 +163,7 @@ impl Indicator {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowKey {
     Tab(TabPosition),
-    Pane(u32),
+    Pane(PaneId),
     Agent(SessionId),
     /// The same session as [`RowKey::Agent`], drawn a second time under the
     /// agent it belongs to rather than under the tab it is in. It is a kind of
@@ -158,7 +182,7 @@ impl RowKey {
     pub fn encode(&self) -> String {
         match self {
             RowKey::Tab(position) => format!("tab:{}", position.zero_based()),
-            RowKey::Pane(id) => format!("pane:{id}"),
+            RowKey::Pane(id) => format!("pane:{}", id.as_str()),
             RowKey::Agent(session) => format!("agent:{}", session.as_str()),
             RowKey::Section(session) => format!("section:{}", session.as_str()),
             RowKey::Notification(session) => format!("notification:{}", session.as_str()),
@@ -174,7 +198,7 @@ impl RowKey {
                 .parse()
                 .ok()
                 .map(|position| RowKey::Tab(TabPosition::at(position))),
-            "pane" => value.parse().ok().map(RowKey::Pane),
+            "pane" if !value.is_empty() => Some(RowKey::Pane(PaneId::new(value))),
             "agent" => SessionId::new(value).map(RowKey::Agent),
             "section" => SessionId::new(value).map(RowKey::Section),
             "notification" => SessionId::new(value).map(RowKey::Notification),
@@ -312,7 +336,8 @@ mod tests {
         for key in [
             RowKey::Tab(TabPosition::at(0)),
             RowKey::Tab(TabPosition::at(12)),
-            RowKey::Pane(7),
+            RowKey::Pane(7.into()),
+            RowKey::Pane(PaneId::new("%7")),
             RowKey::Agent(SessionId::new("9f3c-1a").unwrap()),
             RowKey::Section(SessionId::new("9f3c-1a").unwrap()),
             RowKey::Notification(SessionId::new("9f3c-1a").unwrap()),
@@ -324,7 +349,7 @@ mod tests {
     #[test]
     fn anything_else_decodes_to_nothing() {
         for text in [
-            "", "tab", "tab:", "tab:x", "pane:-1", "agent:", "window:1", "1",
+            "", "tab", "tab:", "tab:x", "pane:", "agent:", "window:1", "1",
         ] {
             assert_eq!(RowKey::decode(text), None, "{text}");
         }

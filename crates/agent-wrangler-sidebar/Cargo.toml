@@ -1,0 +1,9 @@
+[package]
+name = "agent-wrangler-sidebar"
+version.workspace = true
+edition.workspace = true
+description = "Multiplexer-neutral application state and decisions for the agent wrangler sidebar"
+
+[dependencies]
+agent-wrangler-core = { path = "../agent-wrangler-core", default-features = false }
+agent-wrangler-ui = { path = "../agent-wrangler-ui" }

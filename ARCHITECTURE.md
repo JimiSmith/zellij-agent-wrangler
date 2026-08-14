@@ -277,6 +277,20 @@ End-to-end tests remain valuable for host behavior that cannot be represented
 by the library, but correctness of event ordering and rendering should not rely
 on them alone.
 
+## Migration status
+
+Migration step 1 is complete. Multiplexer-neutral application state, reducer
+inputs, decisions, effects, and reconciliation live in `agent-wrangler-sidebar`;
+the Zellij plugin translates host reports and executes the resulting effects.
+Pane IDs are also opaque and stable across the portable boundary, and focus
+already distinguishes stable tab IDs from tab positions.
+
+The rest of the document remains the target state. In particular, tab row keys
+are still positional, the last exact rendered view is not yet the source of all
+interaction, focus has no visibility or confidence state, lifecycle effects are
+not gated on confirmed focus/topology, and repaint decisions are not yet
+coalesced through a dirty-state scheduler.
+
 ## Migration direction
 
 The architecture can be introduced incrementally:

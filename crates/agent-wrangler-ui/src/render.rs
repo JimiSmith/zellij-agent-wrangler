@@ -564,7 +564,7 @@ mod tests {
             placement: Placement::Unfocused,
             color: Some(NamedColor::Cyan),
         })
-        .at(RowKey::Pane(1))
+        .at(RowKey::Pane(1.into()))
         .with(Indicator::Attention);
         let buf = drawn(&row, 20, true);
         for x in 0..20 {
@@ -592,7 +592,7 @@ mod tests {
             Branch::More,
             Placement::Here,
         ))
-        .at(RowKey::Pane(1))
+        .at(RowKey::Pane(1.into()))
         .with(Indicator::Attention);
         for width in [10u16, 24, 60] {
             let buf = drawn(&row, width, true);
@@ -658,7 +658,7 @@ mod tests {
         // The width takes the name first and the tree in front of it after, and
         // neither can reach the column the marker is drawn in.
         let row = Row::new(pane("0", "nvim", Branch::Last, Placement::Here))
-            .at(RowKey::Pane(1))
+            .at(RowKey::Pane(1.into()))
             .with(Indicator::Working);
         for width in [1u16, 2, 4, 6] {
             let buf = drawn(&row, width, false);

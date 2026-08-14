@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn a_selection_on_a_row_that_has_gone_falls_back_to_the_first() {
         let keys = keys(&tree(), &Registry::default(), &View::default());
-        assert_eq!(selected(&keys, Some(&RowKey::Pane(9))), Some(tab(0)));
+        assert_eq!(selected(&keys, Some(&RowKey::Pane(9.into()))), Some(tab(0)));
         assert_eq!(selected(&keys, None), Some(tab(0)));
     }
 
