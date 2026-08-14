@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use agent_wrangler_core::agent::{self, Agent, Record};
 use agent_wrangler_core::registry::Registry;
 use agent_wrangler_sidebar::{
-    AgentSnapshot, Broadcast, Focus, FocusTarget, PaneId, PaneReport, PaneSnapshot, TabId,
-    TabPanes, TabReport,
+    AgentSnapshot, Broadcast, Focus, FocusTarget, PaneId, PaneReport, SessionLayout,
+    SidebarPaneReport, TabId, TabLayout, TabReport,
 };
 use agent_wrangler_ui::model::{RowKey, TabPosition};
 use zellij_tile::prelude::{PaneId as ZellijPaneId, PaneInfo, PaneManifest, TabInfo};
@@ -28,23 +28,21 @@ pub fn tabs(reported: Vec<TabInfo>) -> Vec<TabReport> {
         .collect()
 }
 
-pub fn panes(manifest: PaneManifest, plugin_id: u32) -> PaneSnapshot {
-    let sidebar_tab = manifest.panes.iter().find_map(|(position, panes)| {
-        panes
-            .iter()
-            .any(|pane| pane.is_plugin && pane.id == plugin_id)
-            .then_some(TabPosition::at(*position))
-    });
-    let mut tabs: Vec<TabPanes> = manifest
+pub fn layout(manifest: PaneManifest, plugin_id: u32) -> SessionLayout {
+    let mut tabs: Vec<TabLayout> = manifest
         .panes
         .into_iter()
-        .map(|(position, panes)| TabPanes {
+        .map(|(position, panes)| TabLayout {
             position: TabPosition::at(position),
-            panes: listed(panes),
+            sidebar_pane: panes
+                .iter()
+                .any(|pane| pane.is_plugin && pane.id == plugin_id)
+                .then_some(SidebarPaneReport),
+            content_panes: listed(panes),
         })
         .collect();
     tabs.sort_by_key(|tab| tab.position.zero_based());
-    PaneSnapshot { tabs, sidebar_tab }
+    SessionLayout { tabs }
 }
 
 fn listed(panes: Vec<PaneInfo>) -> Vec<PaneReport> {
@@ -63,14 +61,14 @@ fn listed(panes: Vec<PaneInfo>) -> Vec<PaneReport> {
         .collect()
 }
 
-pub fn focus(tab: usize, pane: ZellijPaneId, plugin_id: u32) -> Focus {
+pub fn focus(tab_id: usize, pane: ZellijPaneId, plugin_id: u32) -> Focus {
     let target = match pane {
         ZellijPaneId::Terminal(id) => FocusTarget::Content(PaneId::new(id.to_string())),
         ZellijPaneId::Plugin(id) if id == plugin_id => FocusTarget::Sidebar,
         ZellijPaneId::Plugin(_) => FocusTarget::Other,
     };
     Focus {
-        tab: TabId::new(tab.to_string()),
+        tab: TabId::new(tab_id.to_string()),
         target,
     }
 }
@@ -176,10 +174,10 @@ mod tests {
                 ],
             )]),
         };
-        let normalized = panes(manifest, 7);
-        assert_eq!(normalized.sidebar_tab, Some(TabPosition::at(2)));
+        let normalized = layout(manifest, 7);
+        assert_eq!(normalized.tabs[0].sidebar_pane, Some(SidebarPaneReport));
         let ids: Vec<&str> = normalized.tabs[0]
-            .panes
+            .content_panes
             .iter()
             .map(|pane| pane.id.as_str())
             .collect();
@@ -188,6 +186,7 @@ mod tests {
 
     #[test]
     fn focus_distinguishes_content_this_sidebar_and_other_ui() {
+        assert_eq!(focus(9, ZellijPaneId::Terminal(7), 7).tab, TabId::new("9"));
         assert_eq!(
             focus(4, ZellijPaneId::Terminal(7), 7).target,
             FocusTarget::Content(PaneId::new("7"))
@@ -213,10 +212,29 @@ mod tests {
         let manifest = PaneManifest {
             panes: HashMap::from([(0, vec![pane(7, "terminal", 0, 0), sidebar])]),
         };
-        let normalized = panes(manifest, 7);
-        assert_eq!(normalized.sidebar_tab, Some(TabPosition::at(0)));
-        assert_eq!(normalized.tabs[0].panes.len(), 1);
-        assert_eq!(normalized.tabs[0].panes[0].id, PaneId::new("7"));
+        let normalized = layout(manifest, 7);
+        assert_eq!(normalized.tabs[0].sidebar_pane, Some(SidebarPaneReport));
+        assert_eq!(normalized.tabs[0].content_panes.len(), 1);
+        assert_eq!(normalized.tabs[0].content_panes[0].id, PaneId::new("7"));
+    }
+
+    #[test]
+    fn every_tab_containing_this_sidebar_is_marked() {
+        let sidebar = PaneInfo {
+            id: 7,
+            is_plugin: true,
+            is_selectable: true,
+            ..PaneInfo::default()
+        };
+        let manifest = PaneManifest {
+            panes: HashMap::from([(0, vec![sidebar.clone()]), (1, vec![sidebar])]),
+        };
+
+        let normalized = layout(manifest, 7);
+        assert!(normalized
+            .tabs
+            .iter()
+            .all(|tab| tab.sidebar_pane == Some(SidebarPaneReport)));
     }
 
     #[test]

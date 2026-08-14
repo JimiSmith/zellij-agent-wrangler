@@ -3,7 +3,7 @@
 use agent_wrangler_ui::model::{PaneId, TabPosition};
 use agent_wrangler_ui::tree::{Pane, Tab};
 
-use crate::model::{Focus, FocusTarget, PaneSnapshot, TabId, TabReport};
+use crate::model::{Focus, FocusTarget, SessionLayout, TabId, TabReport};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReconciledFocus {
@@ -18,21 +18,21 @@ pub struct ReconciledSession {
     pub focus: ReconciledFocus,
 }
 
-pub fn tab_of_pane(snapshot: &PaneSnapshot, pane: &PaneId) -> Option<TabPosition> {
-    snapshot.tabs.iter().find_map(|tab| {
-        tab.panes
+pub fn tab_of_pane(layout: &SessionLayout, pane: &PaneId) -> Option<TabPosition> {
+    layout.tabs.iter().find_map(|tab| {
+        tab.content_panes
             .iter()
             .any(|candidate| &candidate.id == pane)
             .then_some(tab.position)
     })
 }
 
-pub fn first_pane(snapshot: &PaneSnapshot, tab: TabPosition) -> Option<PaneId> {
-    snapshot
+pub fn first_pane(layout: &SessionLayout, tab: TabPosition) -> Option<PaneId> {
+    layout
         .tabs
         .iter()
         .find(|candidate| candidate.position == tab)?
-        .panes
+        .content_panes
         .first()
         .map(|pane| pane.id.clone())
 }
@@ -45,14 +45,18 @@ pub fn position_of(tabs: &[TabReport], id: &TabId) -> Option<TabPosition> {
 
 pub fn left_behind_by(
     tabs: &[TabReport],
-    panes: &PaneSnapshot,
+    layout: &SessionLayout,
     now: &Focus,
     held: Option<PaneId>,
 ) -> Option<PaneId> {
-    let Some(mine) = panes.sidebar_tab else {
+    let Some(current) = position_of(tabs, &now.tab) else {
         return held;
     };
-    if position_of(tabs, &now.tab) != Some(mine) {
+    if !layout
+        .tabs
+        .iter()
+        .any(|tab| tab.position == current && tab.sidebar_pane.is_some())
+    {
         return held;
     }
     match &now.target {
@@ -62,27 +66,39 @@ pub fn left_behind_by(
 }
 
 pub fn stand_down_to(
-    panes: &PaneSnapshot,
+    layout: &SessionLayout,
     left_behind: Option<&PaneId>,
+    leaving_from: TabPosition,
     going_to: TabPosition,
 ) -> Option<PaneId> {
-    let mine = panes.sidebar_tab?;
-    if mine == going_to {
+    let source = layout
+        .tabs
+        .iter()
+        .find(|tab| tab.position == leaving_from && tab.sidebar_pane.is_some())?;
+    if source.position == going_to {
         return None;
     }
-    left_behind.cloned().or_else(|| first_pane(panes, mine))
+    left_behind
+        .filter(|remembered| {
+            source
+                .content_panes
+                .iter()
+                .any(|pane| &pane.id == *remembered)
+        })
+        .cloned()
+        .or_else(|| first_pane(layout, source.position))
 }
 
 pub fn reconcile(
     reports: &[TabReport],
-    panes: &PaneSnapshot,
+    layout: &SessionLayout,
     visible: bool,
     observed_focus: Option<&Focus>,
     focus_refresh_pending: bool,
 ) -> ReconciledSession {
     let focus = reconcile_focus(
         reports,
-        panes,
+        layout,
         visible,
         observed_focus,
         focus_refresh_pending,
@@ -102,12 +118,12 @@ pub fn reconcile(
         .into_iter()
         .map(|report| {
             let active = here == Some(report.position);
-            let listed = panes
+            let listed = layout
                 .tabs
                 .iter()
                 .find(|tab| tab.position == report.position)
                 .map(|tab| {
-                    tab.panes
+                    tab.content_panes
                         .iter()
                         .map(|pane| {
                             Pane::new(pane.id.clone(), &pane.title, active && on == Some(&pane.id))
@@ -129,7 +145,7 @@ pub fn reconcile(
 
 fn reconcile_focus(
     reports: &[TabReport],
-    panes: &PaneSnapshot,
+    layout: &SessionLayout,
     visible: bool,
     observed: Option<&Focus>,
     pending: bool,
@@ -144,11 +160,15 @@ fn reconcile_focus(
     let Some(focused_tab) = position_of(reports, &observed.tab) else {
         return ReconciledFocus::Pending;
     };
-    if panes.sidebar_tab != Some(focused_tab) {
+    if !layout
+        .tabs
+        .iter()
+        .any(|tab| tab.position == focused_tab && tab.sidebar_pane.is_some())
+    {
         return ReconciledFocus::Pending;
     }
     if let FocusTarget::Content(pane) = &observed.target {
-        if tab_of_pane(panes, pane) != Some(focused_tab) {
+        if tab_of_pane(layout, pane) != Some(focused_tab) {
             return ReconciledFocus::Pending;
         }
     }
@@ -158,7 +178,7 @@ fn reconcile_focus(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{PaneReport, TabPanes};
+    use crate::model::{PaneReport, SessionLayout, SidebarPaneReport, TabLayout};
 
     fn tab(id: &str, position: usize) -> TabReport {
         TabReport {
@@ -169,44 +189,46 @@ mod tests {
         }
     }
 
-    fn panes() -> PaneSnapshot {
-        PaneSnapshot {
+    fn layout() -> SessionLayout {
+        SessionLayout {
             tabs: vec![
-                TabPanes {
+                TabLayout {
                     position: TabPosition::at(0),
-                    panes: vec![PaneReport {
+                    content_panes: vec![PaneReport {
                         id: PaneId::new("%1"),
                         title: "one".to_string(),
                         focused: false,
                     }],
+                    sidebar_pane: Some(SidebarPaneReport),
                 },
-                TabPanes {
+                TabLayout {
                     position: TabPosition::at(1),
-                    panes: vec![PaneReport {
+                    content_panes: vec![PaneReport {
                         id: PaneId::new("%2"),
                         title: "two".to_string(),
                         focused: false,
                     }],
+                    sidebar_pane: None,
                 },
             ],
-            sidebar_tab: Some(TabPosition::at(0)),
         }
     }
 
-    fn observed(reports: &[TabReport], panes: &PaneSnapshot, focus: &Focus) -> ReconciledSession {
-        reconcile(reports, panes, true, Some(focus), false)
+    fn observed(reports: &[TabReport], layout: &SessionLayout, focus: &Focus) -> ReconciledSession {
+        reconcile(reports, layout, true, Some(focus), false)
     }
 
     #[test]
     fn focus_uses_a_stable_tab_id_after_positions_change() {
         let tabs = vec![tab("0", 0), tab("2", 1)];
-        let mut panes = panes();
-        panes.sidebar_tab = Some(TabPosition::at(1));
+        let mut layout = layout();
+        layout.tabs[0].sidebar_pane = None;
+        layout.tabs[1].sidebar_pane = Some(SidebarPaneReport);
         let focus = Focus {
             tab: TabId::new("2"),
             target: FocusTarget::Content(PaneId::new("%2")),
         };
-        let snapshot = observed(&tabs, &panes, &focus);
+        let snapshot = observed(&tabs, &layout, &focus);
         assert_eq!(snapshot.focus, ReconciledFocus::Confirmed(focus));
         assert!(!snapshot.tabs[0].active);
         assert!(snapshot.tabs[1].active);
@@ -221,14 +243,14 @@ mod tests {
             target: FocusTarget::Sidebar,
         };
         assert_eq!(
-            reconcile(&reports, &panes(), false, Some(&focus), false).focus,
+            reconcile(&reports, &layout(), false, Some(&focus), false).focus,
             ReconciledFocus::Unknown
         );
         assert_eq!(
-            reconcile(&reports, &panes(), true, None, false).focus,
+            reconcile(&reports, &layout(), true, None, false).focus,
             ReconciledFocus::Unknown
         );
-        let pending = reconcile(&reports, &panes(), true, Some(&focus), true);
+        let pending = reconcile(&reports, &layout(), true, Some(&focus), true);
         assert_eq!(pending.focus, ReconciledFocus::Pending);
         assert!(pending.tabs.iter().all(|tab| !tab.active));
     }
@@ -241,7 +263,7 @@ mod tests {
             target: FocusTarget::Other,
         };
         assert_eq!(
-            observed(&reports, &panes(), &focus).focus,
+            observed(&reports, &layout(), &focus).focus,
             ReconciledFocus::Confirmed(focus)
         );
     }
@@ -260,12 +282,12 @@ mod tests {
             },
         ] {
             assert_eq!(
-                observed(&reports, &panes(), &focus).focus,
+                observed(&reports, &layout(), &focus).focus,
                 ReconciledFocus::Pending
             );
         }
-        let mut missing_sidebar = panes();
-        missing_sidebar.sidebar_tab = None;
+        let mut missing_sidebar = layout();
+        missing_sidebar.tabs[0].sidebar_pane = None;
         let focus = Focus {
             tab: TabId::new("mine"),
             target: FocusTarget::Sidebar,
@@ -278,14 +300,36 @@ mod tests {
 
     #[test]
     fn pane_ids_are_opaque_when_finding_and_leaving_tabs() {
-        let panes = panes();
+        let layout = layout();
         let id = PaneId::new("%2");
-        assert_eq!(tab_of_pane(&panes, &id), Some(TabPosition::at(1)));
-        assert_eq!(first_pane(&panes, TabPosition::at(1)), Some(id));
+        assert_eq!(tab_of_pane(&layout, &id), Some(TabPosition::at(1)));
+        assert_eq!(first_pane(&layout, TabPosition::at(1)), Some(id));
         assert_eq!(
-            stand_down_to(&panes, Some(&PaneId::new("%held")), TabPosition::at(1)),
-            Some(PaneId::new("%held"))
+            stand_down_to(
+                &layout,
+                Some(&PaneId::new("%1")),
+                TabPosition::at(0),
+                TabPosition::at(1),
+            ),
+            Some(PaneId::new("%1"))
         );
+    }
+
+    #[test]
+    fn stand_down_falls_back_when_the_remembered_pane_closed_or_moved() {
+        let layout = layout();
+
+        for stale in ["%gone", "%2"] {
+            assert_eq!(
+                stand_down_to(
+                    &layout,
+                    Some(&PaneId::new(stale)),
+                    TabPosition::at(0),
+                    TabPosition::at(1),
+                ),
+                Some(PaneId::new("%1"))
+            );
+        }
     }
 
     #[test]
@@ -297,7 +341,7 @@ mod tests {
             target: FocusTarget::Content(PaneId::new("%2")),
         };
         assert_eq!(
-            left_behind_by(&tabs, &panes(), &elsewhere, held.clone()),
+            left_behind_by(&tabs, &layout(), &elsewhere, held.clone()),
             held
         );
         let here = Focus {
@@ -305,7 +349,7 @@ mod tests {
             target: FocusTarget::Content(PaneId::new("%1")),
         };
         assert_eq!(
-            left_behind_by(&tabs, &panes(), &here, None),
+            left_behind_by(&tabs, &layout(), &here, None),
             Some(PaneId::new("%1"))
         );
     }
@@ -314,7 +358,7 @@ mod tests {
     fn tabs_are_sorted_by_position_independently_of_report_order() {
         let resolved = reconcile(
             &[tab("third", 2), tab("first", 0), tab("second", 1)],
-            &PaneSnapshot::default(),
+            &SessionLayout::default(),
             false,
             None,
             false,
@@ -330,9 +374,9 @@ mod tests {
     fn reported_focus_flags_are_never_a_presentation_fallback() {
         let mut reports = vec![tab("mine", 0), tab("other", 1)];
         reports[1].active = true;
-        let mut panes = panes();
-        panes.tabs[1].panes[0].focused = true;
-        let resolved = reconcile(&reports, &panes, true, None, false);
+        let mut layout = layout();
+        layout.tabs[1].content_panes[0].focused = true;
+        let resolved = reconcile(&reports, &layout, true, None, false);
         assert_eq!(resolved.focus, ReconciledFocus::Unknown);
         assert!(resolved.tabs.iter().all(|tab| !tab.active));
         assert!(resolved
@@ -345,7 +389,7 @@ mod tests {
             tab: TabId::new("missing"),
             target: FocusTarget::Content(PaneId::new("%1")),
         };
-        let unresolved = observed(&reports, &panes, &unknown);
+        let unresolved = observed(&reports, &layout, &unknown);
         assert_eq!(unresolved.focus, ReconciledFocus::Pending);
         assert!(unresolved.tabs.iter().all(|tab| !tab.active));
     }
@@ -357,7 +401,7 @@ mod tests {
             tab: TabId::new("mine"),
             target: FocusTarget::Sidebar,
         };
-        let resolved = observed(&reports, &panes(), &focus);
+        let resolved = observed(&reports, &layout(), &focus);
         assert_eq!(resolved.focus, ReconciledFocus::Confirmed(focus));
         assert!(resolved.tabs[0].active);
         assert!(resolved.tabs[0].panes.iter().all(|pane| !pane.focused));
@@ -366,19 +410,48 @@ mod tests {
 
     #[test]
     fn leaving_for_the_same_tab_stands_down_nowhere() {
-        let panes = panes();
+        let layout = layout();
         assert_eq!(
-            stand_down_to(&panes, Some(&PaneId::new("%1")), TabPosition::at(0)),
+            stand_down_to(
+                &layout,
+                Some(&PaneId::new("%1")),
+                TabPosition::at(0),
+                TabPosition::at(0),
+            ),
             None
         );
     }
 
     #[test]
     fn leaving_without_a_remembered_pane_uses_the_first_content_pane() {
-        let panes = panes();
+        let layout = layout();
         assert_eq!(
-            stand_down_to(&panes, None, TabPosition::at(1)),
+            stand_down_to(&layout, None, TabPosition::at(0), TabPosition::at(1),),
             Some(PaneId::new("%1"))
+        );
+    }
+
+    #[test]
+    fn each_sidebar_is_resolved_against_its_own_tab() {
+        let reports = vec![tab("first", 0), tab("second", 1)];
+        let mut layout = layout();
+        layout.tabs[1].sidebar_pane = Some(SidebarPaneReport);
+        let focus = Focus {
+            tab: TabId::new("second"),
+            target: FocusTarget::Content(PaneId::new("%2")),
+        };
+
+        assert_eq!(
+            observed(&reports, &layout, &focus).focus,
+            ReconciledFocus::Confirmed(focus.clone())
+        );
+        assert_eq!(
+            left_behind_by(&reports, &layout, &focus, None),
+            Some(PaneId::new("%2"))
+        );
+        assert_eq!(
+            stand_down_to(&layout, None, TabPosition::at(1), TabPosition::at(0),),
+            Some(PaneId::new("%2"))
         );
     }
 
@@ -391,7 +464,7 @@ mod tests {
         };
         let held = Some(PaneId::new("%held"));
         assert_eq!(
-            left_behind_by(&reports, &panes(), &focus, held.clone()),
+            left_behind_by(&reports, &layout(), &focus, held.clone()),
             held
         );
     }

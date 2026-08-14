@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use agent_wrangler_core::agent::{Agent, SessionId, Turn};
 use agent_wrangler_core::label::label;
@@ -11,7 +11,7 @@ use crate::calls::Answered;
 use crate::client::Client;
 use crate::model::{
     AgentSnapshot, Broadcast, Command, Decision, Effect, Focus, FocusTarget, Input,
-    InteractionItem, PaneSnapshot, Permission, RenderedView, TabId, TabReport, UserAction,
+    InteractionItem, Permission, RenderedView, SessionLayout, TabId, TabReport, UserAction,
     ViewAction,
 };
 use crate::options::Options;
@@ -26,7 +26,7 @@ pub struct Application {
     options: Options,
     multiplexer: String,
     tabs: Vec<TabReport>,
-    panes: PaneSnapshot,
+    layout: SessionLayout,
     registry: Registry,
     agent_panes: BTreeMap<SessionId, PaneId>,
     answered: Answered,
@@ -39,8 +39,8 @@ pub struct Application {
     visible: bool,
     observed_focus: Option<Focus>,
     focus_refresh_pending: bool,
-    left_behind: Option<PaneId>,
-    had_company: bool,
+    left_behind: BTreeMap<TabId, PaneId>,
+    tabs_with_company: BTreeSet<TabId>,
     installed: bool,
     mismatched: bool,
 }
@@ -60,7 +60,7 @@ impl Application {
         match input {
             Input::VisibilityChanged(visible) => self.change_visibility(visible),
             Input::TabsReported(tabs) => self.report_tabs(tabs),
-            Input::PanesReported(panes) => self.report_panes(panes),
+            Input::LayoutReported(layout) => self.report_layout(layout),
             Input::PaneChanged(pane) => Decision::effect(Effect::RefreshPaneTitle(pane)),
             Input::PaneTitleObserved { pane, title } => self.observe_pane_title(pane, title),
             Input::FocusObserved(focus) => self.observe_focus(focus),
@@ -96,15 +96,19 @@ impl Application {
 
     fn report_tabs(&mut self, tabs: Vec<TabReport>) -> Decision {
         let changed = self.tabs != tabs;
+        self.left_behind
+            .retain(|id, _| tabs.iter().any(|tab| &tab.id == id));
+        self.tabs_with_company
+            .retain(|id| tabs.iter().any(|tab| &tab.id == id));
         self.tabs = tabs;
         let mut decision = self.refresh_focus();
         decision.request_repaint(changed);
         decision
     }
 
-    fn report_panes(&mut self, panes: PaneSnapshot) -> Decision {
-        let changed = self.panes != panes;
-        self.panes = panes;
+    fn report_layout(&mut self, layout: SessionLayout) -> Decision {
+        let changed = self.layout != layout;
+        self.layout = layout;
         let mut decision = self.refresh_focus();
         decision.request_repaint(changed);
         decision
@@ -113,8 +117,8 @@ impl Application {
     fn observe_pane_title(&mut self, pane: PaneId, title: Option<String>) -> Decision {
         let mut changed = false;
         if let Some(title) = title {
-            for tab in &mut self.panes.tabs {
-                for candidate in &mut tab.panes {
+            for tab in &mut self.layout.tabs {
+                for candidate in &mut tab.content_panes {
                     if candidate.id == pane && candidate.title != title {
                         candidate.title = title.clone();
                         changed = true;
@@ -252,7 +256,7 @@ impl Application {
     fn reconciled_session(&self) -> session::ReconciledSession {
         let mut resolved = session::reconcile(
             &self.tabs,
-            &self.panes,
+            &self.layout,
             self.visible,
             self.observed_focus.as_ref(),
             self.focus_refresh_pending,
@@ -275,26 +279,42 @@ impl Application {
         let session::ReconciledFocus::Confirmed(focus) = resolved.focus else {
             return Decision::default();
         };
-        self.left_behind =
-            session::left_behind_by(&self.tabs, &self.panes, &focus, self.left_behind.clone());
+        let Some(focused_tab) = session::position_of(&self.tabs, &focus.tab) else {
+            return Decision::default();
+        };
+        let remembered = self.left_behind.get(&focus.tab).cloned();
+        if let Some(pane) = session::left_behind_by(&self.tabs, &self.layout, &focus, remembered) {
+            self.left_behind.insert(focus.tab.clone(), pane);
+        }
         let mut decision = Decision::default();
         let answered = self.answer(&focus, &mut decision);
-        self.leave_if_alone(&resolved.tabs, &mut decision);
+        self.leave_if_alone(&focus.tab, focused_tab, &resolved.tabs, &mut decision);
         self.install_hooks(&mut decision);
         decision.request_repaint(answered);
         decision
     }
 
-    fn leave_if_alone(&mut self, resolved: &[tree::Tab], decision: &mut Decision) {
-        let Some(mine) = self.panes.sidebar_tab else {
+    fn leave_if_alone(
+        &mut self,
+        focused_id: &TabId,
+        focused_tab: TabPosition,
+        resolved: &[tree::Tab],
+        decision: &mut Decision,
+    ) {
+        if !self
+            .layout
+            .tabs
+            .iter()
+            .any(|tab| tab.position == focused_tab && tab.sidebar_pane.is_some())
+        {
             return;
-        };
-        let Some(tab) = resolved.iter().find(|tab| tab.position == mine) else {
+        }
+        let Some(tab) = resolved.iter().find(|tab| tab.position == focused_tab) else {
             return;
         };
         if !tab.panes.is_empty() {
-            self.had_company = true;
-        } else if self.had_company {
+            self.tabs_with_company.insert(focused_id.clone());
+        } else if self.tabs_with_company.contains(focused_id) {
             decision.effects.push(Effect::CloseSidebar);
         }
     }
@@ -411,7 +431,7 @@ impl Application {
     fn activate_action(&self, action: &ViewAction, decision: &mut Decision) {
         match action {
             ViewAction::ActivatePane(pane) => {
-                if session::tab_of_pane(&self.panes, pane).is_some() {
+                if session::tab_of_pane(&self.layout, pane).is_some() {
                     self.go_to_pane(pane.clone(), decision);
                 }
             }
@@ -419,7 +439,7 @@ impl Application {
                 let Some(position) = self.tab_position(tab) else {
                     return;
                 };
-                match session::first_pane(&self.panes, position) {
+                match session::first_pane(&self.layout, position) {
                     Some(pane) => self.go_to_pane(pane, decision),
                     None => {
                         self.stand_down(position, decision);
@@ -430,7 +450,7 @@ impl Application {
             ViewAction::ActivateAgent(agent) => {
                 if self.registry.get(agent).is_some() {
                     if let Some(pane) = self.agent_panes.get(agent) {
-                        if session::tab_of_pane(&self.panes, pane).is_some() {
+                        if session::tab_of_pane(&self.layout, pane).is_some() {
                             self.go_to_pane(pane.clone(), decision);
                         }
                     }
@@ -440,15 +460,25 @@ impl Application {
     }
 
     fn go_to_pane(&self, pane: PaneId, decision: &mut Decision) {
-        if let Some(tab) = session::tab_of_pane(&self.panes, &pane) {
+        if let Some(tab) = session::tab_of_pane(&self.layout, &pane) {
             self.stand_down(tab, decision);
         }
         decision.effects.push(Effect::FocusPane(pane));
     }
 
     fn stand_down(&self, going_to: TabPosition, decision: &mut Decision) {
-        if let Some(pane) = session::stand_down_to(&self.panes, self.left_behind.as_ref(), going_to)
-        {
+        let Some(focus) = self.observed_focus.as_ref() else {
+            return;
+        };
+        let Some(leaving_from) = session::position_of(&self.tabs, &focus.tab) else {
+            return;
+        };
+        if let Some(pane) = session::stand_down_to(
+            &self.layout,
+            self.left_behind.get(&focus.tab),
+            leaving_from,
+            going_to,
+        ) {
             decision.effects.push(Effect::FocusPane(pane));
         }
     }
@@ -470,7 +500,7 @@ impl Application {
         let tab = self
             .agent_panes
             .get(&agent.session)
-            .and_then(|pane| session::tab_of_pane(&self.panes, pane))
+            .and_then(|pane| session::tab_of_pane(&self.layout, pane))
             .and_then(|position| self.tabs.iter().find(|tab| tab.position == position))
             .map(|tab| tab.name.clone())
             .unwrap_or_default();
@@ -567,7 +597,7 @@ fn said(stderr: &[u8]) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{PaneReport, TabId, TabPanes};
+    use crate::model::{PaneReport, SidebarPaneReport, TabId, TabLayout};
     use agent_wrangler_core::agent::Meta;
     use agent_wrangler_core::origin::Origin;
     use agent_wrangler_ui::ansi;
@@ -581,14 +611,13 @@ mod tests {
         }
     }
 
-    fn snapshot(sidebar: usize, tabs: &[(usize, &[&str])]) -> PaneSnapshot {
-        PaneSnapshot {
-            sidebar_tab: Some(TabPosition::at(sidebar)),
+    fn layout(sidebar: usize, tabs: &[(usize, &[&str])]) -> SessionLayout {
+        SessionLayout {
             tabs: tabs
                 .iter()
-                .map(|(position, panes)| TabPanes {
+                .map(|(position, panes)| TabLayout {
                     position: TabPosition::at(*position),
-                    panes: panes
+                    content_panes: panes
                         .iter()
                         .map(|id| PaneReport {
                             id: PaneId::new(*id),
@@ -596,6 +625,7 @@ mod tests {
                             focused: false,
                         })
                         .collect(),
+                    sidebar_pane: (*position == sidebar).then_some(SidebarPaneReport),
                 })
                 .collect(),
         }
@@ -653,22 +683,41 @@ mod tests {
         );
         assert_eq!(app.tabs[0].id, TabId::new("10"));
 
-        let panes = snapshot(0, &[(0, &["%7"])]);
-        let decision = app.reduce(Input::PanesReported(panes.clone()));
+        let panes = layout(0, &[(0, &["%7"])]);
+        let decision = app.reduce(Input::LayoutReported(panes.clone()));
         assert_eq!(
             decision,
             Decision {
                 effects: vec![Effect::RefreshFocus, Effect::Repaint],
             }
         );
-        assert_eq!(app.panes, panes);
+        assert_eq!(app.layout, panes);
+    }
+
+    #[test]
+    fn tab_reports_prune_state_for_closed_stable_ids() {
+        let mut app = app();
+        for id in ["closed", "live"] {
+            let id = TabId::new(id);
+            app.left_behind.insert(id.clone(), PaneId::new(id.as_str()));
+            app.tabs_with_company.insert(id);
+        }
+
+        app.reduce(Input::TabsReported(vec![tab("live", 0)]));
+
+        assert_eq!(app.left_behind.len(), 1);
+        assert!(app.left_behind.contains_key(&TabId::new("live")));
+        assert!(!app.left_behind.contains_key(&TabId::new("closed")));
+        assert_eq!(app.tabs_with_company.len(), 1);
+        assert!(app.tabs_with_company.contains(&TabId::new("live")));
+        assert!(!app.tabs_with_company.contains(&TabId::new("closed")));
     }
 
     #[test]
     fn visibility_requires_a_fresh_observation_before_focus_is_confirmed() {
         let mut app = Application::new(Options::default(), "zellij");
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["7"])])));
         app.selected = Some(RowKey::Pane(PaneId::new("7")));
         app.reduce(focus("10", FocusTarget::Sidebar));
         assert_eq!(
@@ -710,7 +759,7 @@ mod tests {
     fn a_failed_focus_query_clears_the_cached_observation() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["7"])])));
         app.reduce(focus("10", FocusTarget::Content(PaneId::new("7"))));
         assert!(app.observed_focus.is_some());
 
@@ -728,7 +777,7 @@ mod tests {
     fn topology_and_title_reports_invalidate_confirmation_until_refresh() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["7"])])));
         app.reduce(focus("10", FocusTarget::Sidebar));
         assert!(matches!(
             app.reconciled_session().focus,
@@ -795,7 +844,7 @@ mod tests {
         let mut app = Application::new(options, "zellij");
         app.reduce(Input::VisibilityChanged(true));
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["7"])])));
         app.reduce(focus("10", FocusTarget::Sidebar));
         app.reduce(Input::PermissionReported(Permission::Granted));
 
@@ -816,7 +865,7 @@ mod tests {
         let mut app = Application::new(options, "zellij");
         app.reduce(Input::VisibilityChanged(true));
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["7"])])));
         app.reduce(Input::PermissionReported(Permission::Granted));
 
         assert_eq!(app.reduce(Input::EventSettled), Decision::default());
@@ -838,7 +887,7 @@ mod tests {
     fn activation_emits_stand_down_before_the_destination() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
-        app.reduce(Input::PanesReported(snapshot(
+        app.reduce(Input::LayoutReported(layout(
             0,
             &[(0, &["1"]), (1, &["2"])],
         )));
@@ -858,10 +907,27 @@ mod tests {
     }
 
     #[test]
+    fn stand_down_restores_the_pane_remembered_for_the_focused_sidebar() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
+        let mut reported = layout(0, &[(0, &["1"]), (1, &["2"])]);
+        reported.tabs[1].sidebar_pane = Some(SidebarPaneReport);
+        app.reduce(Input::LayoutReported(reported));
+        app.reduce(focus("10", FocusTarget::Content(PaneId::new("1"))));
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        app.reduce(focus("20", FocusTarget::Content(PaneId::new("2"))));
+        app.reduce(focus("20", FocusTarget::Sidebar));
+
+        let mut decision = Decision::default();
+        app.stand_down(TabPosition::at(0), &mut decision);
+        assert_eq!(decision.effects, vec![Effect::FocusPane(PaneId::new("2"))]);
+    }
+
+    #[test]
     fn a_selected_tab_survives_reordering_and_switches_by_stable_id() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["1"]), (1, &[])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["1"]), (1, &[])])));
         app.reduce(focus("10", FocusTarget::Content(PaneId::new("1"))));
         app.reduce(focus("10", FocusTarget::Sidebar));
         app.selected = Some(RowKey::Tab(TabId::new("20")));
@@ -869,7 +935,7 @@ mod tests {
         assert_eq!(rendered.selection, Some(RowKey::Tab(TabId::new("20"))));
 
         app.reduce(Input::TabsReported(vec![tab("20", 0), tab("10", 1)]));
-        app.reduce(Input::PanesReported(snapshot(1, &[(0, &[]), (1, &["1"])])));
+        app.reduce(Input::LayoutReported(layout(1, &[(0, &[]), (1, &["1"])])));
         app.reduce(focus("10", FocusTarget::Sidebar));
 
         assert_eq!(
@@ -890,7 +956,7 @@ mod tests {
     fn an_agent_call_in_the_focused_pane_is_answered_by_an_effect() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["7"])])));
         app.reduce(Input::PermissionReported(Permission::Granted));
         app.reduce(focus("10", FocusTarget::Content(PaneId::new("7"))));
         let session = SessionId::new("call").unwrap();
@@ -920,7 +986,7 @@ mod tests {
     fn a_call_waits_for_pending_focus_to_be_confirmed() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["7"])])));
         app.reduce(Input::PermissionReported(Permission::Granted));
         app.reduce(focus("10", FocusTarget::Content(PaneId::new("7"))));
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
@@ -953,7 +1019,7 @@ mod tests {
     fn a_hidden_sidebar_does_not_answer_from_stale_focus() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["7"])])));
         app.reduce(Input::PermissionReported(Permission::Granted));
         app.reduce(focus("10", FocusTarget::Content(PaneId::new("7"))));
         app.reduce(Input::VisibilityChanged(false));
@@ -972,10 +1038,27 @@ mod tests {
     fn a_sidebar_closes_only_after_its_tab_has_had_company() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["7"])])));
         app.reduce(focus("10", FocusTarget::Sidebar));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &[])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &[])])));
         let decision = app.reduce(focus("10", FocusTarget::Sidebar));
+        assert!(decision.effects.contains(&Effect::CloseSidebar));
+    }
+
+    #[test]
+    fn company_is_tracked_in_the_focused_tab_when_every_tab_has_a_sidebar() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
+        let mut reported = layout(0, &[(0, &[]), (1, &["7"])]);
+        reported.tabs[1].sidebar_pane = Some(SidebarPaneReport);
+        app.reduce(Input::LayoutReported(reported.clone()));
+        app.reduce(focus("20", FocusTarget::Sidebar));
+        assert!(app.tabs_with_company.contains(&TabId::new("20")));
+        assert!(!app.tabs_with_company.contains(&TabId::new("10")));
+
+        reported.tabs[1].content_panes.clear();
+        app.reduce(Input::LayoutReported(reported));
+        let decision = app.reduce(focus("20", FocusTarget::Sidebar));
         assert!(decision.effects.contains(&Effect::CloseSidebar));
     }
 
@@ -983,11 +1066,11 @@ mod tests {
     fn an_empty_tab_does_not_close_while_topology_is_pending() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["7"])])));
         app.reduce(focus("10", FocusTarget::Sidebar));
-        assert!(app.had_company);
+        assert!(app.tabs_with_company.contains(&TabId::new("10")));
 
-        let report = app.reduce(Input::PanesReported(snapshot(0, &[(0, &[])])));
+        let report = app.reduce(Input::LayoutReported(layout(0, &[(0, &[])])));
         assert!(!report.effects.contains(&Effect::CloseSidebar));
         assert!(!app
             .reduce(Input::EventSettled)
@@ -1002,13 +1085,13 @@ mod tests {
     fn company_is_recorded_only_from_confirmed_topology() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["7"])])));
 
         app.reduce(Input::EventSettled);
-        assert!(!app.had_company);
+        assert!(!app.tabs_with_company.contains(&TabId::new("10")));
 
         app.reduce(focus("10", FocusTarget::Sidebar));
-        assert!(app.had_company);
+        assert!(app.tabs_with_company.contains(&TabId::new("10")));
     }
 
     #[test]
@@ -1025,7 +1108,7 @@ mod tests {
     fn equal_state_and_area_produce_equal_views_and_ansi() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["1"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["1"])])));
         app.reduce(focus("10", FocusTarget::Sidebar));
 
         let first = app.render(Rect::new(0, 0, 30, 8));
@@ -1041,7 +1124,7 @@ mod tests {
     fn only_items_that_fit_in_the_frame_are_interactive() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
-        app.reduce(Input::PanesReported(snapshot(
+        app.reduce(Input::LayoutReported(layout(
             0,
             &[(0, &["1"]), (1, &["2"])],
         )));
@@ -1076,7 +1159,7 @@ mod tests {
     fn navigation_deduplicates_wrapped_notifications_in_screen_order() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["1", "2"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["1", "2"])])));
         app.reduce(focus("10", FocusTarget::Sidebar));
         app.reduce(Input::Agents(agents(&[
             ("first", "1", Turn::Attention),
@@ -1118,7 +1201,7 @@ mod tests {
     fn resizing_replaces_the_line_interaction_map() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
-        app.reduce(Input::PanesReported(snapshot(
+        app.reduce(Input::LayoutReported(layout(
             0,
             &[(0, &["1"]), (1, &["2"])],
         )));
@@ -1189,7 +1272,7 @@ mod tests {
     fn a_click_uses_the_last_rendered_line_and_orders_its_effects() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["%7"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["%7"])])));
         app.reduce(focus("10", FocusTarget::Sidebar));
         app.render(Rect::new(0, 0, 30, 5));
 
@@ -1208,12 +1291,12 @@ mod tests {
     fn clicks_keep_the_last_rendered_meaning_until_repaint() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("old-tab", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["old-pane"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["old-pane"])])));
         app.reduce(focus("old-tab", FocusTarget::Sidebar));
         app.render(Rect::new(0, 0, 30, 5));
 
         app.reduce(Input::TabsReported(vec![tab("new-tab", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["new-pane"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["new-pane"])])));
         app.reduce(focus("new-tab", FocusTarget::Sidebar));
         let decision = app.reduce(Input::User(UserAction::Click(1)));
 
@@ -1230,7 +1313,7 @@ mod tests {
     fn interaction_before_the_first_render_is_a_no_op() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["1"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["1"])])));
         app.reduce(focus("10", FocusTarget::Sidebar));
 
         for action in [
@@ -1247,7 +1330,7 @@ mod tests {
     fn peer_selection_changes_interaction_only_after_rendering() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
-        app.reduce(Input::PanesReported(snapshot(
+        app.reduce(Input::LayoutReported(layout(
             0,
             &[(0, &["1"]), (1, &["2"])],
         )));
@@ -1279,7 +1362,7 @@ mod tests {
     fn stale_tab_pane_and_agent_actions_are_safe_no_ops() {
         let mut tab_app = app();
         tab_app.reduce(Input::TabsReported(vec![tab("old", 0)]));
-        tab_app.reduce(Input::PanesReported(snapshot(0, &[(0, &[])])));
+        tab_app.reduce(Input::LayoutReported(layout(0, &[(0, &[])])));
         tab_app.reduce(focus("old", FocusTarget::Sidebar));
         tab_app.render(Rect::new(0, 0, 30, 4));
         tab_app.reduce(Input::TabsReported(vec![tab("replacement", 0)]));
@@ -1290,11 +1373,11 @@ mod tests {
 
         let mut pane_app = app();
         pane_app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        pane_app.reduce(Input::PanesReported(snapshot(0, &[(0, &["old"])])));
+        pane_app.reduce(Input::LayoutReported(layout(0, &[(0, &["old"])])));
         pane_app.reduce(focus("10", FocusTarget::Sidebar));
         pane_app.selected = Some(RowKey::Pane(PaneId::new("old")));
         pane_app.render(Rect::new(0, 0, 30, 4));
-        pane_app.reduce(Input::PanesReported(snapshot(0, &[(0, &["replacement"])])));
+        pane_app.reduce(Input::LayoutReported(layout(0, &[(0, &["replacement"])])));
         assert!(pane_app
             .reduce(Input::User(UserAction::Activate))
             .effects
@@ -1302,7 +1385,7 @@ mod tests {
 
         let mut agent_app = app();
         agent_app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        agent_app.reduce(Input::PanesReported(snapshot(0, &[(0, &["1"])])));
+        agent_app.reduce(Input::LayoutReported(layout(0, &[(0, &["1"])])));
         agent_app.reduce(focus("10", FocusTarget::Sidebar));
         let session = SessionId::new("agent").unwrap();
         agent_app.reduce(Input::Agents(agents(&[("agent", "1", Turn::Idle)])));
@@ -1322,7 +1405,7 @@ mod tests {
     fn moved_panes_and_agents_resolve_by_stable_id() {
         let mut pane_app = app();
         pane_app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
-        pane_app.reduce(Input::PanesReported(snapshot(
+        pane_app.reduce(Input::LayoutReported(layout(
             0,
             &[(0, &["held", "moving"]), (1, &[])],
         )));
@@ -1330,7 +1413,7 @@ mod tests {
         pane_app.reduce(focus("10", FocusTarget::Sidebar));
         pane_app.selected = Some(RowKey::Pane(PaneId::new("moving")));
         pane_app.render(Rect::new(0, 0, 30, 8));
-        pane_app.reduce(Input::PanesReported(snapshot(
+        pane_app.reduce(Input::LayoutReported(layout(
             0,
             &[(0, &["held"]), (1, &["moving"])],
         )));
@@ -1344,7 +1427,7 @@ mod tests {
 
         let mut agent_app = app();
         agent_app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
-        agent_app.reduce(Input::PanesReported(snapshot(
+        agent_app.reduce(Input::LayoutReported(layout(
             0,
             &[(0, &["held", "old-host"]), (1, &["new-host"])],
         )));
@@ -1367,7 +1450,7 @@ mod tests {
     #[test]
     fn a_title_observation_updates_portable_state_then_refreshes_focus() {
         let mut app = app();
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["%7"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["%7"])])));
         let decision = app.reduce(Input::PaneTitleObserved {
             pane: PaneId::new("%7"),
             title: Some("editor".to_string()),
@@ -1378,7 +1461,7 @@ mod tests {
                 effects: vec![Effect::RefreshFocus, Effect::Repaint],
             }
         );
-        assert_eq!(app.panes.tabs[0].panes[0].title, "editor");
+        assert_eq!(app.layout.tabs[0].content_panes[0].title, "editor");
 
         let decision = app.reduce(Input::PaneTitleObserved {
             pane: PaneId::new("%7"),
@@ -1391,7 +1474,7 @@ mod tests {
     fn agents_replace_their_pane_row_and_all_agents_in_one_pane_are_placed() {
         let mut app = app();
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["7"])])));
         app.reduce(focus("10", FocusTarget::Sidebar));
 
         let first = SessionId::new("first").unwrap();

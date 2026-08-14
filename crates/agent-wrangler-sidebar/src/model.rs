@@ -22,15 +22,18 @@ pub struct PaneReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TabPanes {
+pub struct SidebarPaneReport;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabLayout {
     pub position: TabPosition,
-    pub panes: Vec<PaneReport>,
+    pub content_panes: Vec<PaneReport>,
+    pub sidebar_pane: Option<SidebarPaneReport>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PaneSnapshot {
-    pub tabs: Vec<TabPanes>,
-    pub sidebar_tab: Option<TabPosition>,
+pub struct SessionLayout {
+    pub tabs: Vec<TabLayout>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,7 +103,7 @@ pub enum AgentSnapshot {
 pub enum Input {
     VisibilityChanged(bool),
     TabsReported(Vec<TabReport>),
-    PanesReported(PaneSnapshot),
+    LayoutReported(SessionLayout),
     PaneChanged(PaneId),
     PaneTitleObserved {
         pane: PaneId,

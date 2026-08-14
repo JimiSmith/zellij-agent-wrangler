@@ -57,8 +57,11 @@ impl Plugin {
         match effect {
             Effect::Repaint => None,
             Effect::RefreshFocus => {
+                // Zellij calls the tuple's first value a tab index, but the
+                // server actually returns the stable Tab.id stored in
+                // active_tab_ids, not the tab's visual position.
                 Some(Input::FocusObserved(get_focused_pane_info().ok().map(
-                    |(tab, pane)| adapter::focus(tab, pane, self.plugin_id),
+                    |(tab_id, pane)| adapter::focus(tab_id, pane, self.plugin_id),
                 )))
             }
             Effect::RefreshPaneTitle(pane) => {
@@ -115,9 +118,10 @@ impl Plugin {
         match event {
             Event::Visible(visible) => Some(Input::VisibilityChanged(visible)),
             Event::TabUpdate(tabs) => Some(Input::TabsReported(adapter::tabs(tabs))),
-            Event::PaneUpdate(panes) => {
-                Some(Input::PanesReported(adapter::panes(panes, self.plugin_id)))
-            }
+            Event::PaneUpdate(panes) => Some(Input::LayoutReported(adapter::layout(
+                panes,
+                self.plugin_id,
+            ))),
             Event::CommandChanged(zellij_tile::prelude::PaneId::Terminal(id), ..)
             | Event::CwdChanged(zellij_tile::prelude::PaneId::Terminal(id), ..) => {
                 Some(Input::PaneChanged(PaneId::new(id.to_string())))

@@ -57,7 +57,7 @@ derived rows, placement styles, or other fragments of a previous view.
 At a high level it contains:
 
 - the latest tab report;
-- the latest pane report;
+- the latest session layout reported by the multiplexer;
 - focus observations and whether this sidebar is visible;
 - the agent registry and locally pending acknowledgements;
 - permissions, client status, and configuration;
@@ -66,7 +66,7 @@ At a high level it contains:
 - render scheduling state;
 - the last rendered view model, for interaction with what is on screen.
 
-Tab and pane reports arrive independently and may briefly describe different
+Tab reports and session layouts arrive independently and may briefly describe different
 moments. They remain inputs until reconciliation; event handlers should not
 immediately turn either report into rows or lifecycle decisions.
 
