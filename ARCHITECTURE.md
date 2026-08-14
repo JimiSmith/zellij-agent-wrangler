@@ -279,7 +279,7 @@ on them alone.
 
 ## Migration status
 
-Migration steps 1 through 3 are complete. Multiplexer-neutral application state,
+Migration steps 1 through 4 are complete. Multiplexer-neutral application state,
 reducer inputs, decisions, effects, and reconciliation live in
 `agent-wrangler-sidebar`; the Zellij plugin translates host reports and executes
 the resulting effects. Pane and tab row keys are opaque and stable across the
@@ -289,12 +289,14 @@ The complete last rendered view now owns the exact visible interaction map,
 resolved selection, and stable-ID actions used by navigation, clicks,
 highlighting, and activation. Derived rows, notifications, and focus styling
 are rebuilt from authoritative state for every render rather than cached in the
-application.
+application. Focus reconciliation is visibility-aware and distinguishes
+confirmed, pending, and unknown observations; rendering applies active,
+focused, and sidebar-selection styling only from one confirmed snapshot.
 
-The rest of the document remains the target state. In particular, focus has no
-visibility or confidence state, lifecycle effects are not gated on confirmed
-focus/topology, and repaint decisions are not yet coalesced through a dirty-state
-scheduler.
+The rest of the document remains the target state. In particular, step 5 still
+needs to gate call answering, hook ownership, and sidebar lifecycle effects on
+confirmed focus and settled topology. Step 6 still needs to coalesce repaint
+decisions through a dirty-state scheduler.
 
 ## Migration direction
 

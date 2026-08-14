@@ -36,7 +36,9 @@ pub struct Application {
     selected: Option<RowKey>,
     permission: Option<Permission>,
     rendered: Option<RenderedView>,
-    focus: Option<Focus>,
+    visible: bool,
+    observed_focus: Option<Focus>,
+    focus_refresh_pending: bool,
     left_behind: Option<PaneId>,
     had_company: bool,
     installed: bool,
@@ -56,6 +58,7 @@ impl Application {
 
     pub fn reduce(&mut self, input: Input) -> Decision {
         match input {
+            Input::VisibilityChanged(visible) => self.change_visibility(visible),
             Input::TabsReported(tabs) => self.report_tabs(tabs),
             Input::PanesReported(panes) => self.report_panes(panes),
             Input::PaneChanged(pane) => Decision::effect(Effect::RefreshPaneTitle(pane)),
@@ -94,7 +97,7 @@ impl Application {
     fn report_tabs(&mut self, tabs: Vec<TabReport>) -> Decision {
         let changed = self.tabs != tabs;
         self.tabs = tabs;
-        let mut decision = Decision::effect(Effect::RefreshFocus);
+        let mut decision = self.refresh_focus();
         decision.request_repaint(changed);
         decision
     }
@@ -102,27 +105,43 @@ impl Application {
     fn report_panes(&mut self, panes: PaneSnapshot) -> Decision {
         let changed = self.panes != panes;
         self.panes = panes;
-        let mut decision = Decision::effect(Effect::RefreshFocus);
+        let mut decision = self.refresh_focus();
         decision.request_repaint(changed);
         decision
     }
 
     fn observe_pane_title(&mut self, pane: PaneId, title: Option<String>) -> Decision {
-        let Some(title) = title else {
-            return Decision::default();
-        };
         let mut changed = false;
-        for tab in &mut self.panes.tabs {
-            for candidate in &mut tab.panes {
-                if candidate.id == pane && candidate.title != title {
-                    candidate.title = title.clone();
-                    changed = true;
+        if let Some(title) = title {
+            for tab in &mut self.panes.tabs {
+                for candidate in &mut tab.panes {
+                    if candidate.id == pane && candidate.title != title {
+                        candidate.title = title.clone();
+                        changed = true;
+                    }
                 }
             }
         }
-        let mut decision = Decision::effect(Effect::RefreshFocus);
+        let mut decision = self.refresh_focus();
         decision.request_repaint(changed);
         decision
+    }
+
+    fn change_visibility(&mut self, visible: bool) -> Decision {
+        let changed = self.visible != visible;
+        self.visible = visible;
+        let mut decision = if visible {
+            self.refresh_focus()
+        } else {
+            Decision::default()
+        };
+        decision.request_repaint(changed);
+        decision
+    }
+
+    fn refresh_focus(&mut self) -> Decision {
+        self.focus_refresh_pending = true;
+        Decision::effect(Effect::RefreshFocus)
     }
 
     fn name_session(&mut self, name: String) -> Decision {
@@ -142,17 +161,17 @@ impl Application {
     }
 
     fn observe_focus(&mut self, fresh: Option<Focus>) -> Decision {
-        let mut changed = false;
-        if let Some(fresh) = fresh {
-            changed = self.focus.as_ref() != Some(&fresh);
+        let changed = self.observed_focus != fresh || self.focus_refresh_pending;
+        self.focus_refresh_pending = false;
+        self.observed_focus = fresh;
+        let reconciled = self.reconciled_session();
+        if let session::ReconciledFocus::Confirmed(fresh) = &reconciled.focus {
             self.left_behind =
-                session::left_behind_by(&self.tabs, &self.panes, &fresh, self.left_behind.clone());
-            self.focus = Some(fresh);
+                session::left_behind_by(&self.tabs, &self.panes, fresh, self.left_behind.clone());
         }
         let mut decision = Decision::default();
         let answered = self.answer(&mut decision);
-        let resolved = self.session();
-        self.leave_if_alone(&resolved, &mut decision);
+        self.leave_if_alone(&reconciled.tabs, &mut decision);
         decision.request_repaint(changed | answered);
         decision
     }
@@ -206,17 +225,21 @@ impl Application {
     }
 
     fn is_where_the_user_is(&self) -> bool {
-        match (self.panes.sidebar_tab, self.focus.as_ref()) {
+        match (self.panes.sidebar_tab, self.observed_focus.as_ref()) {
             (Some(mine), Some(focus)) => session::position_of(&self.tabs, &focus.tab) == Some(mine),
             _ => false,
         }
     }
 
     fn answer(&mut self, decision: &mut Decision) -> bool {
-        let Some(pane) = self.focus.as_ref().and_then(|focus| match &focus.target {
-            FocusTarget::Content(pane) => Some(pane.clone()),
-            FocusTarget::Sidebar | FocusTarget::Other => None,
-        }) else {
+        let Some(pane) = self
+            .observed_focus
+            .as_ref()
+            .and_then(|focus| match &focus.target {
+                FocusTarget::Content(pane) => Some(pane.clone()),
+                FocusTarget::Sidebar | FocusTarget::Other => None,
+            })
+        else {
             return false;
         };
         let calling: Vec<Agent> = self
@@ -247,9 +270,15 @@ impl Application {
         changed
     }
 
-    fn session(&self) -> Vec<tree::Tab> {
-        let mut resolved = session::session(&self.tabs, &self.panes, self.focus.as_ref());
-        for tab in &mut resolved {
+    fn reconciled_session(&self) -> session::ReconciledSession {
+        let mut resolved = session::reconcile(
+            &self.tabs,
+            &self.panes,
+            self.visible,
+            self.observed_focus.as_ref(),
+            self.focus_refresh_pending,
+        );
+        for tab in &mut resolved.tabs {
             for pane in &mut tab.panes {
                 pane.agents = self
                     .registry
@@ -309,8 +338,8 @@ impl Application {
                 let mut decision = Decision::default();
                 changed |= self.answer(&mut decision);
                 self.answered.prune(&self.registry);
-                let resolved = self.session();
-                self.leave_if_alone(&resolved, &mut decision);
+                let resolved = self.reconciled_session();
+                self.leave_if_alone(&resolved.tabs, &mut decision);
                 decision.request_repaint(changed);
                 decision
             }
@@ -469,17 +498,21 @@ impl Application {
     }
 
     fn view(&self, area: Rect) -> RenderedView {
-        let frame = self.frame(area);
+        let session = self.reconciled_session();
+        let frame = self.frame(area, &session.tabs);
         let interactions: Vec<Option<InteractionItem>> = frame
             .lines()
             .iter()
             .map(|row| row.key.as_ref().map(interaction))
             .collect();
         let visible = selection::keys(frame.lines());
-        let focused = self
-            .focus
-            .as_ref()
-            .is_some_and(|focus| focus.target == FocusTarget::Sidebar);
+        let focused = matches!(
+            session.focus,
+            session::ReconciledFocus::Confirmed(Focus {
+                target: FocusTarget::Sidebar,
+                ..
+            })
+        );
         let selection = focused
             .then(|| selection::selected(&visible, self.selected.as_ref()))
             .flatten();
@@ -490,7 +523,7 @@ impl Application {
         }
     }
 
-    fn frame(&self, area: Rect) -> Frame {
+    fn frame(&self, area: Rect, session: &[tree::Tab]) -> Frame {
         if self.permission == Some(Permission::Denied) {
             return compose(
                 &[Note {
@@ -517,7 +550,7 @@ impl Application {
                 text,
             });
         }
-        let rows = tree::build_tree(&self.session(), &self.options.view);
+        let rows = tree::build_tree(session, &self.options.view);
         let notices = self.notifications();
         compose(&notes, &rows, &notices, area, &self.options.view)
     }
@@ -591,7 +624,9 @@ mod tests {
     }
 
     fn app() -> Application {
-        Application::new(Options::default(), "tmux")
+        let mut app = Application::new(Options::default(), "tmux");
+        app.reduce(Input::VisibilityChanged(true));
+        app
     }
 
     fn agent(id: &str, turn: Turn) -> Agent {
@@ -642,6 +677,93 @@ mod tests {
             }
         );
         assert_eq!(app.panes, panes);
+    }
+
+    #[test]
+    fn visibility_requires_a_fresh_observation_before_focus_is_confirmed() {
+        let mut app = Application::new(Options::default(), "zellij");
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.selected = Some(RowKey::Pane(PaneId::new("7")));
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        assert_eq!(
+            app.reconciled_session().focus,
+            session::ReconciledFocus::Unknown
+        );
+        assert_eq!(app.render(Rect::new(0, 0, 30, 5)).selection, None);
+
+        assert_eq!(
+            app.reduce(Input::VisibilityChanged(true)),
+            Decision {
+                effects: vec![Effect::RefreshFocus, Effect::Repaint]
+            }
+        );
+        assert_eq!(
+            app.reconciled_session().focus,
+            session::ReconciledFocus::Pending
+        );
+        assert_eq!(app.render(Rect::new(0, 0, 30, 5)).selection, None);
+
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        assert!(matches!(
+            app.reconciled_session().focus,
+            session::ReconciledFocus::Confirmed(_)
+        ));
+        assert_eq!(
+            app.render(Rect::new(0, 0, 30, 5)).selection,
+            Some(RowKey::Pane(PaneId::new("7")))
+        );
+
+        app.reduce(Input::VisibilityChanged(false));
+        assert_eq!(
+            app.reconciled_session().focus,
+            session::ReconciledFocus::Unknown
+        );
+    }
+
+    #[test]
+    fn a_failed_focus_query_clears_the_cached_observation() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(focus("10", FocusTarget::Content(PaneId::new("7"))));
+        assert!(app.observed_focus.is_some());
+
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        app.reduce(Input::FocusObserved(None));
+        assert_eq!(app.observed_focus, None);
+        assert!(!app.focus_refresh_pending);
+        assert_eq!(
+            app.reconciled_session().focus,
+            session::ReconciledFocus::Unknown
+        );
+    }
+
+    #[test]
+    fn topology_and_title_reports_invalidate_confirmation_until_refresh() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        app.reduce(Input::PanesReported(snapshot(0, &[(0, &["7"])])));
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        assert!(matches!(
+            app.reconciled_session().focus,
+            session::ReconciledFocus::Confirmed(_)
+        ));
+
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        assert_eq!(
+            app.reconciled_session().focus,
+            session::ReconciledFocus::Pending
+        );
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        app.reduce(Input::PaneTitleObserved {
+            pane: PaneId::new("7"),
+            title: Some("new".to_string()),
+        });
+        assert_eq!(
+            app.reconciled_session().focus,
+            session::ReconciledFocus::Pending
+        );
     }
 
     #[test]
@@ -1165,7 +1287,7 @@ mod tests {
             pane: PaneId::new("%7"),
             title: None,
         });
-        assert_eq!(decision, Decision::default());
+        assert_eq!(decision, Decision::effect(Effect::RefreshFocus));
     }
 
     #[test]

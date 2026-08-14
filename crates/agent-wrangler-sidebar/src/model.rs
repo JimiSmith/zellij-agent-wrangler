@@ -98,6 +98,7 @@ pub enum AgentSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Input {
+    VisibilityChanged(bool),
     TabsReported(Vec<TabReport>),
     PanesReported(PaneSnapshot),
     PaneChanged(PaneId),

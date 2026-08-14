@@ -17,3 +17,4 @@ pub use model::{
     TabReport, UserAction, ViewAction,
 };
 pub use options::Options;
+pub use session::{ReconciledFocus, ReconciledSession};

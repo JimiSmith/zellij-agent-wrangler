@@ -113,6 +113,7 @@ impl Plugin {
 
     fn update_input(&self, event: Event) -> Option<Input> {
         match event {
+            Event::Visible(visible) => Some(Input::VisibilityChanged(visible)),
             Event::TabUpdate(tabs) => Some(Input::TabsReported(adapter::tabs(tabs))),
             Event::PaneUpdate(panes) => {
                 Some(Input::PanesReported(adapter::panes(panes, self.plugin_id)))
@@ -164,6 +165,7 @@ impl ZellijPlugin for Plugin {
         subscribe(&[
             EventType::Key,
             EventType::Mouse,
+            EventType::Visible,
             EventType::TabUpdate,
             EventType::PaneUpdate,
             EventType::CommandChanged,
@@ -172,6 +174,12 @@ impl ZellijPlugin for Plugin {
             EventType::SessionUpdate,
             EventType::RunCommandResult,
         ]);
+        // `Visible` reports later changes, but Zellij does not necessarily
+        // emit an initial `Visible(true)` for a newly opened plugin pane. Seed
+        // that fact now, but do not execute its focus-refresh effect from
+        // `load`: Zellij host state queries are only safe after loading. The
+        // initial tab or pane report will perform the pending refresh.
+        self.application.reduce(Input::VisibilityChanged(true));
     }
 
     fn update(&mut self, event: Event) -> bool {
