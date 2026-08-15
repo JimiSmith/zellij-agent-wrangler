@@ -172,9 +172,7 @@ impl ZellijPlugin for Plugin {
         ]);
         // `Visible` reports later changes, but Zellij does not necessarily
         // emit an initial `Visible(true)` for a newly opened plugin pane. Seed
-        // that fact now, but do not execute its focus-refresh effect from
-        // `load`: Zellij host state queries are only safe after loading. The
-        // initial tab or pane report will perform the pending refresh.
+        // that fact now. The initial tab and pane reports provide focus.
         self.application.reduce(Input::VisibilityChanged(true));
     }
 

@@ -38,6 +38,7 @@ pub struct Application {
     rendered: Option<RenderedView>,
     visible: bool,
     observed_focus: Option<Focus>,
+    anticipated_focus: Option<Focus>,
     left_behind: BTreeMap<TabId, PaneId>,
     tabs_with_company: BTreeSet<TabId>,
     installed: bool,
@@ -170,7 +171,32 @@ impl Application {
                 target,
             })
         });
-        self.observe_focus(fresh)
+        let mut decision = self.observe_focus(fresh);
+        let anticipated_changed = self.settle_anticipated_focus();
+        decision.request_repaint(anticipated_changed);
+        decision
+    }
+
+    fn settle_anticipated_focus(&mut self) -> bool {
+        let Some(anticipated) = self.anticipated_focus.as_ref() else {
+            return false;
+        };
+        let confirmed = self.observed_focus.as_ref().is_some_and(|observed| {
+            observed.tab == anticipated.tab
+                && (anticipated.target == FocusTarget::Other
+                    || observed.target == anticipated.target)
+        });
+        let still_exists = session::position_of(&self.tabs, &anticipated.tab).is_some()
+            && match &anticipated.target {
+                FocusTarget::Content(pane) => session::tab_of_pane(&self.layout, pane).is_some(),
+                FocusTarget::Sidebar | FocusTarget::Other => true,
+            };
+        if confirmed || !still_exists {
+            self.anticipated_focus = None;
+            true
+        } else {
+            false
+        }
     }
 
     fn name_session(&mut self, name: String) -> Decision {
@@ -278,13 +304,19 @@ impl Application {
     }
 
     fn reconciled_session(&self) -> session::ReconciledSession {
-        let mut resolved = session::reconcile(
-            &self.tabs,
-            &self.layout,
-            self.visible,
-            self.observed_focus.as_ref(),
-            false,
-        );
+        let focus = self
+            .anticipated_focus
+            .as_ref()
+            .or(self.observed_focus.as_ref());
+        self.resolve_session(focus)
+    }
+
+    fn authoritative_session(&self) -> session::ReconciledSession {
+        self.resolve_session(self.observed_focus.as_ref())
+    }
+
+    fn resolve_session(&self, focus: Option<&Focus>) -> session::ReconciledSession {
+        let mut resolved = session::reconcile(&self.tabs, &self.layout, self.visible, focus, false);
         for tab in &mut resolved.tabs {
             for pane in &mut tab.panes {
                 pane.agents = self
@@ -299,7 +331,7 @@ impl Application {
     }
 
     fn confirmed_effects(&mut self) -> Decision {
-        let resolved = self.reconciled_session();
+        let resolved = self.authoritative_session();
         let session::ReconciledFocus::Confirmed(focus) = resolved.focus else {
             return Decision::default();
         };
@@ -412,6 +444,11 @@ impl Application {
                 decision.request_repaint(changed);
                 decision
             }
+            Broadcast::FocusIntent(focus) => {
+                let mut decision = Decision::default();
+                self.anticipate_focus(focus, false, &mut decision);
+                decision
+            }
         }
     }
 
@@ -441,7 +478,7 @@ impl Application {
         }
     }
 
-    fn activate(&self, decision: &mut Decision) {
+    fn activate(&mut self, decision: &mut Decision) {
         let action = self
             .rendered
             .as_ref()
@@ -452,7 +489,7 @@ impl Application {
         }
     }
 
-    fn activate_action(&self, action: &ViewAction, decision: &mut Decision) {
+    fn activate_action(&mut self, action: &ViewAction, decision: &mut Decision) {
         match action {
             ViewAction::ActivatePane(pane) => {
                 if session::tab_of_pane(&self.layout, pane).is_some() {
@@ -466,6 +503,18 @@ impl Application {
                 match session::first_pane(&self.layout, position) {
                     Some(pane) => self.go_to_pane(pane, decision),
                     None => {
+                        self.anticipate_focus(
+                            Focus {
+                                tab: tab.clone(),
+                                // A tab switch does not identify which plugin
+                                // pane will receive focus. `Other` still moves
+                                // the shared active-tab presentation without
+                                // making every sidebar claim focus for itself.
+                                target: FocusTarget::Other,
+                            },
+                            true,
+                            decision,
+                        );
                         self.stand_down(position, decision);
                         decision.effects.push(Effect::SwitchTab(tab.clone()));
                     }
@@ -483,11 +532,38 @@ impl Application {
         }
     }
 
-    fn go_to_pane(&self, pane: PaneId, decision: &mut Decision) {
+    fn go_to_pane(&mut self, pane: PaneId, decision: &mut Decision) {
         if let Some(tab) = session::tab_of_pane(&self.layout, &pane) {
+            let Some(tab_id) = self
+                .tabs
+                .iter()
+                .find(|candidate| candidate.position == tab)
+                .map(|tab| tab.id.clone())
+            else {
+                return;
+            };
+            self.anticipate_focus(
+                Focus {
+                    tab: tab_id,
+                    target: FocusTarget::Content(pane.clone()),
+                },
+                true,
+                decision,
+            );
             self.stand_down(tab, decision);
         }
         decision.effects.push(Effect::FocusPane(pane));
+    }
+
+    fn anticipate_focus(&mut self, focus: Focus, broadcast: bool, decision: &mut Decision) {
+        let changed = self.anticipated_focus.as_ref() != Some(&focus);
+        self.anticipated_focus = Some(focus.clone());
+        if broadcast {
+            decision
+                .effects
+                .push(Effect::Broadcast(Broadcast::FocusIntent(focus)));
+        }
+        decision.request_repaint(changed);
     }
 
     fn stand_down(&self, going_to: TabPosition, decision: &mut Decision) {
@@ -659,6 +735,13 @@ mod tests {
 
     fn focus(tab: &str, target: FocusTarget) -> Input {
         Input::FocusObserved(Some(Focus {
+            tab: TabId::new(tab),
+            target,
+        }))
+    }
+
+    fn focus_intent(tab: &str, target: FocusTarget) -> Effect {
+        Effect::Broadcast(Broadcast::FocusIntent(Focus {
             tab: TabId::new(tab),
             target,
         }))
@@ -915,9 +998,94 @@ mod tests {
         assert_eq!(
             decision.effects,
             vec![
+                focus_intent("20", FocusTarget::Content(PaneId::new("2"))),
+                Effect::Repaint,
                 Effect::FocusPane(PaneId::new("1")),
                 Effect::FocusPane(PaneId::new("2")),
             ]
+        );
+    }
+
+    #[test]
+    fn anticipated_focus_survives_partial_reports_until_zellij_confirms_it() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
+        let mut initial = layout(0, &[(0, &["1"]), (1, &["2"])]);
+        initial.tabs[1].sidebar_pane = Some(SidebarPaneReport { focused: false });
+        app.reduce(Input::LayoutReported(initial));
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        app.selected = Some(RowKey::Pane(PaneId::new("2")));
+        app.render(Rect::new(0, 0, 30, 8));
+
+        app.reduce(Input::User(UserAction::Activate));
+        let destination = Focus {
+            tab: TabId::new("20"),
+            target: FocusTarget::Content(PaneId::new("2")),
+        };
+        assert_eq!(
+            app.reconciled_session().focus,
+            session::ReconciledFocus::Confirmed(destination.clone())
+        );
+        assert_eq!(
+            app.authoritative_session().focus,
+            session::ReconciledFocus::Confirmed(Focus {
+                tab: TabId::new("10"),
+                target: FocusTarget::Sidebar,
+            })
+        );
+
+        let mut panes = layout(0, &[(0, &["1"]), (1, &["2"])]);
+        panes.tabs[1].sidebar_pane = Some(SidebarPaneReport { focused: false });
+        panes.tabs[1].content_panes[0].focused = true;
+        app.reduce(Input::LayoutReported(panes));
+        assert_eq!(
+            app.reconciled_session().focus,
+            session::ReconciledFocus::Confirmed(destination.clone())
+        );
+        assert!(app.anticipated_focus.is_some());
+
+        app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
+        assert_eq!(
+            app.reconciled_session().focus,
+            session::ReconciledFocus::Confirmed(destination.clone())
+        );
+        assert!(app.anticipated_focus.is_some());
+
+        let mut tabs = vec![tab("10", 0), tab("20", 1)];
+        tabs[0].active = false;
+        tabs[1].active = true;
+        app.reduce(Input::TabsReported(tabs));
+        assert_eq!(app.observed_focus, Some(destination));
+        assert!(app.anticipated_focus.is_none());
+    }
+
+    #[test]
+    fn peer_focus_intent_repaints_without_rebroadcasting_or_confirming_effects() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0), tab("20", 1)]));
+        let mut reported = layout(0, &[(0, &["1"]), (1, &["2"])]);
+        reported.tabs[1].sidebar_pane = Some(SidebarPaneReport { focused: false });
+        app.reduce(Input::LayoutReported(reported));
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        let destination = Focus {
+            tab: TabId::new("20"),
+            target: FocusTarget::Content(PaneId::new("2")),
+        };
+
+        assert_eq!(
+            app.reduce(Input::Message(Broadcast::FocusIntent(destination.clone()))),
+            Decision::repaint()
+        );
+        assert_eq!(
+            app.reconciled_session().focus,
+            session::ReconciledFocus::Confirmed(destination)
+        );
+        assert_eq!(
+            app.authoritative_session().focus,
+            session::ReconciledFocus::Confirmed(Focus {
+                tab: TabId::new("10"),
+                target: FocusTarget::Sidebar,
+            })
         );
     }
 
@@ -961,6 +1129,8 @@ mod tests {
         assert_eq!(
             app.reduce(Input::User(UserAction::Activate)).effects,
             vec![
+                focus_intent("20", FocusTarget::Other),
+                Effect::Repaint,
                 Effect::FocusPane(PaneId::new("1")),
                 Effect::SwitchTab(TabId::new("20")),
             ]
@@ -1296,8 +1466,9 @@ mod tests {
             decision.effects,
             vec![
                 Effect::Broadcast(Broadcast::Selection(RowKey::Pane(PaneId::new("%7")))),
-                Effect::FocusPane(PaneId::new("%7")),
+                focus_intent("10", FocusTarget::Content(PaneId::new("%7"))),
                 Effect::Repaint,
+                Effect::FocusPane(PaneId::new("%7")),
             ]
         );
     }
@@ -1359,14 +1530,26 @@ mod tests {
         ))));
         assert_eq!(
             app.reduce(Input::User(UserAction::Activate)).effects,
-            vec![Effect::FocusPane(PaneId::new("1"))]
+            vec![
+                focus_intent("10", FocusTarget::Content(PaneId::new("1"))),
+                Effect::Repaint,
+                Effect::FocusPane(PaneId::new("1")),
+            ]
         );
 
+        let mut arrived = layout(0, &[(0, &["1"]), (1, &["2"])]);
+        arrived.tabs[0].content_panes[0].focused = true;
+        app.reduce(Input::LayoutReported(arrived));
+        let mut returned = layout(0, &[(0, &["1"]), (1, &["2"])]);
+        returned.tabs[0].sidebar_pane.as_mut().unwrap().focused = true;
+        app.reduce(Input::LayoutReported(returned));
         let rendered = app.render(Rect::new(0, 0, 30, 8));
         assert_eq!(rendered.selection, Some(RowKey::Pane(PaneId::new("2"))));
         assert_eq!(
             app.reduce(Input::User(UserAction::Activate)).effects,
             vec![
+                focus_intent("20", FocusTarget::Content(PaneId::new("2"))),
+                Effect::Repaint,
                 Effect::FocusPane(PaneId::new("1")),
                 Effect::FocusPane(PaneId::new("2")),
             ]
@@ -1434,6 +1617,8 @@ mod tests {
         assert_eq!(
             pane_app.reduce(Input::User(UserAction::Activate)).effects,
             vec![
+                focus_intent("20", FocusTarget::Content(PaneId::new("moving"))),
+                Effect::Repaint,
                 Effect::FocusPane(PaneId::new("held")),
                 Effect::FocusPane(PaneId::new("moving")),
             ]
@@ -1455,6 +1640,8 @@ mod tests {
         assert_eq!(
             agent_app.reduce(Input::User(UserAction::Activate)).effects,
             vec![
+                focus_intent("20", FocusTarget::Content(PaneId::new("new-host"))),
+                Effect::Repaint,
                 Effect::FocusPane(PaneId::new("held")),
                 Effect::FocusPane(PaneId::new("new-host")),
             ]

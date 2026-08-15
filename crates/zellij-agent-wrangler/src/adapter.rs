@@ -3,13 +3,14 @@ use std::collections::BTreeMap;
 use agent_wrangler_core::agent::{self, Agent, Record};
 use agent_wrangler_core::registry::Registry;
 use agent_wrangler_sidebar::{
-    AgentSnapshot, Broadcast, PaneId, PaneReport, SessionLayout, SidebarPaneReport, TabId,
-    TabLayout, TabReport,
+    AgentSnapshot, Broadcast, Focus, FocusTarget, PaneId, PaneReport, SessionLayout,
+    SidebarPaneReport, TabId, TabLayout, TabReport,
 };
 use agent_wrangler_ui::model::{RowKey, TabPosition};
 use zellij_tile::prelude::{PaneInfo, PaneManifest, TabInfo};
 
 pub const SELECTION_MESSAGE: &str = "wrangler:selection";
+pub const FOCUS_INTENT_MESSAGE: &str = "wrangler:focus-intent";
 pub const OFF_MESSAGE: &str = "wrangler:off";
 pub const INSTALLED_MESSAGE: &str = "wrangler:hooks-installed";
 
@@ -75,6 +76,7 @@ pub fn decode_message(name: &str, payload: Option<&str>) -> Option<Broadcast> {
         OFF_MESSAGE => Some(Broadcast::Off),
         INSTALLED_MESSAGE => Some(Broadcast::HooksInstalled),
         SELECTION_MESSAGE => payload.and_then(RowKey::decode).map(Broadcast::Selection),
+        FOCUS_INTENT_MESSAGE => payload.and_then(decode_focus).map(Broadcast::FocusIntent),
         _ => None,
     }
 }
@@ -84,7 +86,36 @@ pub fn encode_message(message: Broadcast) -> (&'static str, Option<String>) {
         Broadcast::Off => (OFF_MESSAGE, None),
         Broadcast::HooksInstalled => (INSTALLED_MESSAGE, None),
         Broadcast::Selection(key) => (SELECTION_MESSAGE, Some(key.encode())),
+        Broadcast::FocusIntent(focus) => (FOCUS_INTENT_MESSAGE, Some(encode_focus(&focus))),
     }
+}
+
+fn encode_focus(focus: &Focus) -> String {
+    let target = match &focus.target {
+        FocusTarget::Content(pane) => format!("pane:{}", pane.as_str()),
+        FocusTarget::Sidebar => "sidebar".to_string(),
+        FocusTarget::Other => "other".to_string(),
+    };
+    format!("tab-id:{}\n{target}", focus.tab.as_str())
+}
+
+fn decode_focus(payload: &str) -> Option<Focus> {
+    let (tab, target) = payload.split_once('\n')?;
+    let tab = tab.strip_prefix("tab-id:").filter(|id| !id.is_empty())?;
+    if target.contains('\n') {
+        return None;
+    }
+    let target = match target {
+        "sidebar" => FocusTarget::Sidebar,
+        "other" => FocusTarget::Other,
+        pane => FocusTarget::Content(PaneId::new(
+            pane.strip_prefix("pane:").filter(|id| !id.is_empty())?,
+        )),
+    };
+    Some(Focus {
+        tab: TabId::new(tab),
+        target,
+    })
 }
 
 pub fn agents(payload: &str, session: &str) -> Option<AgentSnapshot> {
@@ -290,6 +321,21 @@ mod tests {
         let (name, payload) = encode_message(message.clone());
         assert_eq!(name, SELECTION_MESSAGE);
         assert_eq!(decode_message(name, payload.as_deref()), Some(message));
+
+        for target in [
+            FocusTarget::Content(PaneId::new("7")),
+            FocusTarget::Sidebar,
+            FocusTarget::Other,
+        ] {
+            let message = Broadcast::FocusIntent(Focus {
+                tab: TabId::new("9"),
+                target,
+            });
+            let (name, payload) = encode_message(message.clone());
+            assert_eq!(name, FOCUS_INTENT_MESSAGE);
+            assert_eq!(decode_message(name, payload.as_deref()), Some(message));
+        }
+        assert_eq!(decode_message(FOCUS_INTENT_MESSAGE, Some("tab-id:9")), None);
     }
 
     #[test]

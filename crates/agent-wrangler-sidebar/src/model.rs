@@ -93,6 +93,8 @@ pub enum Broadcast {
     Off,
     HooksInstalled,
     Selection(RowKey),
+    /// A focus change a peer has requested but host events have not confirmed.
+    FocusIntent(Focus),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
