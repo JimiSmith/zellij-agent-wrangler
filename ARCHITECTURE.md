@@ -49,6 +49,28 @@ reported Zellij facts into a coherent session model. View construction turns
 that model into the exact lines and actions available in a pane of a particular
 size. The renderer translates those lines into terminal output.
 
+## Crates
+
+- `agent-wrangler-core` — agent records, the registry, labels, commands and
+  other logic shared by every client and the native daemon. It names no pane,
+  tab or row.
+- `agent-wrangler-ui` — the row vocabulary, tree and frame composition,
+  terminal styling, selection, and ANSI serialization. It draws into a ratatui
+  buffer and knows nothing about how one reaches a screen, so a plugin that can
+  only print and a program that owns its terminal draw the same sidebar.
+- `agent-wrangler-sidebar` — multiplexer-neutral application state, reducer
+  inputs, effects, session reconciliation, client state, and configuration.
+- `zellij-agent-wrangler` — the plugin. `adapter.rs` converts between Zellij
+  reports and the portable sidebar vocabulary; `main.rs` holds the
+  subscriptions, effect execution, observation feedback, and printing of the
+  rendered frame. It is the only crate depending on Zellij's own, which off
+  wasm brings in curl, openssl and the rest of `zellij-utils`: 9 crates rather
+  than 250, and nothing native ever sees it.
+- `agent-wrangler` — one binary holding the hook client, the daemon, the
+  installer and the platform integration. It is named for what it wrangles
+  rather than for what draws it, because nothing it does is particular to
+  Zellij.
+
 ## Application state
 
 Application state holds authoritative inputs and user intent. It does not hold
@@ -264,6 +286,49 @@ on Zellij.
 
 Exact module names are deliberately left open. The important boundary is that
 Zellij APIs do not leak into the pure state and view pipeline.
+
+## The daemon and the hook client
+
+Agent state lives in a daemon, one per user, started by whichever hook first
+finds none running. It holds what the sessions are and nothing about where they
+are shown; the sidebar is what turns a record into a row.
+
+A hook says what it saw and exits: which agent, which event, the transcript's
+path, and a named few of its own environment variables, captured verbatim. The
+daemon does the reading. That keeps the hook off the critical path of the turn
+it runs inside, and it is what lets the daemon do the two things a plugin never
+could:
+
+- **Watch.** Every transcript it has been told about is looked at once a second,
+  and re-read when it has moved. A session that titles itself, or is given a
+  colour, is drawn without any hook firing at all.
+- **Reap.** A session whose process has gone is dropped. An agent killed without
+  an `end` event used to leave a row nothing would ever take away.
+
+The daemon and the hook are the same executable, and a hook starts the daemon by
+running its own path, so the two can never be different builds. What can differ
+is the daemon and the plugin, so a state message names the format it is written
+in and a sidebar sent one it does not know says so at the top of the pane.
+
+Records survive the daemon being restarted, but only those naming a process
+still running: a live agent says so again on its next event of any kind, where a
+dead one would otherwise be drawn for good.
+
+State is kept under `$XDG_STATE_HOME/agent-wrangler` (`%LOCALAPPDATA%` on
+Windows). The daemon is reached over a local socket, which is a unix socket on
+unix and a named pipe on Windows.
+
+The agents of a session are known to every sidebar in it, and a sidebar opening
+in a new tab asks the others for what they have. Nothing survives every sidebar
+being closed at once.
+
+`agent-wrangler monitor` writes one line of JSON per message and nothing while
+nothing is arriving. Each says which way the message went, and two fields say
+why it is worth reading: `told`, whether an arriving message changed anything,
+since that and not the arrival is what owes the clients a delivery; and `took`,
+how long reaching a client cost, which for a Zellij client is a whole process
+run. A delivery is said twice, going and gone, so one that never comes back can
+be told from one that never started.
 
 ## Testing
 

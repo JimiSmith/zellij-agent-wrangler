@@ -1,10 +1,8 @@
 # zellij-agent-wrangler
 
-A zellij sidebar pane listing tabs, their panes as a tree, and the agent
-sessions running in them.
-
-`FEATURES.md` is the list of what it does and what is left; `PROGRESS.md` is
-what the design rests on.
+A zellij sidebar listing your tabs and panes as a tree, with the coding agents
+running in them: what each one is called, which one is working, and which one is
+waiting for you.
 
 ```
 ▌ 1: wrangler
@@ -19,32 +17,29 @@ what the design rests on.
   └─ 2:   k9s
 ```
 
+- Every agent in the session, on the pane it is running in, labelled with what
+  the session calls itself.
+- `○` says an agent is mid-turn, `●` says it wants you, and the calls for you
+  are listed at the foot of the pane.
+- `Enter` or a click on any row goes there.
+- Optional desktop notification when an agent needs you, once per call however
+  many tabs are watching.
+- Claude Code and GitHub Copilot CLI, on Linux, macOS and Windows.
+
 ## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JimiSmith/zellij-agent-wrangler/main/install.sh | sh
 ```
 
-On Windows, where what runs the installer is PowerShell:
-
 ```powershell
 irm https://raw.githubusercontent.com/JimiSmith/zellij-agent-wrangler/main/install.ps1 | iex
 ```
 
-That installs the client, wires it into each agent's hooks, and prints the
-layout block for the plugin that goes with it. Nothing downloads the plugin:
-zellij fetches it from the url in that block and holds it. Nothing starts the
-daemon either: the first hook to find none running starts it.
-
-The block it prints names the client's own path. The sidebar reaches the daemon
-by running it, and the `PATH` that has to find it is the zellij server's,
-inherited from whatever started zellij rather than from the shell you installed
-from. A sidebar that cannot run the client draws no agents, and says so at the
-top of the pane along with what the run said, since that is why the tree beneath
-it is empty.
-
-Put the block in your layout inside both `default_tab_template` and
-`new_tab_template`, beside `children`:
+The script installs the client, wires it into your agents' hooks, and prints a
+layout block. Put that block in your zellij layout inside **both**
+`default_tab_template` and `new_tab_template`, beside `children`, so tabs opened
+later get a sidebar too:
 
 ```kdl
 pane size=32 borderless=true {
@@ -54,215 +49,86 @@ pane size=32 borderless=true {
 }
 ```
 
-The path in that block is a KDL string, where a backslash starts an escape, so
-the Windows one is written with its separators doubled:
+Start a new zellij session and the sidebar is there. **The first run comes up
+blank until you grant zellij's permission prompt** — see
+[Troubleshooting](#troubleshooting).
 
-```kdl
-install_hooks "C:\\Users\\you\\AppData\\Local\\Programs\\agent-wrangler\\agent-wrangler.exe"
-```
+You need a [Nerd Font](https://www.nerdfonts.com/) for the pane and agent icons.
 
-The script prints it in that form. A path pasted in raw is a layout that will not
-load, `\U` being no escape KDL knows - or, for a directory whose name begins with
-one of the letters that is an escape, a layout that loads naming a path nothing
-is at.
+**Updating.** Run the script again and change the version in the url to match.
+Zellij caches a plugin under the last part of its url and never fetches that
+name twice, so the version has to change for the new one to be loaded.
 
-That is also where the Windows client is installed, under `%LOCALAPPDATA%`
-rather than on your `PATH`: the sidebar is told its whole path and the hooks are
-written with it, so the only thing a `PATH` entry buys is running
-`agent-wrangler agents` by name. `-AddToPath` adds one, and `-Bin` puts the
-client somewhere else. A script that is piped into `iex` takes no arguments, so
-giving it one means running it as a block:
+<details>
+<summary>Windows notes</summary>
+
+The client goes in `%LOCALAPPDATA%\Programs\agent-wrangler` and is not put on
+your `PATH`. Pass `-AddToPath` or `-Bin <dir>` to change that — a script piped
+into `iex` takes no arguments, so run it as a block instead:
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/JimiSmith/zellij-agent-wrangler/main/install.ps1))) -AddToPath
 ```
 
-A zellij under WSL is a different machine as far as the daemon is concerned,
-whatever is installed on the Windows side of it: the client that WSL's zellij
-names is one installed there, by `install.sh`.
+The path in the layout block is a KDL string, where a backslash starts an
+escape, so it is written with the separators doubled. The script prints it that
+way; pasting a raw path gives you a layout that will not load.
 
-Updating is running the script again and changing the version in that url to
-match. The two halves are released together and named for the same tag, and each
-record the client sends says which format it is written in, so a sidebar being
-reported to by a client of another version says so at the top of the pane
-instead of quietly drawing no agents.
-
-The url is also how zellij tells one build from another: it caches a downloaded
-plugin under the last part of the url and never fetches that name again, which
-is why the version is in the file name.
-
-## Building it
-
-```bash
-rustup target add wasm32-wasip1
-./dev.sh                 # builds both halves, then opens a session with the sidebar in every tab
-cargo test               # everything that does not call zellij, on the host target
+```kdl
+install_hooks "C:\\Users\\you\\AppData\\Local\\Programs\\agent-wrangler\\agent-wrangler.exe"
 ```
 
-Four crates. `agent-wrangler-core` holds what an agent session is and what it
-is called by, and names no pane, tab or row. `agent-wrangler-ui` holds what a
-client shows: the rows, the glyphs and styles they are drawn with, and how the
-pane's height is divided between the tree and the calls at its foot. It draws
-into a ratatui buffer and knows nothing about how one reaches a screen, so a
-plugin that can only print and a program that owns its terminal draw the same
-sidebar. `agent-wrangler` is one binary holding the hook client, the daemon and
-the installer; `dev.sh` prints its path. `zellij-agent-wrangler` is the plugin,
-the only crate that depends on zellij's own: off wasm that brings in curl,
-openssl and the rest of `zellij-utils`, 9 crates rather than 250, and nothing
-native ever sees it.
+A zellij running under WSL is a different machine as far as this is concerned.
+Install there too, with `install.sh`, and let that layout name that client.
 
-The client is named for what it wrangles rather than for what draws it, because
-nothing it does is particular to zellij.
+</details>
 
-## The daemon
+## Keys
 
-Agent state lives in a daemon, one per user, started by whichever hook first
-finds none running. It holds what the sessions are and nothing about where they
-are shown; the sidebar is what turns a record into a row.
+Zellij starts a session in locked mode, which passes keystrokes to the focused
+pane, so the sidebar works while locked. `Ctrl+g` unlocks, which is what you
+need to move focus onto the sidebar (`Ctrl+p`, then `←`).
 
-```bash
-agent-wrangler agents      # what the daemon holds, as it would send it
-agent-wrangler monitor     # every message it is sent or sends, as it happens
-```
+| Key                   | Does                                             |
+| --------------------- | ------------------------------------------------ |
+| `j` / `k` / `↑` / `↓` | Move the selection                               |
+| `Enter` / click       | Go to the selected tab, pane or agent            |
+| `q`                   | Turn the sidebar off for the rest of the session |
 
-`monitor` writes one line of JSON per message until you stop it, and nothing
-while nothing is arriving. Each says which way the message went, and two fields
-say why it is worth reading: `told`, whether an arriving message changed
-anything, since that and not the arrival is what owes the clients a delivery;
-and `took`, how long reaching a client cost, which for a zellij client is a
-whole process run. A delivery is said twice, going and gone, so one that never
-comes back can be told from one that never started.
+A tab's row takes you to the first pane in that tab rather than to the tab
+itself, since where a tab was last left is as often as not its own sidebar.
 
-A hook says what it saw and exits: which agent, which event, the transcript's
-path, and a named few of its own environment variables, captured verbatim. The
-daemon does the reading. That keeps the hook off the critical path of the turn
-it runs inside, and it is what lets the daemon do the two things a plugin never
-could:
+The sidebars of a session share one selection, and only the one your keys reach
+draws the selection bar. Where you are is the `▌` gutter, which every sidebar
+shows.
 
-- **Watch.** Every transcript it has been told about is looked at once a second,
-  and re-read when it has moved. A session that titles itself, or is given a
-  colour with `/color`, is drawn without any hook firing at all.
-- **Reap.** A session whose process has gone is dropped. An agent killed without
-  an `end` event used to leave a row nothing would ever take away.
+## Agents
 
-The daemon and the hook are the same executable, and a hook starts the daemon by
-running its own path, so the two can never be different builds. What can differ
-is the daemon and the plugin, and a state message names the format it is written
-in: a sidebar sent one it does not know says so at the top of the pane.
-
-Records survive the daemon being restarted, but only those naming a process
-still running: a live agent says so again on its next event of any kind, where a
-dead one would otherwise be drawn for good.
-
-State is kept under `$XDG_STATE_HOME/agent-wrangler` (`%LOCALAPPDATA%` on
-Windows). The daemon is reached over a local socket, which is a unix socket on
-unix and a named pipe on Windows.
-
-## Agent rows
-
-An agent appears in the tree once its own lifecycle hooks call the client, which
-reports the pane it was invoked in. The install script does this for you; to do it by hand, or after moving the
-binary:
+An agent appears once its own lifecycle hooks call the client, which the install
+script sets up. To do it by hand, or after moving the binary:
 
 ```bash
-agent-wrangler install-hooks            # or: claude, copilot
+agent-wrangler install-hooks             # or: claude, copilot
 agent-wrangler install-hooks --uninstall
 ```
 
-Or have the sidebar do it on load, with `install_hooks` below.
+Claude's hooks are merged into `~/.claude/settings.json`, keeping everything
+else in the file and leaving a `.agent-wrangler.bak` copy; only commands running
+this client are ever replaced or removed. The hooks fire for every agent you
+start anywhere, and the client does nothing outside zellij.
 
-It writes the absolute path of the binary you ran, so it works from wherever
-that is; run it again after moving the binary. Claude's hooks are merged into
-`~/.claude/settings.json`, keeping every other key, the order they are in, the
-file's permissions and a `.agent-wrangler.bak` copy of what was there; only
-commands running *this* client are replaced, so hooks belonging to anything else
-survive both installing and uninstalling. Copilot's file is one this owns
-outright. Running install twice writes the same bytes.
+An agent is labelled with whatever the session has titled itself, falling back
+to the directory it is working in. A teammate is labelled `@name - title`. A
+pane running two agents gets a row each.
 
-The hooks cover every agent you start anywhere; the client does nothing at all
-outside zellij, so sessions elsewhere are unaffected.
-
-Start an agent in a pane and that pane's row becomes the agent's, labelled with
-whatever the session has decided to call itself and falling back to the
-directory it is working in until it has a name. A teammate is labelled
-`@name - title`, so it is never mistaken for a session of its own. A pane
-running two agents contributes a row each. `○` at the right edge says the agent is mid-turn and `●` says it wants
-you; going to its pane answers the second and leaves the first alone.
-
-An agent's icon is drawn in the color that agent shows for the session (changed
-with Claude's `/color`), so the row ties to the session without a list of
-full-width colored lines to read past. Color says *which* agent, never which row
-is live - where you are is the `▌` gutter. The eight colors Claude names are
-drawn from your terminal's own palette, orange and pink in the bright form of
-their neighbour, so they follow your theme rather than Claude's.
-
-The agents of a session are known to every sidebar in it, and a sidebar opening
-in a new tab asks the others for what they have. Nothing survives every sidebar
-being closed at once.
-
-Each run kills the `wrangler-proto` session it opens last time, because a
-session holds the wasm it loaded at startup and attaching would run the build
-before last.
-
-**The first run comes up blank, and does so again after an upgrade that changes
-which permissions are asked for.** Zellij caches the answer against the exact
-set that was asked for, so adding one means being asked again. The sidebar needs
-zellij's `ReadApplicationState`, `ChangeApplicationState`, `RunCommands` and
-`MessageAndLaunchOtherPlugins`, and zellij asks by drawing over the plugin's
-pane, but nothing paints the question until something else forces a redraw, and a plugin is not rendered at all while its request is
-pending. Focus the sidebar (`Ctrl+g`, then `Ctrl+p` and `←`) and press `y`.
-Zellij caches the answer against the wasm's path in
-`~/.cache/zellij/permissions.kdl`, so this is once per machine rather than once
-per run, and the path does not change when the wasm is rebuilt. Each tab that
-existed before the answer asks separately, since every tab's sidebar is its own
-plugin instance; tabs opened afterwards find the answer cached. See
-[zellij#4749](https://github.com/zellij-org/zellij/issues/4749).
-
-Keys reach the plugin whenever its pane has focus. Zellij starts every session
-in locked mode, which turns off zellij's own bindings and passes keystrokes
-through to the focused pane, so the sidebar works while locked; `Ctrl+g`
-unlocks, which is what you need to move focus onto the sidebar (`Ctrl+p` then an
-arrow) or to quit (`Ctrl+q`).
-
-`j`/`k` and the arrow keys move the selection; a click goes to the row it lands
-on, as does `Enter`. `q` turns the sidebar off for the whole session.
-
-A tab's row takes you to the first pane that tab lists rather than to the tab
-itself. Going to a tab lands wherever that tab was last left, which is as often
-as not that tab's own sidebar, and arriving at a sidebar is arriving nowhere.
-
-The selection bar is drawn only by the sidebar your keys would actually reach,
-so at most one of them shows one and an unfocused sidebar shows none. Where you
-are is the `▌` gutter, and that keeps saying so from every tab. The selection
-itself is not lost meanwhile: it comes back where it was the moment the sidebar
-takes focus.
-
-A click only reaches the sidebar when the sidebar already has focus. Zellij
-spends the first click on focusing the pane, so clicking a row from a terminal
-pane moves the focus onto the sidebar and does nothing else, and the click after
-it works. Turn that off in your own zellij config:
-
-```kdl
-mouse_click_through true
-```
-
-The plugin does not set it for you: it decides how every pane in every session
-behaves, not just this one.
-
-The sidebars of a session share their selection, so they read as one sidebar
-that follows you.
-
-Every tab has one, including tabs opened later: the layout declares a
-`new_tab_template` beside its `default_tab_template`, with a plain pane where
-`children` would be.
-
-Nerd Font glyphs are used for the pane and agent icons, so the terminal needs a
-patched font to draw them.
+The icon is drawn in the colour the agent shows for that session (Claude's
+`/color`), from your terminal's own palette, so it follows your theme. Colour
+says *which* agent, never which row is live.
 
 ## Options
 
-Options go in the plugin's own block in the layout, and every one of them is
-shown here at its default:
+Options go in the plugin's block, and every one is shown here at its default.
+Put the same block in both templates.
 
 ```kdl
 plugin location="..." {
@@ -270,65 +136,34 @@ plugin location="..." {
                                  // back to the directory) | 'dir'
     sections false               // a block per agent below the tree
     turn_state true              // '○' mid-turn and '●' when it wants you
-    notifications true           // the calls for the user, at the foot
+    notifications true           // the calls for you, at the foot
     desktop_notification "off"   // 'off' | 'on' (notify-send) | a command line
     install_hooks "off"          // 'off' | 'on' | a path to the hook client
 }
 ```
 
-Put the same block in both templates: a tab opened later is built from
-`new_tab_template`, and takes its options from there. `desktop_notification` is
-worth keeping the same in both for a further reason: the sidebars of a session
-are one client as far as the daemon is concerned, and the last of them to say
-what it wants is what that client wants, so templates that disagree settle it by
-the order the tabs were opened in.
-
 A value an option does not recognise leaves that option at its default, so a
 typo costs you the setting rather than the sidebar.
 
-`sections on` draws the tree and then the same sessions again, gathered under
-the agent running them (`CLAUDE`, `COPILOT`, ...) rather than under the tab
-they are in. It only groups: a tab, a pane and an agent are drawn exactly the
-same wherever they appear.
+`install_hooks` also tells the sidebar where the client is, which is how it
+reaches the agent state at all. Give it a path: `on` means "on `$PATH`", and the
+`$PATH` that matters is the zellij server's, inherited from whatever started
+zellij rather than from the shell you installed from. The install script and
+`dev.sh` write the path in for you.
 
-`install_hooks` names the client as well as asking for the hooks to be
-installed, because the sidebar reaches the daemon by running that client and
-needs to know where it is. Give it the client's path. `on` means "on your
-`$PATH`" and is worth avoiding: the `$PATH` that matters is the zellij server's,
-inherited from whatever started zellij rather than from the shell you installed
-from, and getting it wrong costs every agent row with nothing said about why.
-Both the install script and `dev.sh` write the path in for you.
+`sections on` draws the tree, then the same sessions again grouped under the
+agent running them rather than under their tab.
 
-`desktop_notification` and `install_hooks` both run a command, but so does
-asking the daemon for the agents at all, so the sidebar asks for zellij's
-`RunCommands` permission whatever these are set to. `install_hooks` is done by
-one sidebar while the others stand down - whichever is in the tab you are in,
-which every sidebar works out the same way.
+### Desktop notifications
 
-`desktop_notification` is not run by the sidebar at all: the sidebar tells the
-daemon what to raise a notification with, and the daemon raises it. That is what
-makes one call one notification, however many sidebars and sessions are holding
-it. Two sessions naming the same command get one notification between them; two
-naming different commands get one each.
-
-The notification takes the agent's name and what the session is called as its
-last two arguments, which is what `notify-send` wants. It does not name the tab,
-where the entry at the foot does: the daemon has never heard of tabs. It is
-raised whatever pane is focused, since sitting in a pane says nothing about
-whether the terminal is on screen; the `●` and the entry at the foot still clear
-when you get to the agent.
-
-It is raised at most once every five seconds. Agents call in flurries, one
-stopping for permission as another finishes, and a flurry is one interruption
-rather than four. A call passed over that way is only passed over out loud: the
-row, the `●` and the entry at the foot appear for it exactly as they would for
-any other.
+`desktop_notification "on"` uses `notify-send`; anything else is run as a
+command line, with the agent's name and the session's name as its last two
+arguments. One call is one notification however many tabs and sessions are
+holding it, and at most one every five seconds, since agents call in flurries.
 
 The command is run with `ZELLIJ_SESSION_NAME`, `ZELLIJ_PANE_ID`, `TMUX`,
-`TMUX_PANE` and `ZELLIJ` set to what the calling agent reported for them, and
-with any of those the agent reported nothing for cleared. So a notifier that
-speaks back into a multiplexer can address the session the call actually came
-from:
+`TMUX_PANE` and `ZELLIJ` set to what the calling agent reported, so a notifier
+can speak back to the session the call came from:
 
 ```sh
 #!/bin/sh
@@ -336,41 +171,49 @@ set -eu
 zellij --session "${ZELLIJ_SESSION_NAME:?}" pipe "$(printf 'zjstatus::notify::%s - %s' "${1:-}" "${2:-}")"
 ```
 
-Name the session rather than leaving it to be inherited. The daemon is started
-by whichever hook first finds none running and keeps that pane's environment for
-the rest of its life, so a bare `zellij pipe` reaches whichever session happened
-to start the daemon, however long ago that session ended.
+Name the session rather than letting it be inherited, as the example does: the
+environment the notifier inherits is that of whichever pane happened to start
+the background daemon, however long ago that session ended.
 
-`install_hooks "on"` runs `agent-wrangler` from your `PATH`. Name a path
-instead if it is not there.
+## Troubleshooting
 
-## What it demonstrates
+**The sidebar is blank on the first run, and again after some upgrades.** Zellij
+is asking for permissions and nothing has painted the question yet. Focus the
+sidebar (`Ctrl+g`, then `Ctrl+p` and `←`) and press `y`. The answer is cached in
+`~/.cache/zellij/permissions.kdl` per plugin url, so it is once per machine, but
+every tab that already existed asks separately. The sidebar needs
+`ReadApplicationState`, `ChangeApplicationState`, `RunCommands` and
+`MessageAndLaunchOtherPlugins`. See
+[zellij#4749](https://github.com/zellij-org/zellij/issues/4749).
 
-- **The paint.** `render.rs` chooses every glyph that is not the literal name of
-  a thing: the gutter, the tree branches, the index prefix, the kind icon, and
-  the styling. A row is drawn as styled pieces rather than one styled line,
-  which is what lets an agent's color sit on its icon alone.
-- **Two regions.** The tree fills the pane; the notification area is pinned to
-  the foot, capped at a quarter of it, and admits an entry only if it fits
-  whole, so a title never appears over a cut-off message.
-- **Input.** Key and mouse events arrive for the plugin's own pane with no
-  permission grant, so the prototype prompts for nothing on load.
-- **A still pane.** Turn state is two static glyphs, `●` for the agent that
-  wants you and `○` for the one still going, and the plugin subscribes to no
-  clock. It repaints only when a key or a click changes what it would draw, and
-  costs nothing between.
+**The tree is there but no agents are, and there is a message at the top of the
+pane.** The sidebar could not run the client, and the message says what the run
+said. Check the path in `install_hooks`.
 
-## Layout
+**A message about versions at the top of the pane.** The plugin and the client
+are from different releases. Run the install script again and put the version it
+prints into the url in your layout.
 
-- `agent-wrangler-core` — agent records, the registry, labels, commands and
-  other logic shared by every client and the native daemon.
-- `agent-wrangler-ui` — the row vocabulary, tree and frame composition,
-  terminal styling, selection, and ANSI serialization.
-- `agent-wrangler-sidebar` — multiplexer-neutral application state, reducer
-  inputs, effects, session reconciliation, client state, and configuration.
-- `zellij-agent-wrangler/src/adapter.rs` — conversion between Zellij reports
-  and the portable sidebar vocabulary.
-- `zellij-agent-wrangler/src/main.rs` — Zellij subscriptions, effect execution,
-  observation feedback, and printing the rendered frame.
-- `agent-wrangler` — the native daemon, hook client, configuration installer,
-  and platform integration.
+**The first click on a row does nothing.** Zellij spends it on focusing the
+pane. Set `mouse_click_through true` in your own zellij config; the plugin will
+not set it for you, since it applies to every pane in every session.
+
+**Boxes instead of icons.** The terminal needs a Nerd Font.
+
+Two commands say what the background daemon holding the agent state knows:
+
+```bash
+agent-wrangler agents      # what it holds, as it would send it
+agent-wrangler monitor     # every message in and out, as it happens
+```
+
+## Development
+
+```bash
+rustup target add wasm32-wasip1
+./dev.sh       # builds both halves and opens a session with the sidebar in every tab
+cargo test     # everything that does not call zellij, on the host target
+```
+
+`ARCHITECTURE.md` is how it is put together, `FEATURES.md` is what it does and
+what is left, and `PROGRESS.md` is what the design rests on.
