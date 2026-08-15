@@ -7,10 +7,9 @@ use agent_wrangler_sidebar::{
     SidebarPaneReport, TabId, TabLayout, TabReport,
 };
 use agent_wrangler_ui::model::{RowKey, TabPosition};
-use zellij_tile::prelude::{PaneInfo, PaneManifest, TabInfo};
+use zellij_tile::prelude::{PaneId as ZellijPaneId, PaneInfo, PaneManifest, TabInfo};
 
 pub const SELECTION_MESSAGE: &str = "wrangler:selection";
-pub const FOCUS_INTENT_MESSAGE: &str = "wrangler:focus-intent";
 pub const OFF_MESSAGE: &str = "wrangler:off";
 pub const INSTALLED_MESSAGE: &str = "wrangler:hooks-installed";
 
@@ -71,12 +70,30 @@ pub fn numeric_pane(id: &PaneId) -> Option<u32> {
     id.as_str().parse().ok()
 }
 
+/// The focus a host focus query answers with.
+///
+/// `tab_id` is a stable tab identity and not a position, whatever the host API
+/// calls the number: the two agree until a tab before the focused one closes,
+/// and this takes it as the identity, which is what it is. `pane` says which
+/// kind of pane holds the focus, so this sidebar can tell the user's own pane
+/// from itself and from another plugin.
+pub fn focus(tab_id: usize, pane: ZellijPaneId, plugin_id: u32) -> Focus {
+    let target = match pane {
+        ZellijPaneId::Terminal(id) => FocusTarget::Content(PaneId::new(id.to_string())),
+        ZellijPaneId::Plugin(id) if id == plugin_id => FocusTarget::Sidebar,
+        ZellijPaneId::Plugin(_) => FocusTarget::Other,
+    };
+    Focus {
+        tab: TabId::new(tab_id.to_string()),
+        target,
+    }
+}
+
 pub fn decode_message(name: &str, payload: Option<&str>) -> Option<Broadcast> {
     match name {
         OFF_MESSAGE => Some(Broadcast::Off),
         INSTALLED_MESSAGE => Some(Broadcast::HooksInstalled),
         SELECTION_MESSAGE => payload.and_then(RowKey::decode).map(Broadcast::Selection),
-        FOCUS_INTENT_MESSAGE => payload.and_then(decode_focus).map(Broadcast::FocusIntent),
         _ => None,
     }
 }
@@ -86,36 +103,7 @@ pub fn encode_message(message: Broadcast) -> (&'static str, Option<String>) {
         Broadcast::Off => (OFF_MESSAGE, None),
         Broadcast::HooksInstalled => (INSTALLED_MESSAGE, None),
         Broadcast::Selection(key) => (SELECTION_MESSAGE, Some(key.encode())),
-        Broadcast::FocusIntent(focus) => (FOCUS_INTENT_MESSAGE, Some(encode_focus(&focus))),
     }
-}
-
-fn encode_focus(focus: &Focus) -> String {
-    let target = match &focus.target {
-        FocusTarget::Content(pane) => format!("pane:{}", pane.as_str()),
-        FocusTarget::Sidebar => "sidebar".to_string(),
-        FocusTarget::Other => "other".to_string(),
-    };
-    format!("tab-id:{}\n{target}", focus.tab.as_str())
-}
-
-fn decode_focus(payload: &str) -> Option<Focus> {
-    let (tab, target) = payload.split_once('\n')?;
-    let tab = tab.strip_prefix("tab-id:").filter(|id| !id.is_empty())?;
-    if target.contains('\n') {
-        return None;
-    }
-    let target = match target {
-        "sidebar" => FocusTarget::Sidebar,
-        "other" => FocusTarget::Other,
-        pane => FocusTarget::Content(PaneId::new(
-            pane.strip_prefix("pane:").filter(|id| !id.is_empty())?,
-        )),
-    };
-    Some(Focus {
-        tab: TabId::new(tab),
-        target,
-    })
 }
 
 pub fn agents(payload: &str, session: &str) -> Option<AgentSnapshot> {
@@ -280,6 +268,23 @@ mod tests {
     }
 
     #[test]
+    fn focus_distinguishes_content_this_sidebar_and_other_ui() {
+        assert_eq!(focus(9, ZellijPaneId::Terminal(7), 7).tab, TabId::new("9"));
+        assert_eq!(
+            focus(4, ZellijPaneId::Terminal(7), 7).target,
+            FocusTarget::Content(PaneId::new("7"))
+        );
+        assert_eq!(
+            focus(4, ZellijPaneId::Plugin(7), 7).target,
+            FocusTarget::Sidebar
+        );
+        assert_eq!(
+            focus(4, ZellijPaneId::Plugin(9), 7).target,
+            FocusTarget::Other
+        );
+    }
+
+    #[test]
     fn opaque_ids_are_validated_only_at_the_zellij_effect_boundary() {
         assert_eq!(numeric_pane(&PaneId::new("42")), Some(42));
         assert_eq!(numeric_pane(&PaneId::new("%42")), None);
@@ -321,21 +326,6 @@ mod tests {
         let (name, payload) = encode_message(message.clone());
         assert_eq!(name, SELECTION_MESSAGE);
         assert_eq!(decode_message(name, payload.as_deref()), Some(message));
-
-        for target in [
-            FocusTarget::Content(PaneId::new("7")),
-            FocusTarget::Sidebar,
-            FocusTarget::Other,
-        ] {
-            let message = Broadcast::FocusIntent(Focus {
-                tab: TabId::new("9"),
-                target,
-            });
-            let (name, payload) = encode_message(message.clone());
-            assert_eq!(name, FOCUS_INTENT_MESSAGE);
-            assert_eq!(decode_message(name, payload.as_deref()), Some(message));
-        }
-        assert_eq!(decode_message(FOCUS_INTENT_MESSAGE, Some("tab-id:9")), None);
     }
 
     #[test]

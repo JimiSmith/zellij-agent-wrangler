@@ -43,6 +43,34 @@ pub fn position_of(tabs: &[TabReport], id: &TabId) -> Option<TabPosition> {
         .map(|tab| tab.position)
 }
 
+/// Whether the tab report and the session layout describe the same moment.
+///
+/// The two arrive as separate events, so one can already describe a topology
+/// the other has not seen. Position is the only key a pane report offers, and a
+/// position names a different tab either side of a tab opening or closing:
+/// joining a stable id from one report with a pane from the other then produces
+/// a pair that never existed, and every validation of it agrees, since both
+/// halves of the pair are checked against the same stale layout.
+///
+/// Every tab is listed in both reports, so a position in one and not the other
+/// says the two cannot be joined, and where the user is waits for a pair that
+/// can be. Rows do not wait: each is drawn from what its own report holds, so a
+/// row under the wrong tab is corrected by the report that follows, where an
+/// effect taken meanwhile would not be.
+///
+/// A reordering that leaves the same positions occupied is not visible here.
+/// Nothing in a position-keyed pane report tells one arrangement of the same
+/// tabs from another.
+pub fn coherent(tabs: &[TabReport], layout: &SessionLayout) -> bool {
+    tabs.len() == layout.tabs.len()
+        && tabs.iter().all(|tab| {
+            layout
+                .tabs
+                .iter()
+                .any(|listed| listed.position == tab.position)
+        })
+}
+
 pub fn left_behind_by(
     tabs: &[TabReport],
     layout: &SessionLayout,
@@ -94,15 +122,8 @@ pub fn reconcile(
     layout: &SessionLayout,
     visible: bool,
     observed_focus: Option<&Focus>,
-    focus_refresh_pending: bool,
 ) -> ReconciledSession {
-    let focus = reconcile_focus(
-        reports,
-        layout,
-        visible,
-        observed_focus,
-        focus_refresh_pending,
-    );
+    let focus = reconcile_focus(reports, layout, visible, observed_focus);
     let confirmed = match &focus {
         ReconciledFocus::Confirmed(focus) => Some(focus),
         ReconciledFocus::Pending | ReconciledFocus::Unknown => None,
@@ -148,12 +169,11 @@ fn reconcile_focus(
     layout: &SessionLayout,
     visible: bool,
     observed: Option<&Focus>,
-    pending: bool,
 ) -> ReconciledFocus {
     if !visible || observed.is_none() {
         return ReconciledFocus::Unknown;
     }
-    if pending {
+    if !coherent(reports, layout) {
         return ReconciledFocus::Pending;
     }
     let observed = observed.expect("checked above");
@@ -217,7 +237,7 @@ mod tests {
     }
 
     fn observed(reports: &[TabReport], layout: &SessionLayout, focus: &Focus) -> ReconciledSession {
-        reconcile(reports, layout, true, Some(focus), false)
+        reconcile(reports, layout, true, Some(focus))
     }
 
     #[test]
@@ -238,28 +258,25 @@ mod tests {
     }
 
     #[test]
-    fn hidden_missing_and_refreshing_focus_are_conservative() {
+    fn a_hidden_or_missing_focus_is_conservative_however_it_is_read() {
         let reports = vec![tab("mine", 0), tab("other", 1)];
         let focus = Focus {
             tab: TabId::new("mine"),
             target: FocusTarget::Sidebar,
         };
         assert_eq!(
-            reconcile(&reports, &layout(), false, Some(&focus), false).focus,
+            reconcile(&reports, &layout(), false, Some(&focus)).focus,
             ReconciledFocus::Unknown
         );
         assert_eq!(
-            reconcile(&reports, &layout(), true, None, false).focus,
+            reconcile(&reports, &layout(), true, None).focus,
             ReconciledFocus::Unknown
         );
-        let pending = reconcile(&reports, &layout(), true, Some(&focus), true);
-        assert_eq!(pending.focus, ReconciledFocus::Pending);
-        assert!(pending.tabs.iter().all(|tab| !tab.active));
     }
 
     #[test]
     fn other_plugin_focus_is_confirmed_from_the_tab_and_sidebar_relationship() {
-        let reports = vec![tab("mine", 0)];
+        let reports = vec![tab("mine", 0), tab("other", 1)];
         let focus = Focus {
             tab: TabId::new("mine"),
             target: FocusTarget::Other,
@@ -298,6 +315,33 @@ mod tests {
             observed(&reports, &missing_sidebar, &focus).focus,
             ReconciledFocus::Pending
         );
+    }
+
+    #[test]
+    fn reports_of_different_topologies_are_not_joined() {
+        let focus = Focus {
+            tab: TabId::new("mine"),
+            target: FocusTarget::Sidebar,
+        };
+        // A tab has closed and the pane report has not caught up; a tab has
+        // opened and it has not caught up; as many tabs are reported as are
+        // listed but not at the same positions. Every check of such a pair
+        // passes on its own: the tab is reported, and the layout at its
+        // position holds a sidebar.
+        for reports in [
+            vec![tab("mine", 0)],
+            vec![tab("mine", 0), tab("second", 1), tab("third", 2)],
+            vec![tab("mine", 0), tab("second", 2)],
+        ] {
+            assert!(!coherent(&reports, &layout()));
+            let resolved = observed(&reports, &layout(), &focus);
+            assert_eq!(resolved.focus, ReconciledFocus::Pending);
+            // The tabs are still listed, since a row is drawn from the reports
+            // rather than from where the user is. It is only the gutter that
+            // waits, and only for as long as the two disagree.
+            assert_eq!(resolved.tabs.len(), reports.len());
+            assert!(resolved.tabs.iter().all(|tab| !tab.active));
+        }
     }
 
     #[test]
@@ -363,7 +407,6 @@ mod tests {
             &SessionLayout::default(),
             false,
             None,
-            false,
         )
         .tabs;
         let names: Vec<&str> = resolved.iter().map(|tab| tab.name.as_str()).collect();
@@ -378,7 +421,7 @@ mod tests {
         reports[1].active = true;
         let mut layout = layout();
         layout.tabs[1].content_panes[0].focused = true;
-        let resolved = reconcile(&reports, &layout, true, None, false);
+        let resolved = reconcile(&reports, &layout, true, None);
         assert_eq!(resolved.focus, ReconciledFocus::Unknown);
         assert!(resolved.tabs.iter().all(|tab| !tab.active));
         assert!(resolved

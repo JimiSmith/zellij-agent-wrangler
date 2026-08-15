@@ -93,8 +93,6 @@ pub enum Broadcast {
     Off,
     HooksInstalled,
     Selection(RowKey),
-    /// A focus change a peer has requested but host events have not confirmed.
-    FocusIntent(Focus),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,6 +138,13 @@ pub struct Command {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     Repaint,
+    /// Ask the host where the user is, answered by [`Input::FocusObserved`].
+    ///
+    /// Reports say where the user was when they were sent. This asks, and is
+    /// worth its round trip only where no report is coming: a sidebar that has
+    /// just been shown holds whatever it last heard, and the reports that
+    /// replace it are a good deal slower than the answer.
+    RefreshFocus,
     RefreshPaneTitle(PaneId),
     Run(Command),
     Broadcast(Broadcast),

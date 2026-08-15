@@ -56,6 +56,11 @@ impl Plugin {
     fn execute(&self, effect: Effect) -> Option<Input> {
         match effect {
             Effect::Repaint => None,
+            Effect::RefreshFocus => {
+                Some(Input::FocusObserved(get_focused_pane_info().ok().map(
+                    |(tab_id, pane)| adapter::focus(tab_id, pane, self.plugin_id),
+                )))
+            }
             Effect::RefreshPaneTitle(pane) => {
                 let title = adapter::numeric_pane(&pane)
                     .and_then(|id| get_pane_info(zellij_tile::prelude::PaneId::Terminal(id)))
