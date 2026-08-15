@@ -25,6 +25,12 @@ what the design rests on.
 curl -fsSL https://raw.githubusercontent.com/JimiSmith/zellij-agent-wrangler/main/install.sh | sh
 ```
 
+On Windows, where what runs the installer is PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/JimiSmith/zellij-agent-wrangler/main/install.ps1 | iex
+```
+
 That installs the client, wires it into each agent's hooks, and prints the
 layout block for the plugin that goes with it. Nothing downloads the plugin:
 zellij fetches it from the url in that block and holds it. Nothing starts the
@@ -47,6 +53,33 @@ pane size=32 borderless=true {
     }
 }
 ```
+
+The path in that block is a KDL string, where a backslash starts an escape, so
+the Windows one is written with its separators doubled:
+
+```kdl
+install_hooks "C:\\Users\\you\\AppData\\Local\\Programs\\agent-wrangler\\agent-wrangler.exe"
+```
+
+The script prints it in that form. A path pasted in raw is a layout that will not
+load, `\U` being no escape KDL knows - or, for a directory whose name begins with
+one of the letters that is an escape, a layout that loads naming a path nothing
+is at.
+
+That is also where the Windows client is installed, under `%LOCALAPPDATA%`
+rather than on your `PATH`: the sidebar is told its whole path and the hooks are
+written with it, so the only thing a `PATH` entry buys is running
+`agent-wrangler agents` by name. `-AddToPath` adds one, and `-Bin` puts the
+client somewhere else. A script that is piped into `iex` takes no arguments, so
+giving it one means running it as a block:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/JimiSmith/zellij-agent-wrangler/main/install.ps1))) -AddToPath
+```
+
+A zellij under WSL is a different machine as far as the daemon is concerned,
+whatever is installed on the Windows side of it: the client that WSL's zellij
+names is one installed there, by `install.sh`.
 
 Updating is running the script again and changing the version in that url to
 match. The two halves are released together and named for the same tag, and each
