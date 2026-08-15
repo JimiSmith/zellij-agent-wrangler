@@ -89,6 +89,34 @@ pub fn focus(tab_id: usize, pane: ZellijPaneId, plugin_id: u32) -> Focus {
     }
 }
 
+/// Whether a frame is owed, between the change that made one stale and the
+/// draw that replaces it.
+///
+/// A host sends one change as several events, and drawing each of them draws
+/// the halves of a change as well as the whole of it. Holding the debt here
+/// lets one draw settle a burst of them, so what reaches the screen is the
+/// state the burst arrived at rather than every state it passed through.
+#[derive(Default)]
+pub struct RenderSchedule {
+    owed: bool,
+}
+
+impl RenderSchedule {
+    /// Record that the frame on screen is out of date.
+    ///
+    /// True when the draw has to be arranged, which is only for the first of a
+    /// burst: the rest are already covered by the draw it asks for, and that
+    /// is what makes them one frame instead of several.
+    pub fn invalidate(&mut self) -> bool {
+        !std::mem::replace(&mut self.owed, true)
+    }
+
+    /// Settle the debt, if there is one, at the moment the draw can happen.
+    pub fn due(&mut self) -> bool {
+        std::mem::take(&mut self.owed)
+    }
+}
+
 pub fn decode_message(name: &str, payload: Option<&str>) -> Option<Broadcast> {
     match name {
         OFF_MESSAGE => Some(Broadcast::Off),
@@ -288,6 +316,24 @@ mod tests {
     fn opaque_ids_are_validated_only_at_the_zellij_effect_boundary() {
         assert_eq!(numeric_pane(&PaneId::new("42")), Some(42));
         assert_eq!(numeric_pane(&PaneId::new("%42")), None);
+    }
+
+    #[test]
+    fn a_burst_of_changes_arranges_one_draw_between_them() {
+        let mut schedule = RenderSchedule::default();
+        assert!(schedule.invalidate());
+        assert!(!schedule.invalidate());
+        assert!(!schedule.invalidate());
+        assert!(schedule.due());
+        // The draw that settled the burst leaves nothing owed, so a later one
+        // that finds no debt draws nothing and a change after it starts over.
+        assert!(!schedule.due());
+        assert!(schedule.invalidate());
+    }
+
+    #[test]
+    fn nothing_is_owed_until_something_changes() {
+        assert!(!RenderSchedule::default().due());
     }
 
     fn reported(id: &str, session: &str, pane: &str) -> Agent {

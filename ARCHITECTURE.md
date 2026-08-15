@@ -166,24 +166,31 @@ the user's location, such as answering a call. Pending or unknown focus may
 affect conservative presentation, but must not trigger lifecycle changes or
 external state changes.
 
-Focus reconciliation should happen after related session events have had a
-chance to settle. A scheduled timer can coalesce adjacent tab and pane reports,
-refresh focus once, and then request a render. This also keeps host queries out
-of pipe handlers that cannot safely make synchronous round trips.
+Reconciliation runs on each report as it arrives, and records uncertainty while
+the reports disagree. What it must not do is let that uncertainty reach the
+screen: the render timer draws after a burst of reports rather than between
+them, so the reading drawn is the one the burst settled on.
 
 ## Dirty state and rendering
 
-Changing authoritative state marks the application dirty. A render scheduler
-coalesces changes and asks Zellij to render independently of the event that
-reported them.
+Changing authoritative state leaves the frame on screen out of date. A render
+scheduler coalesces those changes and asks Zellij to render independently of
+the event that reported them.
 
-The intended flow is:
+The flow is:
 
-1. an event updates state and marks it dirty;
-2. the first dirty transition schedules a render timer;
+1. an event updates state and decides a repaint is owed;
+2. the first such decision schedules a render timer;
 3. further events update the same state without scheduling more timers;
-4. the timer performs any required reconciliation work and requests rendering;
-5. rendering builds a fresh view model and clears the dirty state.
+4. the timer is the only event that asks Zellij to render;
+5. rendering builds a fresh view model from current state.
+
+The application decides that a frame is stale; the adapter decides when it is
+drawn. The two are separate because when to draw depends on how the host's
+timer behaves, and Zellij's answer is particular: a zero-second timer is
+delivered behind the events already queued, so it lands after a burst of
+reports rather than between them. That is what turns the several events of one
+tab switch into one frame.
 
 Zellij may also request a render directly, for example after a resize. Rendering
 must therefore always be able to build the complete view from current state and
@@ -279,7 +286,7 @@ on them alone.
 
 ## Migration status
 
-Migration steps 1 through 5 are complete. Multiplexer-neutral application state,
+Every migration step is complete. Multiplexer-neutral application state,
 reducer inputs, decisions, effects, and reconciliation live in
 `agent-wrangler-sidebar`; the Zellij plugin translates host reports and executes
 the resulting effects. Pane and tab row keys are opaque and stable across the
@@ -296,8 +303,14 @@ answering, hook installation ownership, remembered focus, and automatic sidebar
 closure are decided together only from a visible, confirmed reconciliation;
 pending or stale observations can update facts but cannot produce those effects.
 
-The rest of the document remains the target state. Step 6 still needs to
-coalesce repaint decisions through a dirty-state scheduler.
+Repaint decisions are coalesced through a render schedule in the adapter: a
+decision that the frame is stale asks the host for a timer, and only the timer
+draws. Measured at ten tabs, a tab switch drew four frames across the two
+sidebars it involves and now draws two, one each, and the number of frames no
+longer follows the number of events the host sends.
+
+The migration is complete. The rest of the document is the architecture as
+built.
 
 ## Migration direction
 

@@ -16,10 +16,23 @@ use zellij_tile::prelude::*;
 const RUN_FROM: &str = "/";
 const CALL: &str = "call";
 
+/// How long a stale frame waits before it is drawn, in seconds.
+///
+/// Zero is not immediate: the timer comes back behind the events already
+/// queued, which is the wait this wants. Measured at ten tabs it arrives 1ms
+/// after the ask when nothing else is happening and 22ms when a tab switch is
+/// in flight, by which time the visibility change and the pane and tab reports
+/// that make up the switch have all been reduced and one frame can show the
+/// end of it. A fixed 15ms wait was measured beside it and coalesced no
+/// better, the queue being the longer of the two; it only moved every frame
+/// 15ms later.
+const SETTLE: f64 = 0.0;
+
 #[derive(Default)]
 struct Plugin {
     application: Application,
     plugin_id: u32,
+    schedule: adapter::RenderSchedule,
 }
 
 register_plugin!(Plugin);
@@ -29,7 +42,7 @@ fn cells(count: usize) -> u16 {
 }
 
 impl Plugin {
-    fn reduce(&mut self, input: Input, settle: bool) -> bool {
+    fn reduce(&mut self, input: Input, settle: bool) {
         let mut repaint = false;
         let mut effects = VecDeque::new();
         effects.extend(self.application.reduce(input).effects);
@@ -38,7 +51,12 @@ impl Plugin {
             effects.extend(self.application.reduce(Input::EventSettled).effects);
             self.drain(&mut repaint, &mut effects);
         }
-        repaint
+        // The draw is arranged rather than performed: a change is reported as
+        // several events, and the timer is what lets the last of them be drawn
+        // instead of each of them.
+        if repaint && self.schedule.invalidate() {
+            set_timeout(SETTLE);
+        }
     }
 
     fn drain(&mut self, repaint: &mut bool, effects: &mut VecDeque<Effect>) {
@@ -166,6 +184,7 @@ impl ZellijPlugin for Plugin {
         subscribe(&[
             EventType::Key,
             EventType::Mouse,
+            EventType::Timer,
             EventType::Visible,
             EventType::TabUpdate,
             EventType::PaneUpdate,
@@ -182,10 +201,16 @@ impl ZellijPlugin for Plugin {
     }
 
     fn update(&mut self, event: Event) -> bool {
+        // The timer carries no facts. It is the moment a frame owed for the
+        // events before it can be drawn, and the only event that draws one.
+        if let Event::Timer(_) = event {
+            return self.schedule.due();
+        }
         match self.update_input(event) {
             Some(input) => self.reduce(input, true),
             None => self.reduce(Input::EventSettled, false),
         }
+        false
     }
 
     fn pipe(&mut self, message: PipeMessage) -> bool {
@@ -203,9 +228,10 @@ impl ZellijPlugin for Plugin {
         } else {
             adapter::decode_message(&message.name, message.payload.as_deref()).map(Input::Message)
         };
-        input
-            .map(|input| self.reduce(input, false))
-            .unwrap_or(false)
+        if let Some(input) = input {
+            self.reduce(input, false);
+        }
+        false
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
