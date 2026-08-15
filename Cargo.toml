@@ -12,7 +12,30 @@ members = [
 version = "0.1.9"
 edition = "2021"
 
+# Optimized for how long the plugin takes to draw rather than for how small it
+# is. The sidebar rebuilds its whole frame for every event it repaints on, and
+# at ten tabs a size-first build spends 2.4ms on one against 1.2ms here. That
+# is half the time to draw for a third of a megabyte, on a file fetched once
+# and cached, where the frame is drawn all day.
+#
+# `3` is not the next step up from this: measured over 300 frames of the same
+# session it draws 6% slower than `2` and adds 30KB, so the level here is the
+# fastest of the three rather than the highest.
 [profile.release]
-opt-level = "z"
+opt-level = 2
 lto = true
 strip = true
+
+# What `dev.sh` runs the plugin as: what is released, minus the two settings
+# that only pay off once.
+#
+# An unoptimized plugin is not the plugin under test, it is a slower one, and
+# at ten tabs it spends 16ms building a frame against 1.7ms here - a difference
+# large enough to be mistaken for a bug in what it is drawing. `lto` and `strip`
+# are for a wasm that goes down a wire: they cost 7.3s of rebuild against 1.8s
+# here, which a loop between two keystrokes pays over and over, and buy back
+# only the half millisecond a frame between this and what is released.
+[profile.dev-wasm]
+inherits = "release"
+lto = false
+strip = false

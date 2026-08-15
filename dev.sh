@@ -7,10 +7,13 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-wasm="$root/target/wasm32-wasip1/debug/zellij-agent-wrangler.wasm"
+# The plugin is built optimized. Drawing a frame is what a session with many
+# tabs pays on every event, and unoptimized that is ten times the work: a
+# prototype slow enough to be mistaken for one that is drawing the wrong thing.
+wasm="$root/target/wasm32-wasip1/dev-wasm/zellij-agent-wrangler.wasm"
 
 cargo build --manifest-path "$root/Cargo.toml" --target wasm32-wasip1 \
-    -p zellij-agent-wrangler
+    --profile dev-wasm -p zellij-agent-wrangler
 cargo build --manifest-path "$root/Cargo.toml" -p agent-wrangler
 
 client="$root/target/debug/agent-wrangler"
