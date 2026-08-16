@@ -5,6 +5,10 @@
 //! to fail loudly or to take long: it says what it saw and exits, and reading
 //! files is the daemon's. The only non-zero exit is a missing argument, which is
 //! a misconfiguration no event could describe.
+//!
+//! Every subcommand is entered through [`run`], which is what makes this a
+//! library: the program can then be linked twice under two names, differing in
+//! how it is linked and in nothing it does.
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -125,7 +129,8 @@ const USAGE: &str = "usage: agent-wrangler hook <agent> <start|end|working|needs
        agent-wrangler install-hooks [all|claude|copilot] [--uninstall]
        agent-wrangler --version";
 
-fn main() -> ExitCode {
+/// Do what the command line asks for, and say how it went.
+pub fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("hook") => {

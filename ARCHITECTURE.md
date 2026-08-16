@@ -310,6 +310,17 @@ running its own path, so the two can never be different builds. What can differ
 is the daemon and the plugin, so a state message names the format it is written
 in and a sidebar sent one it does not know says so at the top of the pane.
 
+On Windows that executable is installed twice, as `agent-wrangler.exe` and
+`agent-wranglerw.exe`. Every subcommand lives in a library and each binary is
+four lines around it; the second is linked for the windows subsystem, so it is
+never given a console. Windows allocates one for a console program whose parent
+has none and draws a window for it, and both of the things that run this client
+are exactly that: an agent running a hook, and the zellij server running what
+the sidebar asks for. So it is the windowless one that the installed hooks and
+the layout name, and the console one that a person runs. The two are installed
+together, and a client somewhere without its twin writes hooks naming itself: a
+hook that flashes a window still reports what the agent did.
+
 Records survive the daemon being restarted, but only those naming a process
 still running: a live agent says so again on its next event of any kind, where a
 dead one would otherwise be drawn for good.

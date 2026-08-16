@@ -29,6 +29,10 @@ const MANIFEST_JSON: &str = include_str!("../hooks-manifest.json");
 /// commands.
 const CLIENT: &str = "agent-wrangler";
 
+/// The name of the client's windowless twin on Windows, which is what the hooks
+/// written there actually run.
+const WINDOWLESS: &str = "agent-wranglerw";
+
 /// The suffix of the copy taken before a shared config is rewritten.
 const BACKUP: &str = ".agent-wrangler.bak";
 
@@ -57,10 +61,32 @@ fn hook_command(exe: &str, agent: &str, action: &str) -> String {
     format!("{} hook {agent} {action}", shell_quote(exe))
 }
 
+/// Whether a program is one of the two this project installs hooks for.
+///
+/// Either name counts wherever the file is read, because a config written by one
+/// of them is read by both, and an upgrade that stopped recognizing what an
+/// earlier version wrote would add its hooks beside those rather than over them.
+///
+/// A `.exe` is taken off and the comparison ignores case, which is how the name
+/// arrives on the system that has both. Nothing else is stripped: only the
+/// extension Windows puts on the file is not part of what the program is called.
+///
+/// Both separators end a path here rather than only the one this is running on,
+/// because what is read is a config file naming a path, and a test of this can
+/// then say what a Windows path does wherever it is run.
+fn is_client(program: &str) -> bool {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let bare = match name.rsplit_once('.') {
+        Some((stem, extension)) if extension.eq_ignore_ascii_case("exe") => stem,
+        _ => name,
+    };
+    bare.eq_ignore_ascii_case(CLIENT) || bare.eq_ignore_ascii_case(WINDOWLESS)
+}
+
 /// Whether a hook command is one this installer owns for `agent`, so that it is
 /// replaced rather than added beside.
 ///
-/// The command must run a program named `agent-wrangler`, with `hook` and that
+/// The command must run one of this project's clients, with `hook` and that
 /// agent as its first two arguments. The test is on the *name of the program
 /// being run* rather than on any word in the line, so a command that merely
 /// mentions a similar name, or runs a similarly named program from somewhere
@@ -73,7 +99,7 @@ fn is_ours(command: &str, agent: &str) -> bool {
     if hook != "hook" || named != agent {
         return false;
     }
-    Path::new(exe).file_name().unwrap_or_default() == CLIENT
+    is_client(exe)
 }
 
 /// The `(matcher, actions)` groups one manifest event describes: a list of
@@ -343,10 +369,39 @@ fn install_agent(agent: &str, spec: &Value, exe: &str, uninstall: bool) -> Resul
     }
 }
 
-/// This executable's own path, which is what the installed hooks will run.
+/// The client a hook should run, given the path of the one installing it.
+///
+/// On Windows that is the windowless twin beside it rather than the file this is
+/// running from. Windows gives a console program whose parent has no console one
+/// of its own and draws a window for it, and the thing that runs a hook is an
+/// agent that is often exactly that, so a hook naming the console client is a
+/// window flashing up once per event.
+///
+/// The twin is named beside whichever of the two is running, so installing from
+/// either writes the same path. A client that is somewhere without its twin
+/// names itself: a hook that flashes still reports what the agent did, where one
+/// naming a file that is not there reports nothing at all.
+#[cfg(windows)]
+fn hook_client(exe: PathBuf) -> PathBuf {
+    let twin = exe.with_file_name(format!("{WINDOWLESS}.exe"));
+    match twin.is_file() {
+        true => twin,
+        false => exe,
+    }
+}
+
+/// The client a hook should run, which off Windows is the one installing it:
+/// there is no console to be given, so there is no second client to name.
+#[cfg(not(windows))]
+fn hook_client(exe: PathBuf) -> PathBuf {
+    exe
+}
+
+/// The path the installed hooks will run.
 fn exe_path() -> String {
     std::env::current_exe()
         .ok()
+        .map(hook_client)
         .and_then(|path| path.to_str().map(Into::into))
         .unwrap_or_else(|| CLIENT.to_string())
 }
@@ -434,6 +489,27 @@ mod tests {
         ));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_hook_runs_the_windowless_client_where_there_is_one() {
+        let dir = std::env::temp_dir().join("agent-wrangler-install-twin");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a directory to install into");
+        let exe = dir.join(format!("{CLIENT}.exe"));
+        let twin = dir.join(format!("{WINDOWLESS}.exe"));
+
+        // On its own, a client is the only thing a hook could run.
+        assert_eq!(hook_client(exe.clone()), exe);
+
+        fs::write(&twin, "").expect("a twin to find");
+        assert_eq!(hook_client(exe.clone()), twin);
+        // Installing from the twin itself writes the same path, so which of the
+        // two ran `install-hooks` cannot change what the hooks say.
+        assert_eq!(hook_client(twin.clone()), twin);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_command_this_writes_is_always_one_it_recognises() {
         // The property the two halves have to agree on: whatever the path, a
@@ -446,6 +522,21 @@ mod tests {
             "/home/u/Development/zellij-agent-wrangler/target/debug/agent-wrangler",
         ] {
             let command = hook_command(exe, "claude", "start");
+            assert!(is_ours(&command, "claude"), "{command}");
+        }
+    }
+
+    #[test]
+    fn either_client_is_recognised_however_windows_names_the_file() {
+        // A settings file written on Windows names the windowless client, with
+        // the extension the system puts on it and in whatever case the path
+        // arrived in. All of it has to read back as ours.
+        for exe in [
+            r"C:\Users\u\AppData\Local\Programs\agent-wrangler\agent-wranglerw.exe",
+            r"C:\Users\u\AppData\Local\Programs\agent-wrangler\agent-wrangler.exe",
+            r"C:\Users\u\AppData\Local\Programs\agent-wrangler\Agent-Wrangler.EXE",
+        ] {
+            let command = format!("'{exe}' hook claude start");
             assert!(is_ours(&command, "claude"), "{command}");
         }
     }

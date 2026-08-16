@@ -4,15 +4,27 @@ version.workspace = true
 edition.workspace = true
 description = "The daemon that tracks agent sessions, the hooks that feed it, and the installer that wires them up"
 
-# Named for what it wrangles rather than for what draws it: the same binary
+# Named for what it wrangles rather than for what draws it: the same program
 # serves any multiplexer, because nothing it does depends on one.
 #
 # The daemon is a subcommand rather than a binary of its own, and a hook starts
 # it by running its own executable. That is what makes the two impossible to
 # have at different versions.
+[lib]
+name = "agent_wrangler"
+path = "src/lib.rs"
+
 [[bin]]
 name = "agent-wrangler"
-path = "src/main.rs"
+path = "src/bin/agent-wrangler.rs"
+
+# The same program a second time, differing on Windows in the subsystem it is
+# linked for. Built everywhere rather than behind a feature or a target: the two
+# are installed as a pair, and a build that produces one of them is a machine
+# where installing writes a hook naming a file that is not there.
+[[bin]]
+name = "agent-wranglerw"
+path = "src/bin/agent-wranglerw.rs"
 
 [dependencies]
 agent-wrangler-core = { path = "../agent-wrangler-core" }

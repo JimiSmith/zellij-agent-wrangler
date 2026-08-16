@@ -136,6 +136,19 @@ jobs:
           cp "target/${{ matrix.target }}/release/agent-wrangler${{ matrix.suffix }}" "$asset"
           gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
 
+      # The same program linked so that Windows never gives it a console, which
+      # is what the hooks and the sidebar run there. It is attached only for
+      # Windows because it is the same file as the one above everywhere else:
+      # nothing but Windows has a console to be given.
+      - name: Attach the windowless client, which only Windows has a use for
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          asset="agent-wranglerw-$GITHUB_REF_NAME-${{ matrix.target }}.exe"
+          cp "target/${{ matrix.target }}/release/agent-wranglerw.exe" "$asset"
+          gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
+
   # Nothing below the release is allowed to be half done: the install script
   # asks for the latest release and takes what it finds, so a release carrying
   # some of its platforms is worse than one carrying none.

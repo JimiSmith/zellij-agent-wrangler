@@ -1,8 +1,15 @@
 # Install the client, and print the layout block for the plugin that goes with
-# it. The Windows half of install.sh, and the same shape: one binary holding the
+# it. The Windows half of install.sh, and the same shape: one program holding the
 # hook the agents invoke, the daemon those hooks feed, and this installer.
 # Nothing starts the daemon here, and nothing downloads the plugin here; zellij
 # fetches that itself from the url in the layout.
+#
+# That program is installed twice, as agent-wrangler.exe and agent-wranglerw.exe.
+# They are the same build differing in one thing: the second is linked so that
+# Windows never gives it a console, and so never draws a window for it when
+# something that has no console of its own runs it. That is what the agents and
+# the zellij server do, so it is the second that the hooks and the layout name,
+# and the first that is left for running by hand.
 #
 #   irm https://raw.githubusercontent.com/JimiSmith/zellij-agent-wrangler/main/install.ps1 | iex
 #
@@ -81,12 +88,15 @@ if (-not $Version) {
 if (-not $Version) { throw 'could not work out the latest version.' }
 
 $client = "agent-wrangler-$Version-$target.exe"
+$windowless = "agent-wranglerw-$Version-$target.exe"
 $wasm = "zellij-agent-wrangler-$Version.wasm"
 
 New-Item -ItemType Directory -Force -Path $Bin | Out-Null
 $exe = Join-Path $Bin 'agent-wrangler.exe'
-$temp = Join-Path $Bin ".agent-wrangler.$PID.exe"
+$quiet = Join-Path $Bin 'agent-wranglerw.exe'
 
+# One released file into one installed name.
+#
 # Downloaded beside the real one and moved over it, never written to it: a
 # download that dies halfway leaves nothing behind that could be run.
 #
@@ -96,39 +106,54 @@ $temp = Join-Path $Bin ".agent-wrangler.$PID.exe"
 # aside first and the new one put in the name it left. What is running goes on
 # running from the file it started as, under its new name, and the next run gets
 # the new build whole.
-try {
-    if ($gh) {
-        & $gh.Source release download $Version --repo $repo --pattern $client --output $temp --clobber
-        if ($LASTEXITCODE -ne 0) { throw "gh could not download $client from $Version." }
-    } else {
-        Invoke-WebRequest -UseBasicParsing -OutFile $temp `
-            -Uri "https://github.com/$repo/releases/download/$Version/$client"
-    }
-    # A file fetched from the internet carries a zone marker, and a marked
-    # executable is what SmartScreen stops. Cleared here rather than left for the
-    # user, because the thing that runs it is a hook inside an agent's turn,
-    # where a blocked run is a row that never appears and says nothing.
-    Unblock-File -LiteralPath $temp
+function Install-Binary {
+    param(
+        [Parameter(Mandatory)][string]$Asset,
+        [Parameter(Mandatory)][string]$Path
+    )
 
-    $aside = $null
-    if (Test-Path -LiteralPath $exe) {
-        $aside = Join-Path $Bin ".agent-wrangler.old.$([guid]::NewGuid().ToString('N').Substring(0, 8)).exe"
-        Move-Item -LiteralPath $exe -Destination $aside
-    }
+    $name = [IO.Path]::GetFileNameWithoutExtension($Path)
+    $temp = Join-Path $Bin ".$name.$PID.exe"
     try {
-        Move-Item -LiteralPath $temp -Destination $exe
-    } catch {
-        if ($aside) { Move-Item -LiteralPath $aside -Destination $exe }
-        throw
+        if ($gh) {
+            & $gh.Source release download $Version --repo $repo --pattern $Asset --output $temp --clobber
+            if ($LASTEXITCODE -ne 0) { throw "gh could not download $Asset from $Version." }
+        } else {
+            Invoke-WebRequest -UseBasicParsing -OutFile $temp `
+                -Uri "https://github.com/$repo/releases/download/$Version/$Asset"
+        }
+        # A file fetched from the internet carries a zone marker, and a marked
+        # executable is what SmartScreen stops. Cleared here rather than left for
+        # the user, because the thing that runs it is a hook inside an agent's
+        # turn, where a blocked run is a row that never appears and says nothing.
+        Unblock-File -LiteralPath $temp
+
+        $aside = $null
+        if (Test-Path -LiteralPath $Path) {
+            $aside = Join-Path $Bin ".$name.old.$([guid]::NewGuid().ToString('N').Substring(0, 8)).exe"
+            Move-Item -LiteralPath $Path -Destination $aside
+        }
+        try {
+            Move-Item -LiteralPath $temp -Destination $Path
+        } catch {
+            if ($aside) { Move-Item -LiteralPath $aside -Destination $Path }
+            throw
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
     }
-} finally {
-    if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
 }
+
+# Both, or neither worth having: the hooks and the layout name the windowless
+# one, so installing the console one alone leaves every hook naming a file that
+# is not there.
+Install-Binary -Asset $client -Path $exe
+Install-Binary -Asset $windowless -Path $quiet
 
 # Every version moved aside, this run's and any left by an earlier one. The one
 # a daemon is still running from refuses to go and is left for the next install,
 # by which time that daemon has been restarted by a hook running the new build.
-Get-ChildItem -LiteralPath $Bin -Filter '.agent-wrangler.old.*.exe' -Force -ErrorAction SilentlyContinue |
+Get-ChildItem -LiteralPath $Bin -Filter '.agent-wrangler*.old.*.exe' -Force -ErrorAction SilentlyContinue |
     ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
 
 & $exe install-hooks
@@ -160,11 +185,16 @@ you looks there, and the sidebar is told the path outright."
 # the zellij server's, inherited from whatever started zellij, which is not
 # necessarily the shell this script is running in.
 #
+# It names the windowless one, because the server running it is the very case
+# that draws a console window: the sidebar runs the client once for every tab it
+# opens, and the server it is running under has no console for a child to be
+# given.
+#
 # The path is written with its separators doubled: what the block goes into is
 # KDL, where a quoted string takes backslash escapes, so a Windows path put in
 # raw is a path with `\U` and `\a` in it rather than the one this just installed.
 $url = "https://github.com/$repo/releases/download/$Version/$wasm"
-$kdl = $exe -replace '\\', '\\'
+$kdl = $quiet -replace '\\', '\\'
 $block = @"
     pane size=32 borderless=true {
         plugin location="$url" {
@@ -180,16 +210,18 @@ if ($found -and $found -ne $exe) {
 The block names the one this script just installed, so the sidebar runs that
 one whatever the path says."
 } else {
-    $note = "That names the client this script installed. Leave the path in even if
-$Bin is on your PATH: what has to find it is zellij, whose environment comes
-from whatever started it rather than from this shell."
+    $note = "That names the windowless client this script installed, which is what
+keeps a console window from flashing up each time the sidebar runs it. Leave the
+path in even if $Bin is on your PATH: what has to find it is zellij, whose
+environment comes from whatever started it rather than from this shell."
 }
 
 $installed = (& $exe --version) -join ' '
 
 Write-Host @"
 
-Installed $installed to $Bin.
+Installed $installed to $Bin, as agent-wrangler.exe to run yourself and
+agent-wranglerw.exe for the hooks and the sidebar to run without a window.
 
 $path
 

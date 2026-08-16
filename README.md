@@ -70,12 +70,19 @@ into `iex` takes no arguments, so run it as a block instead:
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/JimiSmith/zellij-agent-wrangler/main/install.ps1))) -AddToPath
 ```
 
+Two copies of the client are installed. `agent-wrangler.exe` is the one to run
+yourself, and `agent-wranglerw.exe` is the same build linked so that Windows
+never gives it a console. Windows draws a console window for a console program
+whose parent has none, which is what an agent running a hook and a zellij server
+running the sidebar's client both are, so the hooks and the layout name the
+second one and nothing flashes up. Anything you run by hand wants the first.
+
 The path in the layout block is a KDL string, where a backslash starts an
 escape, so it is written with the separators doubled. The script prints it that
 way; pasting a raw path gives you a layout that will not load.
 
 ```kdl
-install_hooks "C:\\Users\\you\\AppData\\Local\\Programs\\agent-wrangler\\agent-wrangler.exe"
+install_hooks "C:\\Users\\you\\AppData\\Local\\Programs\\agent-wrangler\\agent-wranglerw.exe"
 ```
 
 A zellij running under WSL is a different machine as far as this is concerned.
