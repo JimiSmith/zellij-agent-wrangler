@@ -7,10 +7,11 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use agent_wrangler_core::agent::AGENTS_MESSAGE;
 
+use crate::platform::command;
 use crate::proto::Sink;
 
 /// Whether the delivery got through.
@@ -49,7 +50,7 @@ pub fn deliver(sink: &Sink, payload: &str) -> Delivery {
 /// Pipe into one named zellij session, addressed to no plugin so that every
 /// sidebar in that session hears it.
 fn zellij(session: &str, payload: &str) -> bool {
-    Command::new("zellij")
+    command("zellij")
         .args([
             "--session",
             session,

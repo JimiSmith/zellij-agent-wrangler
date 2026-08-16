@@ -15,6 +15,12 @@ use agent_wrangler_core::agent::Started;
 
 use super::Row;
 
+/// A program to run and wait for, which here is nothing but the program: a unix
+/// process is started with no window either way.
+pub fn command(program: &str) -> Command {
+    Command::new(program)
+}
+
 /// Start a program that outlives the process that started it.
 ///
 /// Side effect: spawns a process and never waits for it. It is put in a process

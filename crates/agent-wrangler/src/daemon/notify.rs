@@ -12,13 +12,14 @@
 //! multiplexer has to be told which session, and this process's own environment
 //! is not an answer to that.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use agent_wrangler_core::notify::Notifier;
 use agent_wrangler_core::origin::LOCATION_VARS;
 
 use crate::daemon::state::Call;
+use crate::platform::command;
 
 /// How long the notifier is left alone after a call has been said out loud.
 ///
@@ -85,15 +86,15 @@ fn where_it_is(call: &Call) -> Vec<(&'static str, Option<&str>)> {
 /// exactly these variables to know which session to speak to, and this
 /// process's are not that agent's.
 pub fn raise(notifier: &Notifier, call: &Call) -> bool {
-    let mut command = Command::new(notifier.program());
-    command.args(notifier.arguments(&call.agent, &call.label));
+    let mut announce = command(notifier.program());
+    announce.args(notifier.arguments(&call.agent, &call.label));
     for (name, value) in where_it_is(call) {
         match value {
-            Some(value) => command.env(name, value),
-            None => command.env_remove(name),
+            Some(value) => announce.env(name, value),
+            None => announce.env_remove(name),
         };
     }
-    command
+    announce
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -1,10 +1,14 @@
 //! The process primitives this needs, chosen at compile time.
 //!
-//! Each supported system provides the same four functions, and the rest of the
+//! Each supported system provides the same five functions, and the rest of the
 //! crate calls the re-exported ones with no `cfg` of its own. A build for a
 //! system with no module here fails to find them, which is the intended answer:
 //! a missing port should not silently become a daemon that cannot tell a live
 //! agent from a dead one.
+//!
+//! Starting a program is one of the five for the same reason: what it takes to
+//! start one without disturbing the user is the system's own business, and a
+//! caller that built its own would be a caller that had to know.
 //!
 //! What is derived from those four, climbing the process table to find the
 //! agent a hook belongs to and dating what it finds, is written once here for
@@ -17,12 +21,12 @@ use agent_wrangler_core::agent::Process;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{pid_alive, processes, spawn_detached, started};
+pub use unix::{command, pid_alive, processes, spawn_detached, started};
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{pid_alive, processes, spawn_detached, started};
+pub use windows::{command, pid_alive, processes, spawn_detached, started};
 
 /// One row of the process table: who started this process, and what it is
 /// running.

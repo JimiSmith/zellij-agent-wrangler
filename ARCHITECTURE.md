@@ -321,6 +321,13 @@ the layout name, and the console one that a person runs. The two are installed
 together, and a client somewhere without its twin writes hooks naming itself: a
 hook that flashes a window still reports what the agent did.
 
+The daemon has the same problem to hand on. It is started detached and so has no
+console of its own, which makes every program it runs one of those given a fresh
+one: the zellij it pipes a delivery through, and the notifier it announces a call
+with. Both are started through the platform module rather than built where they
+are run, so what it takes to start a program without disturbing the user is
+answered once for each system and cannot be forgotten at a call site.
+
 Records survive the daemon being restarted, but only those naming a process
 still running: a live agent says so again on its next event of any kind, where a
 dead one would otherwise be drawn for good.

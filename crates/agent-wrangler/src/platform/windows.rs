@@ -22,6 +22,24 @@ use agent_wrangler_core::agent::Started;
 
 use super::Row;
 
+/// A program to run and wait for, built so that running it cannot make a window
+/// appear.
+///
+/// Windows gives a console program whose parent has no console one of its own,
+/// and draws a window for it. Everything that runs a program here is the daemon,
+/// which is started detached and so has exactly no console, which would make a
+/// delivery to a client and a desktop notification each a window flashing up on
+/// the user's screen. `CREATE_NO_WINDOW` is what says to give it a console with
+/// no window rather than one with.
+///
+/// A program is built through this rather than the flag being set at each call,
+/// so that adding a program to run is not a thing to remember.
+pub fn command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
 /// Start a program that outlives the process that started it.
 ///
 /// Side effect: spawns a process and never waits for it. `DETACHED_PROCESS`
