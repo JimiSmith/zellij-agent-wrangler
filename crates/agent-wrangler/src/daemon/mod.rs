@@ -36,6 +36,7 @@ use agent_wrangler_core::agent::FORMAT;
 use agent_wrangler_core::notify::Notifier;
 
 use crate::daemon::notify::Announced;
+use crate::daemon::sink::Delivery;
 use crate::daemon::state::{look, read_hook, Call, Client, Real, State};
 use crate::daemon::watch::Watchers;
 use crate::paths;
@@ -150,7 +151,7 @@ fn publish(shared: &Arc<Mutex<State>>, dir: &Path, watchers: &Watchers) {
     };
     let agents = saved.len();
     persist::save(dir, &saved, &clients);
-    let answers: Vec<(Sink, bool)> = clients
+    let answers: Vec<(Sink, Delivery)> = clients
         .into_iter()
         .map(|client| {
             watchers.saw(|| What::Delivering {
@@ -158,50 +159,41 @@ fn publish(shared: &Arc<Mutex<State>>, dir: &Path, watchers: &Watchers) {
                 agents,
             });
             let began = Instant::now();
-            let sent = sink::deliver(&client.sink, &payload).sent();
+            let delivery = sink::deliver(&client.sink, &payload);
             let took = began.elapsed().as_millis() as u64;
+            let (sent, abandoned) = match delivery {
+                Delivery::Sent => (true, false),
+                Delivery::Failed => (false, false),
+                Delivery::Abandoned => (true, true),
+            };
             watchers.saw(|| What::Delivered {
                 sink: client.sink.clone(),
                 sent,
+                abandoned,
                 took,
             });
-            (client.sink, sent)
+            (client.sink, delivery)
         })
         .collect();
     let mut state = held(shared);
-    for (sink, sent) in answers {
-        match sent {
-            true => state.reached(&sink),
-            false => {
-                state.missed(&sink);
-            }
-        }
+    for (sink, delivery) in answers {
+        answered(&mut state, &sink, delivery);
     }
 }
 
-/// Tell one client, whatever the rest of them are doing.
-fn deliver_one(shared: &Arc<Mutex<State>>, to: &Sink, watchers: &Watchers) {
-    let (payload, agents) = {
-        let state = held(shared);
-        (state.payload(), state.snapshot().len())
-    };
-    watchers.saw(|| What::Delivering {
-        sink: to.clone(),
-        agents,
-    });
-    let began = Instant::now();
-    let sent = sink::deliver(to, &payload).sent();
-    let took = began.elapsed().as_millis() as u64;
-    watchers.saw(|| What::Delivered {
-        sink: to.clone(),
-        sent,
-        took,
-    });
-    let mut state = held(shared);
-    match sent {
-        true => state.reached(to),
-        false => {
-            state.missed(to);
+/// What one delivery says about the client it was for.
+///
+/// Only a refusal counts against a client, and it is the answer a client that
+/// has gone gives: piping into a session that is not there comes back in
+/// milliseconds saying so. A delivery given up on says nothing about whether
+/// the client is there, and a great deal about what the multiplexer is doing,
+/// so counting it would retire a live sidebar for the multiplexer's fault - and
+/// a sidebar, once dropped, never asks again.
+fn answered(state: &mut State, sink: &Sink, delivery: Delivery) {
+    match delivery {
+        Delivery::Sent | Delivery::Abandoned => state.reached(sink),
+        Delivery::Failed => {
+            state.missed(sink);
         }
     }
 }
@@ -300,12 +292,20 @@ fn serve(
             Inbound::Register { sink, notify, .. } => {
                 watchers.saw(|| What::Registered { sink: sink.clone() });
                 held(shared).register(Client {
-                    sink: sink.clone(),
+                    sink,
                     notify: Notifier::new(notify),
                 });
                 // A client that has just registered has nothing yet, so it is
-                // told the state whether or not anything changed.
-                deliver_one(shared, &sink, watchers);
+                // owed the state whether or not anything changed.
+                //
+                // Owed rather than delivered here, even though only one client
+                // asked. A layout with a sidebar in every tab registers every
+                // one of them the moment the user attaches, each on a
+                // connection thread of its own, and a delivery apiece is that
+                // many multiplexer clients started at once - which is the load
+                // under which one of them wedges. One delivery answers all of
+                // them, because what a client is sent is the whole state.
+                owed.owe();
                 record(shared, dir);
             }
             Inbound::Seen { session } => {
@@ -447,6 +447,7 @@ pub fn run() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::state::REFUSALS;
 
     #[test]
     fn the_poll_is_often_enough_to_read_as_immediate() {
@@ -487,6 +488,63 @@ mod tests {
             heard.recv_timeout(Duration::from_secs(5)).is_ok(),
             "a change after the delivery is owed like any other"
         );
+    }
+
+    fn sidebar() -> Client {
+        Client {
+            sink: Sink::Zellij {
+                session: "proto".to_string(),
+            },
+            notify: None,
+        }
+    }
+
+    #[test]
+    fn a_delivery_given_up_on_never_retires_the_client_it_was_for() {
+        // The failure this rule exists for: a sidebar is alive, is being drawn
+        // to, and the multiplexer will not let go of the program that draws to
+        // it. Counting those would drop the client after three of them, and
+        // nothing would ever register it again, so the sidebar would be left
+        // showing whatever it last received for as long as the session lasted.
+        let mut state = State::default();
+        let client = sidebar();
+        state.register(client.clone());
+        for _ in 0..100 {
+            answered(&mut state, &client.sink, Delivery::Abandoned);
+        }
+        assert_eq!(state.clients(), vec![client]);
+    }
+
+    #[test]
+    fn a_client_that_keeps_refusing_is_still_given_up_on() {
+        // The other half of it: a session that has gone answers at once and
+        // says so, and that is the answer a client is retired for.
+        let mut state = State::default();
+        let client = sidebar();
+        state.register(client.clone());
+        for _ in 0..REFUSALS {
+            answered(&mut state, &client.sink, Delivery::Failed);
+        }
+        assert!(state.clients().is_empty());
+    }
+
+    #[test]
+    fn a_delivery_given_up_on_forgives_the_refusals_before_it() {
+        // It is a client that took the state, so the count towards retiring it
+        // starts again like any delivery that landed. Each run is one short of
+        // retiring the client, so the two of them are two apart only if the
+        // one in between forgave what came before it.
+        let mut state = State::default();
+        let client = sidebar();
+        state.register(client.clone());
+        for _ in 1..REFUSALS {
+            answered(&mut state, &client.sink, Delivery::Failed);
+        }
+        answered(&mut state, &client.sink, Delivery::Abandoned);
+        for _ in 1..REFUSALS {
+            answered(&mut state, &client.sink, Delivery::Failed);
+        }
+        assert_eq!(state.clients(), vec![client]);
     }
 
     #[test]

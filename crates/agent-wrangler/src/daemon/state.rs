@@ -132,7 +132,7 @@ pub struct State {
 /// multiplexer busy, a program missing from the path this daemon happened to
 /// inherit - would leave that sidebar drawing whatever it last received for
 /// good, with nothing said about why.
-const REFUSALS: u32 = 3;
+pub const REFUSALS: u32 = 3;
 
 /// What an agent's files said, read before anything is locked.
 ///

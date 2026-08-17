@@ -138,7 +138,23 @@ pub enum What {
     Delivering { sink: Sink, agents: usize },
     /// Out: that delivery landed, or found the client gone. `took` is
     /// milliseconds, which for a zellij client is a whole process run.
-    Delivered { sink: Sink, sent: bool, took: u64 },
+    ///
+    /// `abandoned` is a delivery the daemon stopped waiting for and killed. It
+    /// reads as sent as well, and both are true of it: the client has the state
+    /// and only the program handing it over failed to end. What the field adds
+    /// is where the time went, since a delivery like that takes the whole of
+    /// the wait and every client after it waits its turn.
+    ///
+    /// Two fields rather than the outcome itself, because a watcher may be of
+    /// another build: one that has never heard of `abandoned` still finds a
+    /// delivery that landed, which is what one is.
+    Delivered {
+        sink: Sink,
+        sent: bool,
+        #[serde(default)]
+        abandoned: bool,
+        took: u64,
+    },
     /// Records that could not be handed over fast enough. A watcher that falls
     /// behind loses records rather than holding the daemon up, and is told how
     /// many rather than left believing it saw everything.
@@ -278,6 +294,44 @@ mod tests {
             })
         );
         assert_eq!(read_message::<_, Inbound>(&mut reader).unwrap(), None);
+    }
+
+    #[test]
+    fn a_delivery_says_how_it_ended() {
+        round_trip(Watched {
+            at: 1_700_000_000_000,
+            what: What::Delivered {
+                sink: Sink::Zellij {
+                    session: "proto".to_string(),
+                },
+                sent: true,
+                abandoned: true,
+                took: 2000,
+            },
+        });
+    }
+
+    #[test]
+    fn a_delivery_written_by_a_build_that_only_knew_two_endings_still_reads() {
+        // A watcher reads what the daemon says, and the two are not always the
+        // same build. A record from before there was anything to give up on is
+        // a delivery that was not.
+        let line = r#"{"at":1,"kind":"delivered","sink":{"kind":"pipe","path":"/tmp/w"},"sent":true,"took":40}"#;
+        let mut reader = line.as_bytes();
+        assert_eq!(
+            read_message::<_, Watched>(&mut reader).unwrap(),
+            Some(Watched {
+                at: 1,
+                what: What::Delivered {
+                    sink: Sink::Pipe {
+                        path: "/tmp/w".to_string()
+                    },
+                    sent: true,
+                    abandoned: false,
+                    took: 40,
+                },
+            })
+        );
     }
 
     #[test]

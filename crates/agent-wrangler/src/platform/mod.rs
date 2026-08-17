@@ -11,10 +11,14 @@
 //! caller that built its own would be a caller that had to know.
 //!
 //! What is derived from those four, climbing the process table to find the
-//! agent a hook belongs to and dating what it finds, is written once here for
-//! all of them.
+//! agent a hook belongs to and dating what it finds, and waiting for a program
+//! for no longer than it is worth waiting, is written once here for all of
+//! them.
 
 use std::collections::HashMap;
+use std::process::{Child, Command};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use agent_wrangler_core::agent::Process;
 
@@ -38,6 +42,72 @@ pub use windows::{command, pid_alive, processes, spawn_detached, started};
 pub struct Row {
     pub ppid: u32,
     pub name: String,
+}
+
+/// What became of a program that was run and waited for.
+///
+/// A program still running when the wait ran out is an answer of its own rather
+/// than a failure. What it was asked to do it may well have done, and only the
+/// exiting is missing; what that is worth is the caller's to say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ran {
+    /// It finished and said it worked.
+    Worked,
+    /// It finished and said it did not, or could not be started at all.
+    Failed,
+    /// It was still running when the wait ran out, so it was killed and reaped.
+    Abandoned,
+}
+
+/// How often a running program is asked whether it has finished.
+///
+/// The programs this runs are back in tens of milliseconds when all is well, so
+/// asking this often adds nothing to one that anybody could see, while a wait
+/// that has to run to its end is a hundred wakeups a second rather than a
+/// thread spinning on a core.
+const ASKED_AGAIN: Duration = Duration::from_millis(10);
+
+/// Run a program, wait for it, and give up on it after `patience`.
+///
+/// Side effect: spawns a process, and kills it if it outstays the wait.
+///
+/// The wait is what makes this worth having. A child that never exits is a
+/// caller that never returns, and `zellij pipe` does exactly that now and then,
+/// having already handed its payload over: one of them wedged the whole of a
+/// daemon's delivering for the best part of an hour, and every sidebar with it.
+///
+/// A child given up on is waited for as well as killed. A process that is
+/// signalled and not reaped stays in the table as a zombie, and a daemon runs
+/// for as long as the user is logged in, so one left behind per delivery is a
+/// table full of them by the evening.
+pub fn ran(program: &mut Command, patience: Duration) -> Ran {
+    let Ok(mut child) = program.spawn() else {
+        return Ran::Failed;
+    };
+    let until = Instant::now() + patience;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return match status.success() {
+                    true => Ran::Worked,
+                    false => Ran::Failed,
+                }
+            }
+            Ok(None) if Instant::now() >= until => return abandon(&mut child),
+            // A child that could not be asked about once cannot be asked again,
+            // so it is given up on like one that outstayed the wait: either way
+            // this process is the only one that can reap it.
+            Err(_) => return abandon(&mut child),
+            Ok(None) => thread::sleep(ASKED_AGAIN),
+        }
+    }
+}
+
+/// Kill a child and wait for it, so that nothing is left of it.
+fn abandon(child: &mut Child) -> Ran {
+    let _ = child.kill();
+    let _ = child.wait();
+    Ran::Abandoned
 }
 
 /// The shells an agent is commonly invoked through, and which invoke a hook in
@@ -347,6 +417,78 @@ mod tests {
         if let Some(process) = agent_running(me, "nothing-runs-under-this-name", &table, 8) {
             assert!(process.started.is_some(), "a live ancestor can be dated");
         }
+    }
+
+    // A program that never exits is what the wait is for, and there is no
+    // spelling of one that both systems share. The failure is not unix-only;
+    // the sleeper is.
+    #[cfg(unix)]
+    const LONGER_THAN_ANY_TEST: &str = "3600";
+
+    /// How many children of this process are running `sleep`.
+    ///
+    /// A child that was killed and not waited for is still one of these: the
+    /// process table holds it until somebody reaps it, which is the whole of
+    /// what killing without waiting leaves behind.
+    #[cfg(unix)]
+    fn sleepers() -> usize {
+        let me = std::process::id();
+        processes()
+            .values()
+            .filter(|row| row.ppid == me && stem(&row.name) == "sleep")
+            .count()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_program_that_worked_says_so() {
+        assert_eq!(
+            ran(&mut command("true"), Duration::from_secs(5)),
+            Ran::Worked
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_program_that_refused_says_so_without_being_waited_out() {
+        // The answer a client that has gone gives, and it is the fast one: a
+        // wait spent on it would be a wait spent on every delivery.
+        let began = Instant::now();
+        assert_eq!(
+            ran(&mut command("false"), Duration::from_secs(30)),
+            Ran::Failed
+        );
+        assert!(began.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_program_that_is_not_there_is_a_program_that_failed() {
+        assert_eq!(
+            ran(
+                &mut command("/nonexistent/agent-wrangler/program"),
+                Duration::from_millis(50)
+            ),
+            Ran::Failed
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_program_that_never_ends_is_given_up_on_and_leaves_nothing_behind() {
+        // The failure the wait exists for. Without it this call is the end of
+        // the thread that made it.
+        let mut sleeper = command("sleep");
+        sleeper.arg(LONGER_THAN_ANY_TEST);
+        let began = Instant::now();
+        assert_eq!(
+            ran(&mut sleeper, Duration::from_millis(200)),
+            Ran::Abandoned
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(30),
+            "the wait ended long before the program would have"
+        );
+        assert_eq!(sleepers(), 0, "the child was reaped as well as killed");
     }
 
     #[test]

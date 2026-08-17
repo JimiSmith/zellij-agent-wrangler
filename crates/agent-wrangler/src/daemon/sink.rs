@@ -8,13 +8,28 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 use std::process::Stdio;
+use std::time::Duration;
 
 use agent_wrangler_core::agent::AGENTS_MESSAGE;
 
-use crate::platform::command;
+use crate::platform::{command, ran, Ran};
 use crate::proto::Sink;
 
-/// Whether the delivery got through.
+/// How long one client is given to take one delivery.
+///
+/// A healthy `zellij pipe` is back in twenty to fifty milliseconds, so this is
+/// forty times over what a working client needs. The room is worth having:
+/// killed too soon, the one delivery that had not yet handed its payload over
+/// leaves that sidebar drawing its last state until something else changes, and
+/// a machine under load is exactly when there is something to draw.
+///
+/// The other end of the choice is what a client that never lets go costs.
+/// Clients are delivered to one after another on one thread, and only when
+/// something changed, so each wedged one adds this much to a publish and
+/// nothing adds more.
+const PATIENCE: Duration = Duration::from_secs(2);
+
+/// What became of one delivery.
 ///
 /// A client that cannot be reached is one that has gone, so the answer is what
 /// decides whether the sink is kept. It is deliberately not an error type: there
@@ -23,12 +38,14 @@ use crate::proto::Sink;
 pub enum Delivery {
     Sent,
     Failed,
-}
-
-impl Delivery {
-    pub fn sent(self) -> bool {
-        matches!(self, Delivery::Sent)
-    }
+    /// The wait ran out, so the program handing the payload over was killed.
+    ///
+    /// Not a refusal, and the difference matters: `zellij pipe` gives the
+    /// payload to the plugins and then, now and then, never exits. The state is
+    /// there. Counting that as a client that could not be reached would retire
+    /// a sidebar that is alive and being drawn to, and a sidebar never
+    /// registers a second time.
+    Abandoned,
 }
 
 /// Hand one payload to one client.
@@ -37,20 +54,23 @@ impl Delivery {
 /// are given no input and their output is discarded; the exit status is the
 /// whole of what is read back.
 pub fn deliver(sink: &Sink, payload: &str) -> Delivery {
-    let ok = match sink {
+    match sink {
         Sink::Zellij { session } => zellij(session, payload),
-        Sink::Pipe { path } => pipe(Path::new(path), payload),
-    };
-    match ok {
-        true => Delivery::Sent,
-        false => Delivery::Failed,
+        Sink::Pipe { path } => match pipe(Path::new(path), payload) {
+            true => Delivery::Sent,
+            false => Delivery::Failed,
+        },
     }
 }
 
 /// Pipe into one named zellij session, addressed to no plugin so that every
 /// sidebar in that session hears it.
-fn zellij(session: &str, payload: &str) -> bool {
-    command("zellij")
+///
+/// Side effect: runs `zellij`, and kills it if it has not finished within
+/// [`PATIENCE`].
+fn zellij(session: &str, payload: &str) -> Delivery {
+    let mut piping = command("zellij");
+    piping
         .args([
             "--session",
             session,
@@ -62,10 +82,12 @@ fn zellij(session: &str, payload: &str) -> bool {
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        .stderr(Stdio::null());
+    match ran(&mut piping, PATIENCE) {
+        Ran::Worked => Delivery::Sent,
+        Ran::Failed => Delivery::Failed,
+        Ran::Abandoned => Delivery::Abandoned,
+    }
 }
 
 /// Append one line to a named pipe, which is how a client that is not a process
@@ -111,5 +133,15 @@ mod tests {
         assert_eq!(written.lines().count(), 1);
         assert!(written.contains('\u{1e}'), "the record break is kept");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_wedged_client_costs_a_bounded_part_of_every_delivery() {
+        // Both ends of the choice. Short of this, a machine under load has its
+        // deliveries killed on the way out; beyond it, a handful of wedged
+        // clients is a daemon that has stopped saying anything, which is the
+        // failure the wait was written for.
+        assert!(PATIENCE >= Duration::from_millis(500));
+        assert!(PATIENCE <= Duration::from_secs(5));
     }
 }

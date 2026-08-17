@@ -11,6 +11,10 @@
 //! than with this process's, because a notifier that reaches back into a
 //! multiplexer has to be told which session, and this process's own environment
 //! is not an answer to that.
+//!
+//! The waiting is bounded as well, because a notifier is somebody else's
+//! program and one that never exits would otherwise hold the thread that served
+//! the hook for as long as the daemon runs.
 
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -19,7 +23,7 @@ use agent_wrangler_core::notify::Notifier;
 use agent_wrangler_core::origin::LOCATION_VARS;
 
 use crate::daemon::state::Call;
-use crate::platform::command;
+use crate::platform::{command, ran, Ran};
 
 /// How long the notifier is left alone after a call has been said out loud.
 ///
@@ -33,6 +37,14 @@ use crate::platform::command;
 /// Nothing here decides what a call does to what is held or to what is
 /// delivered. Only the saying out loud is passed over.
 const QUIET: Duration = Duration::from_secs(5);
+
+/// How long a notifier is given to finish before it is killed.
+///
+/// The quiet is what sets it. Nothing else is announced inside [`QUIET`]
+/// anyway, so bounding the wait by it means a notifier that never exits is one
+/// of it at a time rather than one more per call, whether the count is of
+/// processes left in the table or of threads waiting on them.
+const PATIENCE: Duration = QUIET;
 
 /// When a call was last said out loud, which is the whole of what keeps a run
 /// of calls from being a run of notifications.
@@ -77,7 +89,8 @@ fn where_it_is(call: &Call) -> Vec<(&'static str, Option<&str>)> {
 /// Side effect: runs the program the notifier names, with the agent and what it
 /// is called as the last two arguments, which is the shape `notify-send` and
 /// its like take. It is given no input and its output is discarded; the exit
-/// status is the whole of what is read back.
+/// status is the whole of what is read back, and it is killed if it has not
+/// finished within [`PATIENCE`].
 ///
 /// Side effect: every name in [`LOCATION_VARS`] is set on that program from the
 /// call's own origin, and cleared where the call carries nothing for it. So the
@@ -97,10 +110,13 @@ pub fn raise(notifier: &Notifier, call: &Call) -> bool {
     announce
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        .stderr(Stdio::null());
+    match ran(&mut announce, PATIENCE) {
+        Ran::Worked => true,
+        Ran::Failed => false,
+        // The user was told, whatever the program went on to do about exiting.
+        Ran::Abandoned => true,
+    }
 }
 
 #[cfg(test)]
@@ -212,6 +228,14 @@ mod tests {
             assert!(!announced.worth_saying(began + QUIET / 5 * tick));
         }
         assert!(announced.worth_saying(began + QUIET));
+    }
+
+    #[test]
+    fn a_notifier_that_never_exits_is_one_of_it_at_a_time() {
+        // What the bound is for: the next call cannot be announced sooner than
+        // the quiet, so a notifier that hangs is waited out before another is
+        // ever started.
+        assert!(PATIENCE <= QUIET);
     }
 
     #[test]
