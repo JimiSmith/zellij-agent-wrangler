@@ -48,7 +48,7 @@ $ProgressPreference = 'SilentlyContinue'
 $repo = 'JimiSmith/zellij-agent-wrangler'
 
 if ($PSVersionTable.PSVersion.Major -lt 5) {
-    throw "this needs PowerShell 5 or later; this is $($PSVersionTable.PSVersion)."
+    throw "this needs PowerShell 5 or later. this is $($PSVersionTable.PSVersion)."
 }
 
 # Windows PowerShell defaults to protocols that github no longer answers on.
@@ -73,7 +73,7 @@ switch ($arch) {
     # pipe, so the emulation costs too little for a second build.
     'ARM64' { $target = 'x86_64-pc-windows-msvc' }
     default {
-        throw "no released client for $arch. build one: cargo build --release -p agent-wrangler"
+        throw "no released client for $arch. build the client: cargo build --release -p agent-wrangler"
     }
 }
 
@@ -90,7 +90,7 @@ if (-not $Version) {
             -Uri "https://api.github.com/repos/$repo/releases/latest").tag_name
     }
 }
-if (-not $Version) { throw 'could not work out the latest version.' }
+if (-not $Version) { throw 'the script did not find the latest version. set it with -Version.' }
 
 $client = "agent-wrangler-$Version-$target.exe"
 $windowless = "agent-wranglerw-$Version-$target.exe"
@@ -123,7 +123,7 @@ function Install-Binary {
     try {
         if ($gh) {
             & $gh.Source release download $Version --repo $repo --pattern $Asset --output $temp --clobber
-            if ($LASTEXITCODE -ne 0) { throw "gh could not download $Asset from $Version." }
+            if ($LASTEXITCODE -ne 0) { throw "gh did not download $Asset from $Version." }
         } else {
             Invoke-WebRequest -UseBasicParsing -OutFile $temp `
                 -Uri "https://github.com/$repo/releases/download/$Version/$Asset"
@@ -164,7 +164,7 @@ Get-ChildItem -LiteralPath $Bin -Filter '.agent-wrangler*.old.*.exe' -Force -Err
     ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
 
 & $exe install-hooks
-if ($LASTEXITCODE -ne 0) { throw 'the hooks could not be installed.' }
+if ($LASTEXITCODE -ne 0) { throw 'the client did not install the hooks.' }
 
 if ($AddToPath) {
     # This code writes the PATH of the user and not the PATH of the machine.
@@ -178,14 +178,16 @@ if ($AddToPath) {
         # session is not one of them. This line sets the value here as well, so
         # the commands below can run without another shell.
         $env:Path = "$env:Path;$Bin"
-        $path = "$Bin was added to your PATH. Shells already open still have the old one."
+        $path = "This script put $Bin on your PATH.
+A shell that is already open keeps the old PATH."
     } else {
-        $path = "$Bin was already on your PATH."
+        $path = "$Bin is already on your PATH."
     }
 } else {
-    $path = "$Bin is not on your PATH, so 'agent-wrangler agents' and 'monitor' want its
-full path. Run this again with -AddToPath to put it on, or leave it: nothing but
-you looks there, and the sidebar is told the path outright."
+    $path = "$Bin is not on your PATH. The commands 'agent-wrangler agents' and
+'agent-wrangler monitor' therefore need the full path. To put $Bin on your PATH,
+run this script again with -AddToPath. The sidebar does not need your PATH,
+because the block below gives the sidebar the full path."
 }
 
 # The block always names the client in full. The sidebar runs the client to
@@ -213,37 +215,39 @@ $block = @"
 $found = (Get-Command agent-wrangler -CommandType Application -ErrorAction SilentlyContinue |
     Select-Object -First 1).Source
 if ($found -and $found -ne $exe) {
-    $note = "Note that your PATH finds a different agent-wrangler first ($found).
-The block names the one this script just installed, so the sidebar runs that
-one whatever the path says."
+    $note = "Your PATH finds a different agent-wrangler first ($found).
+The block names the client that this script installed. The sidebar therefore
+runs that client, whatever the PATH says."
 } else {
-    $note = "That names the windowless client this script installed, which is what
-keeps a console window from flashing up each time the sidebar runs it. Leave the
-path in even if $Bin is on your PATH: what has to find it is zellij, whose
-environment comes from whatever started it rather than from this shell."
+    $note = "The block names the windowless client that this script installed. The
+windowless client draws no console window when the sidebar runs it.
+If $Bin is on your PATH, still keep the full path in the block.
+Zellij must find the client, and zellij takes its environment from the program
+that started zellij, and not from this shell."
 }
 
 $installed = (& $exe --version) -join ' '
 
 Write-Host @"
 
-Installed $installed to $Bin, as agent-wrangler.exe to run yourself and
-agent-wranglerw.exe for the hooks and the sidebar to run without a window.
+This script installed $installed to $Bin. The file agent-wrangler.exe is the
+client, for a run by hand. The hooks and the sidebar run the windowless client,
+agent-wranglerw.exe. The windowless client draws no window.
 
 $path
 
-Give every tab a sidebar by putting this in your zellij layout, inside both
-default_tab_template and new_tab_template:
+To give every tab a sidebar, put this block in your zellij layout. Put the block
+inside both default_tab_template and new_tab_template.
 
 $block
 
 $note
 
-The block is for a zellij running as this user. A zellij under WSL is a
-different machine as far as the daemon's pipe is concerned: install the client
-there too, from install.sh, and let its layout name that one.
+The block is for a zellij that runs as this user. For the pipe of the daemon, a
+zellij under WSL is a different machine. To get a sidebar there, install the
+client under WSL with install.sh. Then name that client in the layout there.
 
-Zellij downloads the plugin once and holds it. Updating means running this
-script again and changing the version in the url to match: the url is what
-zellij tells one build of the plugin from another.
+Zellij downloads the plugin once and holds it. To update, run this script
+again. Then change the version in the url to match. Zellij tells one build of
+the plugin from another by the url.
 "@

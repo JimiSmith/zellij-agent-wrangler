@@ -24,7 +24,7 @@ case "$(uname -s)/$(uname -m)" in
     Darwin/x86_64) target=x86_64-apple-darwin ;;
     *)
         echo "no released client for $(uname -s)/$(uname -m)." >&2
-        echo "build one: cargo build --release -p agent-wrangler" >&2
+        echo "build the client: cargo build --release -p agent-wrangler" >&2
         exit 1
         ;;
 esac
@@ -44,7 +44,7 @@ if [ -z "$version" ]; then
         )
     fi
 fi
-[ -n "$version" ] || { echo "could not work out the latest version." >&2; exit 1; }
+[ -n "$version" ] || { echo "this script did not find a version." >&2; exit 1; }
 
 client="agent-wrangler-$version-$target"
 wasm="zellij-agent-wrangler-$version.wasm"
@@ -94,27 +94,28 @@ block="    pane size=32 borderless=true {
     }"
 
 if [ -n "$found" ] && [ "$found" != "$bin/agent-wrangler" ]; then
-    note="Note that your PATH finds a different agent-wrangler first ($found).
-The block names the one this script just installed, so the sidebar runs that
-one whatever the path says."
+    note="Your PATH finds a different agent-wrangler first ($found).
+The block names the client that this script installed. The sidebar therefore
+runs that client, whatever the PATH says."
 else
-    note="That names the client this script installed. Leave the path in even if
-$bin is on your PATH: what has to find it is zellij, whose environment comes
-from whatever started it rather than from this shell."
+    note="The block names the client that this script installed. The full path
+is necessary even when $bin is on your PATH.
+Zellij must find the client, and zellij gets its environment from the program
+that started it, and not from this shell."
 fi
 
 cat <<BLOCK
 
-Installed $("$bin/agent-wrangler" --version) to $bin.
+This script installed $("$bin/agent-wrangler" --version) to $bin.
 
-Give every tab a sidebar by putting this in your zellij layout, inside both
-default_tab_template and new_tab_template:
+To give every tab a sidebar, add this block to your zellij layout. Put the
+block inside both default_tab_template and new_tab_template:
 
 $block
 
 $note
 
-Zellij downloads that once and holds it. Updating means running this script
-again and changing the version in the url to match: the url is what zellij
-tells one build of the plugin from another.
+Zellij downloads the plugin once and holds it. To update, run this script
+again. Then change the version in the url to match. Zellij tells one build of
+the plugin from another by the url.
 BLOCK
