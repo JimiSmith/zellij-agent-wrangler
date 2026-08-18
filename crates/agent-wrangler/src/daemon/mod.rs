@@ -1,20 +1,20 @@
-//! The daemon: one per user, started by whichever hook first finds none
-//! running.
+//! The daemon: one per user. The first hook that finds no daemon starts one.
 //!
-//! One connection is one thread, and the state behind one lock, because the
-//! traffic is a handful of messages a second and a lock is far less machinery
-//! than a core loop with a channel. What the lock does *not* cover is the point:
-//! reading an agent's files, running a client, and writing the state out all
-//! happen with it released, because each of them can take arbitrarily long and
-//! the daemon answers its own socket while it is stuck, so nothing else could
-//! take over from a daemon that froze holding it.
+//! One connection is one thread, and the state sits behind one lock. The
+//! traffic is a handful of messages a second, and a lock is far less machinery
+//! than a core loop with a channel. What the lock does *not* cover is the
+//! point. The daemon reads an agent's files, runs a client, and writes the
+//! state out with the lock released. Each of these can take arbitrarily long.
+//! The daemon answers its own socket while it is stuck, so nothing else can
+//! take over from a daemon that froze under the lock.
 //!
-//! Delivering is the one thing not done by whichever thread caused it. Every
-//! client is sent the whole state rather than what changed, so a thread that
-//! applied something says the clients are [`Owed`] one and carries on, and a
-//! single thread does the delivering. Any number of changes arriving during one
-//! delivery is one delivery after it, which is what keeps a working agent's
-//! burst of events from being a burst of programs run.
+//! The delivery is the one thing that the thread behind a change does not do.
+//! Every client is sent the whole state rather than what changed. A thread that
+//! applied something says that the clients are [`Owed`] one, and then carries
+//! on. One thread makes every delivery. Any number of changes during one
+//! delivery is one delivery after it. The number of programs run is therefore
+//! a function of the delivery, and not of the burst of events from a busy
+//! agent.
 
 pub mod notify;
 pub mod persist;
@@ -42,46 +42,47 @@ use crate::daemon::watch::Watchers;
 use crate::paths;
 use crate::proto::{read_message, write_message, Inbound, Outbound, Sink, What};
 
-/// How often every held transcript is looked at again, and every held pid.
+/// How often the daemon looks at every held transcript again, and at every
+/// held pid.
 ///
 /// A second is what the eye reads as immediate for something that is not a
-/// keystroke, and one stat per session at that rate costs nothing measurable.
+/// keystroke. One stat per session at that rate costs nothing measurable.
 const POLL: Duration = Duration::from_secs(1);
 
-/// How long to wait before accepting again after a failure.
+/// How long to wait after a failure, before the daemon accepts again.
 ///
-/// A failure such as running out of descriptors does not consume the connection
-/// that caused it, so the same error is waiting on the next call and an
-/// immediate retry is a spin. This is short enough not to matter when the
-/// failure was a one-off.
+/// A failure such as an exhausted set of descriptors does not consume the
+/// connection that caused it. The same error waits on the next call, and an
+/// immediate retry is a spin. If the failure was a one-off, this delay is short
+/// enough not to matter.
 const AFTER_REFUSAL: Duration = Duration::from_millis(100);
 
-/// Take the state, whatever happened to whoever held it last.
+/// This function takes the state, whatever happened to whoever held it last.
 ///
-/// A thread that panicked holding this poisons it, and every later attempt would
-/// fail forever after. Since the daemon keeps answering its socket either way,
-/// nothing could replace it, so a poisoned lock would leave a daemon that is
-/// alive, reachable and permanently useless. What it guards is a set of records
-/// re-sent whole on every change, so carrying on with it recovers where refusing
-/// to does not.
+/// A thread that panics under this lock poisons it, and every later attempt
+/// fails from then on. The daemon answers its socket either way, so nothing can
+/// replace it. A poisoned lock therefore leaves a daemon that is alive,
+/// reachable and permanently useless. The lock guards a set of records that are
+/// re-sent whole on every change. A daemon that carries on recovers. A daemon
+/// that refuses does not.
 fn held(shared: &Arc<Mutex<State>>) -> MutexGuard<'_, State> {
     shared
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Whether the clients are owed the state, and whoever is waiting to hand it to
-/// them.
+/// Whether the clients are owed the state, and who waits to hand it to them.
 ///
-/// A delivery runs a program per client and waits for each, so it takes as long
-/// as the slowest of them, and every event that happens meanwhile would
-/// otherwise start a delivery of its own. What the clients are sent is the whole
-/// state rather than what changed, so a hundred changes during one delivery are
-/// one delivery after it and lose nothing: the next one carries all of them.
+/// A delivery runs a program for each client and waits for each one, so it
+/// takes as long as the slowest of them. Without this flag, every event in that
+/// time starts a delivery of its own. The clients are sent the whole state
+/// rather than what changed. A hundred changes during one delivery are
+/// therefore one delivery after it, and they lose nothing. The next delivery
+/// carries all of them.
 ///
-/// This is what keeps the number of programs run a function of how fast they
-/// can be run, rather than of how fast the agents are reporting. A burst of
-/// events is what a working agent looks like.
+/// The number of programs run is a function of how fast they can run, and not
+/// of how fast the agents report. A burst of events is what a busy agent looks
+/// like.
 #[derive(Default)]
 struct Owed {
     owed: Mutex<bool>,
@@ -89,16 +90,16 @@ struct Owed {
 }
 
 impl Owed {
-    /// Say the clients are owed the state. Returns at once, whoever is
-    /// delivering and however long they take.
+    /// This method says that the clients are owed the state. It returns at
+    /// once, whoever delivers and however long they take.
     fn owe(&self) {
         let mut owed = self.owed.lock().unwrap_or_else(|e| e.into_inner());
         *owed = true;
         self.told.notify_one();
     }
 
-    /// Wait until something is owed, and take it. Every change made up to this
-    /// moment is covered by the delivery that follows.
+    /// This method waits until something is owed, and takes it. The delivery
+    /// that follows covers every change made up to that moment.
     fn take(&self) {
         let mut owed = self.owed.lock().unwrap_or_else(|e| e.into_inner());
         while !*owed {
@@ -119,13 +120,14 @@ enum Bound {
     Taken,
 }
 
-/// Claim the socket name, or find that someone else holds it.
+/// This function claims the socket name, or finds that someone else holds it.
 ///
-/// Connecting first is what tells a live daemon from a name left behind by one
-/// that died. Taking the name over is then safe *because* of that: nothing
-/// answered it, so nothing is listening on it. Without this a daemon killed
-/// outright leaves a name that can never be bound again, on every system where
-/// the name is a file rather than one the kernel drops with the process.
+/// A connection attempt first tells a live daemon from a name that a dead one
+/// left behind. To take the name over is then safe *because* of that. Nothing
+/// answered the name, so nothing listens on it. Without this attempt, a daemon
+/// that was killed outright leaves a name that nothing can bind again. This is
+/// true on every system where the name is a file rather than a name that the
+/// kernel drops with the process.
 fn bind() -> std::io::Result<Bound> {
     let name = paths::socket_name();
     let ns = name.to_ns_name::<GenericNamespaced>()?;
@@ -139,11 +141,12 @@ fn bind() -> std::io::Result<Bound> {
         .map(Bound::Ours)
 }
 
-/// Write the state out and tell every client, dropping the ones that have gone.
+/// This function writes the state out and tells every client. It drops the
+/// clients that went away.
 ///
-/// Side effect: writes a file and runs a program per zellij client. Called with
-/// no lock held, and takes it only to read what to send and to note who could
-/// not be reached.
+/// Side effect: it writes a file and runs a program for each zellij client. The
+/// caller holds no lock. This function takes the lock only to read what to
+/// send, and to note the clients that it did not reach.
 fn publish(shared: &Arc<Mutex<State>>, dir: &Path, watchers: &Watchers) {
     let (payload, clients, saved) = {
         let state = held(shared);
@@ -183,12 +186,13 @@ fn publish(shared: &Arc<Mutex<State>>, dir: &Path, watchers: &Watchers) {
 
 /// What one delivery says about the client it was for.
 ///
-/// Only a refusal counts against a client, and it is the answer a client that
-/// has gone gives: piping into a session that is not there comes back in
-/// milliseconds saying so. A delivery given up on says nothing about whether
-/// the client is there, and a great deal about what the multiplexer is doing,
-/// so counting it would retire a live sidebar for the multiplexer's fault - and
-/// a sidebar, once dropped, never asks again.
+/// Only a refusal counts against a client. A refusal is the answer that a
+/// client that went away gives. A pipe into a session that is not there comes
+/// back in milliseconds and says so. A delivery that was given up on says
+/// nothing about whether the client is there. It says a great deal about the
+/// state of the multiplexer. A count of those deliveries retires a live sidebar
+/// for the fault of the multiplexer, and a sidebar that was dropped never asks
+/// again.
 fn answered(state: &mut State, sink: &Sink, delivery: Delivery) {
     match delivery {
         Delivery::Sent | Delivery::Abandoned => state.reached(sink),
@@ -198,7 +202,7 @@ fn answered(state: &mut State, sink: &Sink, delivery: Delivery) {
     }
 }
 
-/// Write out the state and who is listening to it, without telling anyone.
+/// This function writes out the state and who listens to it. It tells nobody.
 fn record(shared: &Arc<Mutex<State>>, dir: &Path) {
     let (saved, clients) = {
         let state = held(shared);
@@ -207,22 +211,23 @@ fn record(shared: &Arc<Mutex<State>>, dir: &Path) {
     persist::save(dir, &saved, &clients);
 }
 
-/// Say a call out loud, wherever the user is, if this is a moment to say
-/// anything at all.
+/// This function says a call out loud, wherever the user is. If this is not a
+/// moment to say anything, it says nothing.
 ///
-/// Side effect: runs a program per notifier registered, and waits for each. It
-/// is done here rather than by the clients because every client is handed the
-/// same call: one that raised its own would raise it once per client, and the
-/// count would go up with every sidebar the user opened.
+/// Side effect: it runs a program for each notifier registered, and waits for
+/// each one. The daemon does this here rather than in the clients, because
+/// every client holds the same call. A client that raises its own notification
+/// raises it once for each client, and the count goes up with every sidebar
+/// that the user opens.
 ///
-/// Whether a call is one to say out loud is `announced`'s to answer, and a call
-/// it turns down costs nothing else: every client is owed the state before this
-/// is reached, so what is drawn is the same either way.
+/// `announced` answers whether a call is one to say out loud. A call that it
+/// turns down costs nothing else. Every client is owed the state before this
+/// point, so what is drawn is the same either way.
 ///
-/// Called with no lock held, and takes it only to read what to run. What to run
-/// is bound before the loop rather than iterated straight from the guard,
-/// because a notifier is waited for and the state is not this thread's to hold
-/// while that happens.
+/// The caller holds no lock. This function takes the lock only to read what to
+/// run. What to run is bound before the loop rather than read straight from the
+/// guard, because the loop waits for a notifier. The state is not this thread's
+/// to hold during that wait.
 fn announce(shared: &Arc<Mutex<State>>, call: &Call, announced: &Mutex<Announced>) {
     let speaking = announced
         .lock()
@@ -237,14 +242,14 @@ fn announce(shared: &Arc<Mutex<State>>, call: &Call, announced: &Mutex<Announced
     }
 }
 
-/// Read one connection to its end, applying what it says.
+/// This function reads one connection to its end, and applies what it says.
 ///
-/// Each message is owed as it is applied rather than at the end of the
-/// connection, so a client that holds its socket open is not also holding back
-/// every change it has already reported.
+/// Each message is owed as the daemon applies it, rather than at the end of the
+/// connection. A client that holds its socket open therefore does not hold back
+/// every change that it already reported.
 ///
-/// Returns `true` when the sender spoke a record format this build does not,
-/// which is the one condition that makes the daemon stand down.
+/// If the sender spoke a record format that this build does not, this function
+/// returns `true`. That is the one condition that makes the daemon stand down.
 fn serve(
     stream: Stream,
     shared: &Arc<Mutex<State>>,
@@ -265,9 +270,9 @@ fn serve(
                 return true;
             }
             Inbound::Hook { hook, .. } => {
-                // Read before locking. A transcript on a mount that has stopped
-                // answering takes as long as it takes, and every other event on
-                // the machine carries on meanwhile.
+                // The read happens before the lock. A transcript on a mount
+                // that no longer answers takes as long as it takes, and every
+                // other event on the machine carries on meanwhile.
                 let reading = read_hook(&hook, &Real);
                 let applied = held(shared).apply_hook(&hook, reading);
                 watchers.saw(|| What::Hook {
@@ -279,12 +284,11 @@ fn serve(
                 if applied.changed() {
                     owed.owe();
                 }
-                // Owed first and announced after, which is the order that
-                // matters: a notifier that hangs cannot hold up the state
-                // saying the same thing, because saying it is owed is all this
-                // thread does about it. Which of the two the user meets first
-                // is whichever of a delivery and a notifier finishes first, and
-                // neither waits on the other.
+                // The order matters: the state is owed first, and the call is
+                // announced after. A notifier that hangs cannot hold up the
+                // state, because this thread only says that the state is owed.
+                // The user meets whichever of the delivery and the notifier
+                // finishes first, and neither one waits on the other.
                 if let Some(call) = applied.call() {
                     announce(shared, call, announced);
                 }
@@ -295,16 +299,17 @@ fn serve(
                     sink,
                     notify: Notifier::new(notify),
                 });
-                // A client that has just registered has nothing yet, so it is
-                // owed the state whether or not anything changed.
+                // A client that just registered has nothing yet, so it is owed
+                // the state whether or not anything changed.
                 //
-                // Owed rather than delivered here, even though only one client
-                // asked. A layout with a sidebar in every tab registers every
-                // one of them the moment the user attaches, each on a
-                // connection thread of its own, and a delivery apiece is that
-                // many multiplexer clients started at once - which is the load
-                // under which one of them wedges. One delivery answers all of
-                // them, because what a client is sent is the whole state.
+                // The state is owed here rather than delivered, even though
+                // only one client asked. A layout with a sidebar in every tab
+                // registers every one of them the moment that the user
+                // attaches. Each sidebar registers on a connection thread of
+                // its own. A delivery for each one starts that many multiplexer
+                // clients at once, which is the load that wedges one of them.
+                // One delivery answers all of them, because a client is sent
+                // the whole state.
                 owed.owe();
                 record(shared, dir);
             }
@@ -330,9 +335,10 @@ fn serve(
                     },
                 );
             }
-            // The connection becomes the watcher's, and is read no further: what
-            // it asked for is everything from now on, and it says nothing else.
-            // It leaves by going away, which the first record after that finds.
+            // The connection becomes the watcher's, and the daemon reads it no
+            // further. What it asked for is everything from now on, and it says
+            // nothing else. A watcher that goes away is gone, and the first
+            // record after that finds it.
             Inbound::Monitor { .. } => {
                 let from = watchers.watch();
                 let mut writer = BufWriter::new(&stream);
@@ -348,23 +354,25 @@ fn serve(
     false
 }
 
-/// Look at every held transcript and pid, and take in what changed.
+/// This function looks at every held transcript and pid, and takes in what
+/// changed.
 fn sweep(shared: &Arc<Mutex<State>>, owed: &Owed) {
     let (plan, since) = {
         let state = held(shared);
         (state.plan(), state.mtimes())
     };
-    // The looking is the slow part, and it holds nothing.
+    // The look is the slow part, and it holds nothing.
     let found = look(&plan, &Real, &since);
     if held(shared).observe(found) {
         owed.owe();
     }
 }
 
-/// Run as the daemon until something says to stop.
+/// This function runs as the daemon until something says to stop.
 ///
-/// Returns as soon as the name is already claimed, so a hook that starts one
-/// unnecessarily costs a process that exits rather than a second daemon.
+/// If another process already claimed the name, this function returns at once.
+/// A hook that starts a daemon without need therefore costs one process that
+/// exits, rather than a second daemon.
 pub fn run() -> std::io::Result<()> {
     let listener = match bind()? {
         Bound::Taken => return Ok(()),
@@ -382,8 +390,9 @@ pub fn run() -> std::io::Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     let owed = Arc::new(Owed::default());
     let watchers = Arc::new(Watchers::default());
-    // One per daemon rather than one per connection: a hook gets a thread of
-    // its own, so a quiet kept per connection would be no quiet at all.
+    // One per daemon rather than one per connection. A hook gets a thread of
+    // its own. A quiet period per connection is therefore no quiet period at
+    // all.
     let announced = Arc::new(Mutex::new(Announced::default()));
 
     {
@@ -398,9 +407,8 @@ pub fn run() -> std::io::Result<()> {
         });
     }
 
-    // One thread does the delivering, so however many events arrive while a
-    // delivery is running, they are one delivery afterwards rather than one
-    // each.
+    // One thread makes every delivery. However many events arrive during one
+    // delivery, they are one delivery afterwards rather than one delivery each.
     {
         let shared = Arc::clone(&shared);
         let owed = Arc::clone(&owed);
@@ -414,8 +422,8 @@ pub fn run() -> std::io::Result<()> {
 
     for incoming in listener.incoming() {
         let Ok(stream) = incoming else {
-            // Whatever refused this is usually still there on the next call, so
-            // retrying at once is a spin rather than a retry.
+            // Whatever refused this is usually still there on the next call.
+            // An immediate retry is therefore a spin rather than a retry.
             thread::sleep(AFTER_REFUSAL);
             continue;
         };
@@ -425,16 +433,17 @@ pub fn run() -> std::io::Result<()> {
         let watchers = Arc::clone(&watchers);
         let announced = Arc::clone(&announced);
         let dir = dir.clone();
-        // A connection gets a thread, so one client asking for a snapshot, or
+        // A connection gets a thread. One client that asks for a snapshot, or
         // one delivery that is slow to run, cannot hold up the next hook.
         thread::spawn(move || {
             if serve(stream, &shared, &owed, &dir, &watchers, &announced) {
-                // The other end is a different build of this program, so what it
-                // says cannot be read reliably and what this says cannot be read
-                // by it. Standing down leaves the name free for the daemon it
-                // expects, which is itself; the next event of any kind starts
-                // that one. What has been applied is written out first, and the
-                // clients with it, so the daemon taking over inherits both.
+                // The other end is a different build of this program. Neither
+                // end can read what the other one says. A daemon that stands
+                // down leaves the name free for the daemon that the other end
+                // expects, which is itself. The next event of any kind starts
+                // that daemon. This daemon writes out what it applied first,
+                // and the clients with it, so the daemon that takes over
+                // inherits both.
                 stop.store(true, Ordering::Relaxed);
                 record(&shared, &dir);
                 std::process::exit(0);
@@ -456,16 +465,16 @@ mod tests {
 
     #[test]
     fn a_refused_connection_is_not_retried_at_once() {
-        // The whole point of the pause: whatever refused it is still there, so
-        // an immediate retry saturates a core rather than recovering.
+        // The whole point of the pause: whatever refused it is still there. An
+        // immediate retry saturates a core and recovers nothing.
         assert!(AFTER_REFUSAL >= Duration::from_millis(50));
     }
 
     #[test]
     fn every_change_made_before_a_delivery_is_covered_by_it() {
-        // The whole point of owing rather than delivering: what the clients are
-        // sent is the state entire, so three changes during one delivery are
-        // one delivery afterwards rather than three.
+        // The whole point of an owed state rather than a delivery: the clients
+        // are sent the state entire. Three changes during one delivery are one
+        // delivery afterwards rather than three.
         let owed = Arc::new(Owed::default());
         for _ in 0..3 {
             owed.owe();
@@ -501,11 +510,11 @@ mod tests {
 
     #[test]
     fn a_delivery_given_up_on_never_retires_the_client_it_was_for() {
-        // The failure this rule exists for: a sidebar is alive, is being drawn
-        // to, and the multiplexer will not let go of the program that draws to
-        // it. Counting those would drop the client after three of them, and
-        // nothing would ever register it again, so the sidebar would be left
-        // showing whatever it last received for as long as the session lasted.
+        // This rule exists for one failure. A sidebar is alive, and the
+        // daemon draws to it. The multiplexer will not let go of the program
+        // that draws to it. A count of those deliveries drops the client after three
+        // of them, and nothing registers it again. The sidebar then shows
+        // whatever it last received for as long as the session lasts.
         let mut state = State::default();
         let client = sidebar();
         state.register(client.clone());
@@ -517,8 +526,8 @@ mod tests {
 
     #[test]
     fn a_client_that_keeps_refusing_is_still_given_up_on() {
-        // The other half of it: a session that has gone answers at once and
-        // says so, and that is the answer a client is retired for.
+        // The other half of it: a session that went away answers at once and
+        // says so. That is the answer that a client is retired for.
         let mut state = State::default();
         let client = sidebar();
         state.register(client.clone());
@@ -530,10 +539,10 @@ mod tests {
 
     #[test]
     fn a_delivery_given_up_on_forgives_the_refusals_before_it() {
-        // It is a client that took the state, so the count towards retiring it
-        // starts again like any delivery that landed. Each run is one short of
-        // retiring the client, so the two of them are two apart only if the
-        // one in between forgave what came before it.
+        // It is a client that took the state, so the count towards its
+        // retirement starts again, like any delivery that landed. Each run is
+        // one short of the count that retires the client. If the run in between
+        // forgave what came before it, the two runs stay two apart.
         let mut state = State::default();
         let client = sidebar();
         state.register(client.clone());
@@ -557,7 +566,7 @@ mod tests {
         })
         .join();
         assert!(shared.is_poisoned());
-        // A daemon that refused to carry on here would be alive, reachable, and
+        // A daemon that refuses to carry on here is alive, reachable, and
         // permanently unable to answer anything.
         assert!(held(&shared).clients().is_empty());
     }

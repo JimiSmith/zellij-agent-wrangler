@@ -1,10 +1,10 @@
-//! What is said over the daemon's socket, and how one message is told from the
-//! next.
+//! What the daemon's socket carries, and how one message ends before the next
+//! one starts.
 //!
-//! Every message is one line of JSON ending in a single newline, so a stream is
-//! a run of independent lines and a reader that loses its place at one message
-//! finds it again at the next. The enums are tagged by a `kind` field, so a
-//! decoder dispatches on the tag rather than on the shape.
+//! Every message is one line of JSON with a single newline at the end. A stream
+//! is therefore a run of independent lines. A reader that loses its place at
+//! one message finds it again at the next line. A `kind` field tags each enum,
+//! so a decoder dispatches on the tag and not on the shape.
 
 use std::io::{self, BufRead, Write};
 
@@ -15,92 +15,95 @@ use agent_wrangler_core::agent::Process;
 
 /// What an agent's lifecycle hook reports.
 ///
-/// The hook says what it saw and nothing about what it means: the transcript is
-/// named rather than read, and the environment is passed on verbatim. Reading is
-/// the daemon's, which is what keeps a hook off the critical path of the turn it
-/// runs inside.
+/// The hook says what it saw and nothing about what it means. It names the
+/// transcript but does not read it, and it passes the environment on verbatim.
+/// The daemon does the reading. This keeps a hook off the critical path of the
+/// turn that it runs inside.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hook {
-    /// Which agent this is, by the name its hooks were installed under.
+    /// Which agent this is, by the name of its installed hooks.
     pub agent: String,
     /// The event as the agent named it.
     pub event: String,
     pub session_id: String,
     pub cwd: String,
-    /// Where the agent is writing the conversation, which is the only place it
-    /// says what it has decided to call the session.
+    /// Where the agent writes the conversation. This file is the only place
+    /// where the agent gives its own name for the session.
     pub transcript: String,
     /// Present only when the hook body carried a genuine JSON boolean.
     pub recoverable: Option<bool>,
-    /// The location variables the hook captured, already encoded as one run of
-    /// values.
+    /// The location variables that the hook captured, already encoded as one
+    /// run of values.
     pub origin: String,
-    /// The agent's own process, found by climbing the hook's ancestry and dated
-    /// there, since only the machine the hook ran on can date it.
+    /// The agent's own process. The hook climbs its ancestry to find this
+    /// process and dates it there, because only the machine that ran the hook
+    /// can date it.
     pub process: Option<Process>,
-    /// When the hook ran, which is what orders one call for the user against
+    /// When the hook ran. This time orders one call for the user against
     /// another.
     pub at: u64,
 }
 
 /// Where the daemon delivers a state change.
 ///
-/// One variant per multiplexer, and each says only how to reach that client.
-/// Adding a multiplexer is a variant here and an arm in the delivery, with
-/// nothing else in the daemon aware of it.
+/// There is one variant for each multiplexer, and each variant says only how to
+/// reach that client. A new multiplexer needs a variant here and an arm in the
+/// delivery. Nothing else in the daemon knows about it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Sink {
-    /// A zellij session, reached by piping into it by name.
+    /// A zellij session. The daemon reaches it with a pipe to its name.
     Zellij { session: String },
-    /// A named pipe, written to a line at a time.
+    /// A named pipe. The daemon writes one line at a time.
     Pipe { path: String },
 }
 
-/// What is sent to the daemon.
+/// What the daemon receives.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Inbound {
     /// An agent reported itself.
     Hook {
-        /// The record format the sender speaks. A daemon that speaks another one
-        /// is of another build, and stands down rather than answering wrongly.
+        /// The record format that the sender speaks. A daemon that speaks
+        /// another one is of another build. It stands down and does not answer
+        /// wrongly.
         format: u32,
         hook: Hook,
     },
-    /// A client asked to be delivered to from now on, and to be told the state
-    /// as it currently stands.
+    /// A client asked for every delivery from now on, and for the state as it
+    /// stands now.
     Register {
         format: u32,
         sink: Sink,
-        /// What this client would have a call for the user announced with, as
-        /// the words to run. Empty for a client that wants none.
+        /// The words that this client runs to announce a call for the user.
+        /// Empty for a client that wants no announcement.
         ///
-        /// A client says what to announce with rather than announcing it: every
-        /// client holds the same state and would otherwise raise the same call
-        /// as many times as there are clients.
+        /// A client names the announcement but does not make it. Every client
+        /// holds the same state. If each client announced the state itself, one
+        /// call reaches the user once for each client.
         #[serde(default)]
         notify: Vec<String>,
     },
-    /// The user reached a session that was calling for them.
+    /// The user reached a session that called for them.
     Seen { session: String },
-    /// Say the state on this connection and nothing more. What the command line
-    /// asks, for looking at what the daemon holds.
+    /// A request for the state on this connection and nothing more. The command
+    /// line sends this message to show what the daemon holds.
     Snapshot,
-    /// Say everything from now on, on this connection, until it is dropped.
+    /// A request for everything from now on, on this connection, until the
+    /// connection is dropped.
     Monitor { format: u32 },
 }
 
-/// One message the daemon was sent or sent on, and when.
+/// One message that the daemon received or sent, and the time of it.
 ///
-/// These exist for one question: the state reaches a sidebar, the sidebar
-/// answers by running the client, and the answer arrives back here as another
-/// message. A run of these says how fast that goes round, what keeps sending it
-/// round again, and how long each leg took.
+/// These records answer one question. The state reaches a sidebar, the sidebar
+/// runs the client to answer, and the answer arrives back here as another
+/// message. A run of these records says how fast that circle turns, what starts
+/// it again, and how long each leg took.
 ///
-/// Only messages. What the daemon decided, polled or noticed in between is its
-/// own business and is not a record here, or a watcher would be reading the
-/// daemon's diary rather than its post.
+/// These records hold messages only. What the daemon decided, polled or noticed
+/// in between is its own business and is not a record here. A watcher of that
+/// reads the daemon's diary rather than its post.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Watched {
     /// Milliseconds since the epoch, read where the message was.
@@ -109,11 +112,12 @@ pub struct Watched {
     pub what: What,
 }
 
-/// A message, and which way it went.
+/// A message, and the direction it went in.
 ///
-/// `told` on an arriving message says whether it changed anything, because that,
-/// and not the arrival, is what owes the clients a delivery. A run of messages
-/// that each told the daemon nothing is a loop turning over without moving.
+/// On a message that arrives, `told` says whether the message changed anything.
+/// The change, and not the arrival, is what owes the clients a delivery. A run
+/// of messages that each told the daemon nothing is a loop that turns over but
+/// does not move.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum What {
@@ -124,30 +128,32 @@ pub enum What {
         session: String,
         told: bool,
     },
-    /// In: a client asked to be delivered to from now on.
+    /// In: a client asked for every delivery from now on.
     Registered { sink: Sink },
-    /// In: a client said the user reached a session that was calling for them.
+    /// In: a client said that the user reached a session that called for them.
     Seen { session: String, told: bool },
     /// In: something asked for the state on its own connection.
     Asked,
-    /// Out: the state is going to this client, carrying this many agents.
+    /// Out: the state goes to this client, with this many agents in it.
     ///
-    /// Paired with [`What::Delivered`] rather than folded into it, because a
-    /// delivery is a whole process run for a zellij client and can fail to end.
-    /// One of these with none of those is a delivery that never came back.
+    /// This record is separate from [`What::Delivered`] rather than part of it.
+    /// The reason is that a delivery for a zellij client is a whole process run
+    /// and can fail to end. One of these records without one of those is a
+    /// delivery that never came back.
     Delivering { sink: Sink, agents: usize },
-    /// Out: that delivery landed, or found the client gone. `took` is
-    /// milliseconds, which for a zellij client is a whole process run.
+    /// Out: that delivery landed, or found the client gone. `took` is in
+    /// milliseconds, and for a zellij client it covers a whole process run.
     ///
-    /// `abandoned` is a delivery the daemon stopped waiting for and killed. It
-    /// reads as sent as well, and both are true of it: the client has the state
-    /// and only the program handing it over failed to end. What the field adds
-    /// is where the time went, since a delivery like that takes the whole of
-    /// the wait and every client after it waits its turn.
+    /// `abandoned` marks a delivery that the daemon gave up on and killed. Such
+    /// a delivery reads as sent as well, and both facts are true of it. The
+    /// client has the state, and only the program that handed it over failed to
+    /// end. The field says where the time went. A delivery like that takes the
+    /// whole of the wait, and every client after it waits its turn.
     ///
-    /// Two fields rather than the outcome itself, because a watcher may be of
-    /// another build: one that has never heard of `abandoned` still finds a
-    /// delivery that landed, which is what one is.
+    /// There are two fields rather than the outcome itself, because a watcher
+    /// can be of another build. A watcher that knows nothing of `abandoned`
+    /// still finds a delivery that landed, and that is what an abandoned
+    /// delivery is.
     Delivered {
         sink: Sink,
         sent: bool,
@@ -155,9 +161,10 @@ pub enum What {
         abandoned: bool,
         took: u64,
     },
-    /// Records that could not be handed over fast enough. A watcher that falls
-    /// behind loses records rather than holding the daemon up, and is told how
-    /// many rather than left believing it saw everything.
+    /// Records that the daemon cannot hand over fast enough. A watcher that
+    /// falls behind loses records and does not hold the daemon up. The daemon
+    /// tells the watcher how many records it lost, so the watcher does not
+    /// believe that it saw everything.
     Missed { records: u64 },
 }
 
@@ -165,7 +172,7 @@ pub enum What {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Outbound {
-    /// Every session the daemon holds, as a run of records.
+    /// Every session that the daemon holds, as a run of records.
     Agents { format: u32, records: String },
 }
 
@@ -177,20 +184,21 @@ pub fn write_message<W: Write, T: Serialize>(writer: &mut W, message: &T) -> io:
     writer.flush()
 }
 
-/// The most one message may be.
+/// The largest size that one message can be.
 ///
-/// A reader with no limit grows to whatever it is sent, so anything that can
-/// connect can take the daemon down by writing without ever sending a newline.
-/// This is far above any real message: the largest is a run of records, and a
-/// record is a few hundred bytes.
+/// A reader with no limit grows to the size of its input. A sender that never
+/// writes a newline can therefore take the daemon down, and anything that
+/// connects can do it. This limit is far above any real message. The largest
+/// message is a run of records, and a record is a few hundred bytes.
 const LONGEST: u64 = 4 * 1024 * 1024;
 
 /// Read one message from a line, or `None` at the end of the stream.
 ///
-/// A line that is not a message this build knows is skipped rather than ending
-/// the stream, so one unrecognised message does not cost the connection. A line
-/// longer than [`LONGEST`] ends it, because nothing that says anything is that
-/// long and carrying on would mean reading the rest of it as messages.
+/// The reader skips a line that this build does not know as a message, and the
+/// stream continues. One unrecognized message therefore does not cost the
+/// connection. A line longer than [`LONGEST`] ends the stream, because no real
+/// message is that long. A reader that continues past the limit reads the rest
+/// of that line as messages.
 pub fn read_message<R: BufRead, T: DeserializeOwned>(reader: &mut R) -> io::Result<Option<T>> {
     loop {
         let mut line = String::new();
@@ -314,8 +322,8 @@ mod tests {
     #[test]
     fn a_delivery_written_by_a_build_that_only_knew_two_endings_still_reads() {
         // A watcher reads what the daemon says, and the two are not always the
-        // same build. A record from before there was anything to give up on is
-        // a delivery that was not.
+        // same build. A record from a build with nothing to give up on is a
+        // delivery that the daemon did not give up on.
         let line = r#"{"at":1,"kind":"delivered","sink":{"kind":"pipe","path":"/tmp/w"},"sent":true,"took":40}"#;
         let mut reader = line.as_bytes();
         assert_eq!(
@@ -336,9 +344,9 @@ mod tests {
 
     #[test]
     fn a_client_that_names_no_notifier_still_registers() {
-        // The field is what a client says about announcing calls, and a message
-        // written without it is a client that wants none rather than a message
-        // that cannot be read.
+        // The field is what a client says about the announcement of calls. A
+        // message written without the field is a client that wants no
+        // announcement, and not a message that cannot be read.
         let line = r#"{"kind":"register","format":3,"sink":{"kind":"zellij","session":"proto"}}"#;
         let mut reader = line.as_bytes();
         assert_eq!(
@@ -369,8 +377,8 @@ mod tests {
 
     #[test]
     fn a_line_that_never_ends_ends_the_stream() {
-        // Anything that can connect could otherwise write forever and take the
-        // daemon down with it.
+        // Without the limit, anything that can connect writes forever and takes
+        // the daemon down with it.
         let endless = vec![b'x'; (LONGEST + 16) as usize];
         let mut reader = endless.as_slice();
         assert_eq!(read_message::<_, Inbound>(&mut reader).unwrap(), None);
@@ -378,7 +386,7 @@ mod tests {
 
     #[test]
     fn a_message_carrying_a_newline_still_takes_one_line() {
-        // A title, a directory or a session name can hold anything at all; the
+        // A title, a directory or a session name can hold anything at all. The
         // encoding is what keeps one message to one line.
         let awkward = Inbound::Seen {
             session: "one\ntwo".to_string(),

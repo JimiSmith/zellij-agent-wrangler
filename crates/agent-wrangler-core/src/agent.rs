@@ -1,10 +1,10 @@
 //! One agent session: who it is, what it calls itself, where it reported itself
 //! from, and whose turn it is.
 //!
-//! A record is written as one line of delimited text and read back the same
-//! way, so the two ends of the wire can be built and updated separately. Every
-//! field is stripped of the characters that would split a line, which is why the
-//! fields are built rather than assigned.
+//! A record is written as one line of delimited text and read back the same way.
+//! The two ends of the wire can therefore be built and updated separately. Every
+//! field loses the characters that can split a line, which is why the code
+//! builds the fields rather than assigns them.
 
 use crate::origin::Origin;
 
@@ -13,32 +13,32 @@ use crate::origin::Origin;
 pub(crate) const FIELD: char = '\t';
 pub(crate) const RECORD: char = '\n';
 
-/// The shape of a record, which every one of them leads with.
+/// The shape of a record, which every record leads with.
 ///
-/// What writes a record and what reads it are installed separately and updated
-/// separately, so one of them can be older than the other. Saying which shape a
-/// record is written in is what turns that into something the reader can report
-/// rather than a run of records it silently makes nothing of.
+/// The writer of a record and the reader of a record are installed separately
+/// and updated separately. One of them can therefore be older than the other. A
+/// record that names its own shape lets the reader report the difference.
+/// Without the shape, the reader makes nothing of the records and says nothing.
 pub const FORMAT: u32 = 4;
 
-/// The message every record travels in.
+/// The message that every record travels in.
 ///
-/// One message carries the whole set rather than one session's news, because
-/// what a reader needs is the state, not the events that led to it: a reader
-/// that misses a message is corrected by the next one instead of being left a
-/// record behind.
+/// One message carries the whole set rather than the news of one session. A
+/// reader needs the state, not the events that led to it. The next message
+/// corrects a reader that missed a message, so the reader never falls a record
+/// behind.
 pub const AGENTS_MESSAGE: &str = "wrangler:agents";
 
-/// The line every state message leads with, naming what it is and what shape
-/// its records are in.
+/// The line that every state message leads with. The line names the message and
+/// the shape of its records.
 const HEADER: &str = "wrangler";
 
 /// A run of records as a whole statement of what there is.
 ///
-/// The header is what makes "there are no agents" a thing that can be *said*.
-/// Without it an empty state and an empty message are the same bytes, and a
-/// message that arrived truncated, or one sent by something else entirely,
-/// would read as an instruction to forget every agent there is.
+/// The header is what makes "there are no agents" something that a message can
+/// say. Without the header, an empty state and an empty message are the same
+/// bytes. A truncated message, or a message from something else, then reads as
+/// an instruction to forget every agent.
 pub fn state(records: &str) -> String {
     format!("{HEADER} {FORMAT}{RECORD}{records}")
 }
@@ -54,13 +54,13 @@ pub fn read_state(payload: &str) -> Option<(u32, &str)> {
     }
 }
 
-/// The id an agent gives its own session, which is what that session is filed
-/// under.
+/// The id that an agent gives its own session. A session is stored under this
+/// id.
 ///
-/// The id travels inside delimited text, so the only constructor replaces every
-/// character that is not a letter, a digit, `.`, `_` or `-`, and refuses an id
-/// that has no such character to begin with. A `SessionId` that could split a
-/// field or a record cannot be built.
+/// The id travels inside delimited text. The only constructor therefore replaces
+/// every character that is not a letter, a digit, `.`, `_` or `-`. The
+/// constructor refuses an id with no characters at all. Nothing can build a
+/// `SessionId` that splits a field or a record.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SessionId(String);
 
@@ -119,50 +119,51 @@ impl Turn {
 }
 
 /// What a session is called by, as it was found. Every field is empty until
-/// something says otherwise: an agent that has not titled itself yet, and one
-/// that never will, look the same from here.
+/// something says otherwise. An agent with no title yet, and an agent that never
+/// takes one, look the same from here.
 ///
-/// These are the facts a label is *composed from* rather than the label itself,
-/// so what draws a session can be told to spell it differently without the
-/// agents having to report themselves again.
+/// These are the facts that a label is composed from, not the label itself. The
+/// code that draws a session can therefore spell the label differently, and the
+/// agents do not report themselves again.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Meta {
-    /// The name of the directory the agent is working in.
+    /// The name of the directory that the agent works in.
     pub dir: String,
-    /// The agent's own name when it is a teammate of another session, which is
-    /// what tells the two apart.
+    /// The agent's own name when it is a teammate of another session. The name
+    /// is what tells the two apart.
     pub name: String,
-    /// The color the agent shows for this session, by the agent's own name for
-    /// it. Empty for a session with none, and for an agent that assigns none.
+    /// The color that the agent shows for this session, under the agent's own
+    /// name for that color. The field is empty for a session with no color, and
+    /// for an agent that assigns no color.
     ///
-    /// The name is the fact; which of the terminal's colors draws it is not
+    /// The name is the fact. Which of the terminal's colors draws it is not
     /// settled here.
     pub color: String,
-    /// The title the session gave itself.
+    /// The title that the session gave itself.
     pub title: String,
 }
 
 /// When a process started, as the system that runs it counts time.
 ///
-/// The number means nothing anywhere else: it is ticks since boot on Linux,
+/// The number means nothing anywhere else. It is ticks since boot on Linux,
 /// microseconds since the epoch on macOS, and hundred-nanosecond intervals since
-/// 1601 on Windows. Nothing reads it. It is only ever compared with another one
-/// taken the same way on the same machine, which is all that telling one process
-/// from another takes.
+/// 1601 on Windows. Nothing reads the number. The code only compares it with
+/// another number taken the same way on the same machine. That comparison is all
+/// that it takes to tell one process from another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "native", derive(serde::Serialize, serde::Deserialize))]
 pub struct Started(pub u64);
 
-/// The process an agent is running as: which one, and when it began.
+/// The process that an agent runs as: which process, and when it began.
 ///
 /// A pid on its own does not name a process for long. The system hands the same
-/// number out again once the process holding it has gone, so a record that
-/// remembers only the number comes to point at whatever inherited it, and asking
-/// after that stranger answers that the agent is still running. When it started
-/// is what tells the two apart, since the pair is never handed out twice.
+/// number out again after the process that held it ends. A record that remembers
+/// only the number then points at whatever process inherited it. A question
+/// about that stranger answers that the agent still runs. The start time is what
+/// tells the two apart, because the system never hands out the pair twice.
 ///
-/// `started` is `None` where the system would not say, which leaves the number
-/// on its own and the record exactly as credulous as it was before.
+/// `started` is `None` where the system did not say. The record then holds the
+/// number alone, and it is exactly as credulous as before.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "native", derive(serde::Serialize, serde::Deserialize))]
 pub struct Process {
@@ -172,14 +173,14 @@ pub struct Process {
 
 /// What a line turned out to be.
 ///
-/// A record written in another format is told from a line that is not a record
-/// at all, because the two mean different things: the first says the two ends of
-/// the wire are out of step with each other, and the second says nothing.
+/// A record written in another format is told apart from a line that is not a
+/// record at all, because the two mean different things. The first says that the
+/// two ends of the wire are out of step. The second says nothing.
 ///
 /// The variants are of very different sizes, and the record is deliberately not
-/// boxed: one is produced per line of every state message and matched where it
-/// is produced, so putting it behind a pointer would buy nothing back for an
-/// allocation per record.
+/// boxed. The code produces one record per line of every state message, and
+/// matches it where it produces it. A pointer therefore costs an allocation per
+/// record and buys nothing back.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Record {
@@ -196,19 +197,19 @@ pub struct Agent {
     pub meta: Meta,
     /// Where the agent's own hook was invoked, as its environment described it.
     pub origin: Origin,
-    /// The agent's own process, as its hook found it by climbing its ancestry.
-    /// `None` for a hook that could not say, which is a record nothing can check
-    /// the liveness of.
+    /// The agent's own process, as its hook found it by a climb up its ancestry.
+    /// `None` for a hook that did not say. Nothing can make sure that the
+    /// process in such a record still runs.
     pub process: Option<Process>,
     pub turn: Turn,
     /// When the agent last called for the user, as the clock read at the time.
     /// It is taken once, where the call happens, so everything downstream orders
-    /// the calls the same way without comparing clocks of its own.
+    /// the calls the same way, and compares no clock of its own.
     pub raised: u64,
 }
 
-/// Replace every character that would split a record or a field, and every
-/// control character, with a space.
+/// Replace with a space every control character, and every character that can
+/// split a record or a field.
 fn field(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -233,13 +234,13 @@ impl Agent {
         }
     }
 
-    /// The record as one line: the format, then everything about the session,
-    /// with the title last because it is the one field allowed to hold anything
-    /// at all.
+    /// The record as one line: the format, then everything about the session.
+    /// The title is last, because it is the one field that can hold anything at
+    /// all.
     ///
-    /// A process is written as its two halves rather than as one field, so a
-    /// record naming a process nothing could date reads the same as one from
-    /// before there was a second half to name.
+    /// A process is written as its two halves rather than as one field. A record
+    /// that names a process with no date therefore reads the same as a record
+    /// from before the second half existed.
     pub fn encode(&self) -> String {
         let (pid, started) = match self.process {
             Some(process) => (
@@ -267,9 +268,9 @@ impl Agent {
 
     /// What a line turned out to be.
     ///
-    /// The title is the whole remainder of the line, so a title carrying the
-    /// field character would still parse; it cannot, because the constructor
-    /// takes that character out.
+    /// The title is the whole remainder of the line, so a title with the field
+    /// character in it still parses. No such title exists, because the
+    /// constructor takes that character out.
     pub fn decode(line: &str) -> Record {
         let mut fields = line.splitn(12, FIELD);
         match fields.next().and_then(|format| format.parse::<u32>().ok()) {
@@ -283,7 +284,7 @@ impl Agent {
         }
     }
 
-    /// A record's fields, after the one saying which format they are in.
+    /// A record's fields, after the field that says which format they are in.
     fn read<'a>(mut fields: impl Iterator<Item = &'a str>) -> Option<Self> {
         let session = SessionId::new(fields.next()?)?;
         let agent = fields.next()?;
@@ -296,9 +297,9 @@ impl Agent {
         let color = fields.next()?.to_string();
         let origin = Origin::decode(fields.next()?);
         let title = fields.next()?.to_string();
-        // When a process started says nothing without which process it was, so
-        // a record that names no process is read as naming none whatever else
-        // that field holds.
+        // A start time says nothing without the process that it belongs to. A
+        // record that names no process therefore names none, whatever the start
+        // time field holds.
         let process = match pid.is_empty() {
             true => None,
             false => Some(Process {
@@ -346,8 +347,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// An origin describing a zellij pane, which is what a hook invoked in one
-    /// captures.
+    /// An origin that describes a zellij pane. A hook invoked in such a pane
+    /// captures this origin.
     pub(crate) fn at_pane(pane: u32) -> Origin {
         Origin::from(|name| match name {
             "ZELLIJ" => Some("0".to_string()),
@@ -387,8 +388,8 @@ pub(crate) mod tests {
         )
     }
 
-    /// The record an agent's hooks send when the turn changes: everything the
-    /// session is, plus whose turn it now is.
+    /// The record that an agent's hooks send when the turn changes: everything
+    /// that the session is, plus whose turn it now is.
     pub(crate) fn reporting(id: &str, pane: u32, turn: Turn, raised: u64) -> Agent {
         Agent {
             turn,
@@ -432,8 +433,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_process_nothing_could_date_keeps_its_number() {
-        // The system need not say when a process started, and a record that
-        // could not find out still names the process it found.
+        // The system does not always say when a process started. A record
+        // without that answer still names the process that it found.
         let undated = Agent {
             process: Some(Process {
                 pid: 4242,
@@ -446,8 +447,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_start_time_without_a_process_is_no_process() {
-        // Nothing writes this, and a record that arrived saying it would name a
-        // moment with nothing to attach it to.
+        // Nothing writes this. A record that arrived with a start time and no
+        // process names a moment with nothing to attach it to.
         let orphan = "4\tone\tclaude\t\t918273\tidle\t0\tdir\t\t\t\t";
         let Record::Known(read) = Agent::decode(orphan) else {
             panic!("not a record");
@@ -519,8 +520,8 @@ pub(crate) mod tests {
 
     #[test]
     fn having_no_agents_is_something_that_can_be_said() {
-        // The difference this whole header exists for: a state with nothing in
-        // it is a message, where nothing at all is not.
+        // This is the difference that the header exists for. A state with
+        // nothing in it is a message. Nothing at all is not a message.
         let empty = state("");
         assert_eq!(read_state(&empty), Some((FORMAT, "")));
         assert_eq!(read_state(""), None);

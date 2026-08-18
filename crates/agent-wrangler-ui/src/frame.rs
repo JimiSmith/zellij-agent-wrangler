@@ -1,14 +1,15 @@
-//! Every line of the pane, in the order it is drawn and navigated.
+//! Every row of the pane, in the order it is drawn and navigated.
 //!
-//! The pane is two regions. The tree fills it; the notification area is pinned
-//! to the foot and capped at a share of the pane, and an entry is admitted only
-//! if it fits whole, so a title never appears over a cut-off message. Both
-//! regions are navigated in one order, and every line of a notification entry
-//! carries that entry's key, so a click anywhere in it selects the same thing.
+//! The pane is two regions. The tree fills the pane. The notification area is
+//! pinned to the foot and capped at a share of the pane. An entry that does not
+//! fit whole is left out, so a title never appears over a cut-off message. Both
+//! regions are navigated in one order. Every row of a notification entry carries
+//! the key of that entry, so a click anywhere in the entry selects the same
+//! thing.
 //!
-//! How many lines an entry takes depends on the width, which is why the entire
-//! frame is composed together for each paint. Neither region knows what the
-//! other needs until there is a pane to divide.
+//! The number of rows an entry takes depends on the width. The whole frame is
+//! therefore composed together every time the client draws it. Neither region
+//! knows what the other needs until there is a pane to divide.
 
 use ratatui_core::layout::Rect;
 
@@ -19,15 +20,15 @@ use crate::render::{notification_body_field, wrap};
 /// The heading the notification area is drawn under.
 const NOTIFICATIONS_HEADING: &str = "notifications";
 
-/// The share of the pane the calls at the foot may take.
+/// The share of the pane the calls at the foot can take.
 const NOTIFICATION_SHARE: usize = 4;
 
 /// Something a client has to say about itself, where every other row says
 /// something about the session.
 ///
-/// A client is the only thing that knows it is broken, so this is how it says
-/// so: what it could not do leads the pane, since that is why the tree beneath
-/// it is missing rows.
+/// A client is the only thing that knows it is broken, and a note is how it
+/// says so. What the client failed to do leads the pane, because that failure is
+/// why the tree under the note lacks rows.
 pub struct Note<'a> {
     pub heading: &'a str,
     pub text: &'a str,
@@ -44,11 +45,11 @@ fn notice(heading: &str, text: &str, width: usize) -> Vec<Row> {
     rows
 }
 
-/// The rows a notification entry is drawn as: its title over the wrapped lines
-/// of its message.
+/// The rows a notification entry is drawn as: the title over the wrapped rows
+/// of the message.
 ///
-/// Every line carries the entry's own key, so a click anywhere in it lands on
-/// the same thing.
+/// Every row carries the entry's own key, so a click anywhere in the entry lands
+/// on the same thing.
 fn notification_rows(entry: &Notification, width: usize) -> Vec<Row> {
     let key = RowKey::Notification(entry.session.clone());
     let mut rows = vec![Row::new(RowContent::NotificationTitle {
@@ -63,9 +64,13 @@ fn notification_rows(entry: &Notification, width: usize) -> Vec<Row> {
     rows
 }
 
-/// The notification area for a pane `width` columns wide, given `cap` lines to
-/// fill. Empty when that leaves no room for the heading and one whole entry
-/// beside it, and when the client was asked not to list the calls at all.
+/// The notification area for a pane `width` columns wide, with `cap` rows to
+/// fill.
+///
+/// The area is empty in two cases:
+///
+/// - `cap` leaves no room for the heading and one whole entry beside it,
+/// - the client is asked not to list the calls at all.
 fn notification_area(
     notices: &[Notification],
     width: usize,
@@ -91,12 +96,11 @@ fn notification_area(
     rows
 }
 
-/// The lines of one pane, ready to be drawn, and the pane they were composed
-/// for.
+/// The rows of one pane, ready to be drawn, and the pane they were composed for.
 ///
-/// The two travel together because neither says anything without the other: how
-/// many lines there are was decided by the height, and where a line is cut by
-/// the width.
+/// The two travel together, because neither one says anything without the other.
+/// The height decides the number of rows, and the width decides where a row is
+/// cut.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Frame {
     lines: Vec<Row>,
@@ -112,21 +116,21 @@ impl Frame {
         self.area
     }
 
-    /// What each line points at, in screen order.
+    /// What each row points at, in screen order.
     ///
-    /// A client holds this from one frame to the next, so a click resolves
-    /// against the frame it landed on rather than against a tree that may since
-    /// have moved.
+    /// A client holds this from one frame to the next. A click therefore
+    /// resolves against the frame it landed on rather than against a tree that
+    /// moved since then.
     pub fn keys(&self) -> Vec<Option<RowKey>> {
         self.lines.iter().map(|row| row.key.clone()).collect()
     }
 }
 
-/// Divide a pane between what the client has to say about itself, the tree, and
-/// the calls at the foot.
+/// The pane, divided between what the client has to say about itself, the tree,
+/// and the calls at the foot.
 ///
-/// The notes lead, the tree follows, and the calls are pinned to the foot with
-/// blank rows filling whatever is left between them.
+/// The notes lead, the tree follows, and the calls are pinned to the foot. Blank
+/// rows fill whatever is left between the tree and the calls.
 pub fn compose(
     notes: &[Note<'_>],
     tree: &[Row],
@@ -251,8 +255,9 @@ mod tests {
 
     #[test]
     fn an_entry_too_tall_for_the_area_is_left_out_rather_than_cut() {
-        // A title over a cut-off message says an agent is calling and then stops
-        // saying where from, which is worse than not listing it at all.
+        // A title over a cut-off message says that an agent calls, and then it
+        // stops short of where the call comes from. That is worse than no entry
+        // at all.
         let frame = compose_into(24, &[call("one", &"where it is ".repeat(12))]);
         assert!(listed(&frame).is_empty());
     }

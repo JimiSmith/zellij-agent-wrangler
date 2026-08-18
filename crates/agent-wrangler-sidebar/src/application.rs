@@ -87,8 +87,9 @@ impl Application {
 
     /// The latest reported position of a stable tab identity.
     ///
-    /// Positional host APIs resolve an id through this lookup immediately
-    /// before executing a tab effect.
+    /// A positional host API resolves an id through this lookup. The
+    /// resolution occurs immediately before the application runs a tab
+    /// effect.
     pub fn tab_position(&self, id: &TabId) -> Option<TabPosition> {
         session::position_of(&self.tabs, id)
     }
@@ -133,11 +134,11 @@ impl Application {
     fn change_visibility(&mut self, visible: bool) -> Decision {
         let changed = self.visible != visible;
         self.visible = visible;
-        // Being shown is the one moment with no report to work from: the ones
-        // this sidebar holds are from whenever it was last looked at, and the
-        // ones that replace them are far slower than an answer to a question.
-        // So ask, rather than deciding anything from what is held; the answer
-        // arrives in time for the frame this decision paints.
+        // A sidebar that becomes visible has no fresh report to work from. It
+        // holds reports from the last time that the user looked at it. New
+        // reports are much slower than an answer to a question. The sidebar
+        // therefore asks, and it decides nothing from the reports in hand. The
+        // answer arrives in time for the frame that this decision paints.
         let mut decision = if visible {
             Decision::effect(Effect::RefreshFocus)
         } else {
@@ -148,11 +149,11 @@ impl Application {
     }
 
     fn observe_reported_focus(&mut self) -> Decision {
-        // Tab reports carry the stable active-tab identity while layout
-        // reports carry its focused pane. Join the latest event snapshots by
-        // position instead of asking the host for a second focus snapshot.
-        // What comes out is the best reading of the two reports in hand rather
-        // than a fact settled well enough to act on.
+        // A tab report carries the stable identity of the active tab. A layout
+        // report carries the focused pane of that tab. This code joins the
+        // latest snapshot of each event by position. It does not ask the host
+        // for a second focus snapshot. The result is the best reading of the
+        // two reports in hand. It is not a settled fact to act on.
         let fresh = self.tabs.iter().find(|tab| tab.active).and_then(|tab| {
             let layout = self
                 .layout
@@ -284,7 +285,7 @@ impl Application {
         changed
     }
 
-    /// The session as the reports and the focus in hand describe it.
+    /// The session, as the reports and the focus in hand describe it.
     fn reconciled_session(&self) -> session::ReconciledSession {
         let mut resolved = session::reconcile(
             &self.tabs,
@@ -758,14 +759,14 @@ mod tests {
         );
         assert_eq!(app.render(Rect::new(0, 0, 30, 5)).selection, None);
 
-        // The reports held say this sidebar has the focus. Being shown asks
-        // rather than acting on them: they were sent to a sidebar nobody was
-        // looking at, and the answer is both quicker and better than the ones
-        // that will replace them.
+        // The reports in hand say that this sidebar has the focus. The sidebar
+        // becomes visible, so it asks and does not act on them. The host sent
+        // those reports to a sidebar that nobody looked at. The answer is
+        // quicker and better than the reports that will replace them.
         let shown = app.reduce(Input::VisibilityChanged(true));
         assert_eq!(shown.effects, vec![Effect::RefreshFocus, Effect::Repaint]);
 
-        // The answer stands over what was held, wherever it puts the user.
+        // The answer replaces the reports in hand, wherever it puts the user.
         let answered = app.reduce(focus("10", FocusTarget::Content(PaneId::new("7"))));
         assert!(answered.effects.contains(&Effect::Repaint));
         assert_eq!(
@@ -784,7 +785,8 @@ mod tests {
             Some(RowKey::Pane(PaneId::new("7")))
         );
 
-        // Going away asks nothing: a hidden sidebar cannot own the focus.
+        // A sidebar that goes away asks nothing. A hidden sidebar cannot own
+        // the focus.
         assert_eq!(
             app.reduce(Input::VisibilityChanged(false)),
             Decision::repaint()
@@ -1148,9 +1150,8 @@ mod tests {
         both[0].active = false;
         both[1].active = true;
         app.reduce(Input::TabsReported(both));
-        // Every tab holds a sidebar, and each reports the pane focused within
-        // itself, so the tab report is the only thing saying which one the user
-        // is in.
+        // Every tab holds a sidebar, and each tab reports the focused pane
+        // inside itself. Only the tab report tells which tab holds the user.
         let mut reported = layout(0, &[(0, &[]), (1, &["7"])]);
         reported.tabs[0].sidebar_pane = Some(SidebarPaneReport { focused: true });
         reported.tabs[1].sidebar_pane = Some(SidebarPaneReport { focused: true });
@@ -1163,16 +1164,17 @@ mod tests {
         assert!(app.tabs_with_company.contains(&TabId::new("20")));
 
         // The first tab closes. Until the pane report catches up, position 0
-        // names the surviving tab in one report and the closed one in the
-        // other, whose entry has no panes left to see.
+        // names the open tab in one report and the closed tab in the other.
+        // The entry for the closed tab has no panes.
         let closed = app.reduce(Input::TabsReported(vec![tab("20", 0)]));
         assert!(!closed.effects.contains(&Effect::CloseSidebar));
         assert_eq!(
             app.reconciled_session().focus,
             session::ReconciledFocus::Pending
         );
-        // The frame is still drawn: a report that changes the tabs asks for a
-        // repaint whatever it does to the focus. Only the gutter waits.
+        // The sidebar still draws the frame. A report that changes the tabs
+        // asks for a repaint, whatever it does to the focus. Only the gutter
+        // waits.
         assert!(closed.effects.contains(&Effect::Repaint));
         assert_eq!(
             app.reconciled_session().focus,

@@ -1,10 +1,11 @@
 #!/bin/sh
-# Report one event to the daemon as an agent running in a named zellij pane
-# would, without there having to be a pane.
+# This script reports one event to the daemon in the same way as an agent in a
+# named zellij pane. The script needs no pane.
 #
-# The location variables are set here rather than inherited, because they are
-# the whole of what the hook reads to say where it was raised: a hook run on the
-# host with none of them set reports from nowhere and is dropped.
+# The script sets the location variables itself, and does not inherit them. The
+# hook reads these variables and nothing else to say where the event came from.
+# If a hook runs on the host with none of these variables set, the hook reports
+# from nowhere and the daemon drops it.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 session=$1

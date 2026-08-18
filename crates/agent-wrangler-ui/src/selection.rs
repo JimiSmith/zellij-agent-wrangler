@@ -1,11 +1,12 @@
-//! Resolve selection from the exact rows that made it into a frame.
+//! The selection, resolved from the exact rows that a frame holds.
 
 use crate::model::{Row, RowKey};
 
-/// Every distinct selectable key in visible screen order.
+/// Every distinct selectable key, in the order it appears on the screen.
 ///
-/// Wrapped notification lines repeat their entry's key. They remain clickable
-/// individually, but form one keyboard-navigation item.
+/// The wrapped rows of one notification entry repeat the key of that entry. A
+/// user can click each row on its own, but the rows are one item for keyboard
+/// navigation.
 pub fn keys(rows: &[Row]) -> Vec<RowKey> {
     let mut keys = Vec::new();
     for key in rows.iter().filter_map(|row| row.key.as_ref()) {
@@ -16,8 +17,8 @@ pub fn keys(rows: &[Row]) -> Vec<RowKey> {
     keys
 }
 
-/// Keep a held key only while it is visible, falling back to the first visible
-/// item when the held item has left this particular frame.
+/// A held key stays selected while it is visible. If the held item is not in
+/// this frame, the selection falls back to the first visible item.
 pub fn selected(keys: &[RowKey], held: Option<&RowKey>) -> Option<RowKey> {
     match held {
         Some(held) if keys.contains(held) => Some(held.clone()),

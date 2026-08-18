@@ -69,11 +69,11 @@ pub enum UserAction {
     Click(usize),
 }
 
-/// A host-neutral operation offered by one item in a rendered sidebar.
+/// A host-neutral operation that one item in a rendered sidebar offers.
 ///
-/// The target is always a stable identity. The application validates it
-/// against its latest authoritative state immediately before producing host
-/// effects.
+/// The target is always a stable identity. The application validates the
+/// target against its latest authoritative state. The validation occurs
+/// immediately before the application produces host effects.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ViewAction {
     ActivateTab(TabId),
@@ -81,7 +81,7 @@ pub enum ViewAction {
     ActivateAgent(SessionId),
 }
 
-/// What one visible frame line means when the user interacts with it.
+/// The result of a user interaction with one visible frame line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InteractionItem {
     pub key: RowKey,
@@ -138,12 +138,14 @@ pub struct Command {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     Repaint,
-    /// Ask the host where the user is, answered by [`Input::FocusObserved`].
+    /// Asks the host where the user is. [`Input::FocusObserved`] holds the
+    /// answer.
     ///
-    /// Reports say where the user was when they were sent. This asks, and is
-    /// worth its round trip only where no report is coming: a sidebar that has
-    /// just been shown holds whatever it last heard, and the reports that
-    /// replace it are a good deal slower than the answer.
+    /// A report gives the position of the user at the moment of the report. If
+    /// no report will arrive, this question is worth its round trip. In other
+    /// conditions, it is not. A newly visible sidebar holds the last position
+    /// that it heard. The reports that replace that position are much slower
+    /// than the answer.
     RefreshFocus,
     RefreshPaneTitle(PaneId),
     Run(Command),
@@ -203,8 +205,9 @@ impl RenderedView {
 
     /// Each distinct selectable item in visible screen order.
     ///
-    /// Notification titles and their wrapped body lines share an item, so they
-    /// are returned once even though every one of their lines is clickable.
+    /// Notification titles and their wrapped body lines share an item. This
+    /// method returns each shared item once, although each of its lines is
+    /// clickable.
     pub fn selectable_items(&self) -> Vec<&InteractionItem> {
         let mut items = Vec::new();
         for item in self.interactions.iter().flatten() {

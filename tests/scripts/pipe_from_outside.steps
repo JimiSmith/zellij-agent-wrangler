@@ -1,8 +1,9 @@
-# Does a pipe sent from outside a session reach the plugins inside it?
+# This test asks one question. Does a pipe sent from outside a session reach
+# the plugins inside the session?
 #
-# `wrangler:off` is the message used, because its effect cannot be mistaken for
-# anything else: every sidebar in the session closes, so either the tree
-# disappears or the message never arrived.
+# The test uses the message `wrangler:off`, because no other effect looks like
+# the effect of that message. Every sidebar in the session closes. Either the
+# tree disappears, or the message never arrived.
 
 env: ZELLIJ_CONFIG_DIR=$PWD/tests/zellij-config
 env: TERM=xterm-256color
@@ -15,7 +16,8 @@ sh: tests/scripts/make-layout.sh tests/out/e2e.kdl
 
 spawn: zellij --session wrangler-test-pipe --new-session-with-layout tests/out/e2e.kdl
 
-# The sidebar's own drawing of the tab it is in, which no other pane produces.
+# This is how the sidebar draws the tab that it is in. No other pane produces
+# this line.
 wait: 1: wrangler @ 25
 dump: pipe_before
 

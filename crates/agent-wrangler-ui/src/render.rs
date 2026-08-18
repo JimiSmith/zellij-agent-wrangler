@@ -1,17 +1,23 @@
-//! Turning a row's structure into the cells drawn for it.
+//! How the structure of a row becomes the cells drawn for it.
 //!
-//! Every glyph a client shows that is not the literal name of a thing is chosen
-//! here: the gutter marking where you are, the icon marking what kind of thing
-//! the row is, the tree branches, the index prefix, the heading's spacing and
-//! case, and the styling.
+//! A client shows glyphs that are not the literal name of a thing. This module
+//! chooses all of them:
 //!
-//! A row is drawn as a run of spans rather than as one styled line, which is
-//! what lets a pane's or agent's color sit on its icon alone while the name
-//! beside it stays in the terminal's default.
+//! - the gutter that marks where you are,
+//! - the icon that marks what kind of thing the row is,
+//! - the tree branches,
+//! - the index prefix,
+//! - the space and the case of a heading,
+//! - the styles.
+//!
+//! A row is drawn as a run of spans rather than as one styled line. The color of
+//! a pane or an agent therefore sits on its icon alone. The name beside the icon
+//! stays in the default of the terminal.
 //!
 //! What comes out is cells in a buffer rather than a finished string. A client
-//! that owns its terminal hands those to a backend; one that can only print
-//! turns them back into escape sequences. Neither decision belongs to a row.
+//! that owns its terminal hands the cells to a backend. A client that can only
+//! print turns the cells into escape sequences. Neither decision belongs to a
+//! row.
 
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
@@ -21,10 +27,10 @@ use ratatui_core::widgets::Widget;
 
 use crate::model::{Branch, NamedColor, Placement, Row, RowContent, RowKey};
 
-/// Column 0: a block marks "where you are", a space does not.
+/// Column 0: a block marks "where you are", and a space does not.
 ///
-/// A fixed position no row color can imitate, carried by exactly two rows: the
-/// active tab, and the pane you are in inside it.
+/// The position is fixed, and no row color can imitate it. Exactly two rows
+/// carry the block: the active tab, and the pane you are in inside that tab.
 fn gutter(here: bool) -> char {
     if here {
         '▌'
@@ -33,7 +39,8 @@ fn gutter(here: bool) -> char {
     }
 }
 
-/// The glyph for a child's position in its tab: the last one closes the tree.
+/// The glyph for the position of a child in its tab. The last child closes the
+/// tree.
 fn branch(branch: Branch) -> char {
     match branch {
         Branch::More => '├',
@@ -41,36 +48,37 @@ fn branch(branch: Branch) -> char {
     }
 }
 
-/// What kind of thing the row is, drawn immediately before its name. Nerd Font
-/// glyphs, one column wide.
+/// What kind of thing the row is, drawn immediately before its name. The glyphs
+/// come from Nerd Font, and each one is one column wide.
 ///
-/// This is the only thing distinguishing an agent from a plain pane: a child row
-/// draws its name in the terminal's default whatever color the thing carries, so
-/// color cannot be read as "this is an agent".
+/// The icon is the only mark that separates an agent from a plain pane. A child
+/// row draws its name in the default of the terminal, whatever color the thing
+/// carries. Color therefore does not mean "this is an agent".
 const ICON_PANE: char = '\u{f489}';
 const ICON_AGENT: char = '\u{f167a}';
 
-/// A description line hangs beneath its title, indented to the column the
-/// title's text starts in (past the gutter, the icon and the gap after it).
+/// A description row hangs under its title. The row is indented to the column
+/// where the text of the title starts, past the gutter, the icon and the gap
+/// after the icon.
 const BODY_INDENT: &str = "    ";
 
-/// What a name too long for the pane ends in, standing for the part of it that
-/// was not drawn.
+/// What a name too long for the pane ends in. The mark stands for the part of
+/// the name that was not drawn.
 const ELLIPSIS: char = '…';
 
-/// The columns a description line has for its text in a pane `width` columns
-/// wide: the indent comes off the front and the reserved right-hand column off
-/// the end. Never zero, so wrapping to it always terminates.
+/// The columns a description row has for its text in a pane `width` columns
+/// wide. The indent comes off the front, and the reserved right-hand column
+/// comes off the end. The result is never zero, so a wrap to it always ends.
 pub fn notification_body_field(width: usize) -> usize {
     width.saturating_sub(BODY_INDENT.len() + 1).max(1)
 }
 
-/// A row's text, split so a color can land on the kind icon alone.
+/// The text of a row, split so that a color can land on the kind icon alone.
 enum Parts {
-    /// One undivided line: a heading, a blank, or a tab row, which has no icon
-    /// column of its own.
+    /// One undivided run of text: a heading, a blank, or a tab row. A tab row
+    /// has no icon column of its own.
     Whole(String),
-    /// A child row, carrying the color its icon is drawn in.
+    /// A child row, with the color its icon is drawn in.
     Split {
         head: String,
         icon: char,
@@ -79,9 +87,10 @@ enum Parts {
     },
 }
 
-/// A child row's pieces: the gutter, the branch and index, then its kind icon
-/// and name. The icon sits with the name it labels rather than out at the
-/// margin, so the tree it hangs off reads as one unbroken structure.
+/// The pieces of a child row: the gutter, the branch and the index, then the
+/// kind icon and the name. The icon sits with the name it labels rather than out
+/// at the margin. The tree the row hangs off therefore reads as one unbroken
+/// structure.
 fn child_parts(
     placement: Placement,
     icon: char,
@@ -98,16 +107,16 @@ fn child_parts(
         ),
         icon,
         // Two spaces, not one: the icons overhang the single column they are
-        // declared as, and one space leaves the name touching the glyph.
+        // declared as. With one space, the name touches the glyph.
         tail: format!("  {name}"),
         color,
     }
 }
 
-/// Split a row into the pieces it is drawn as.
+/// The pieces one row is drawn as.
 fn parts(content: &RowContent) -> Parts {
     match content {
-        // The single leading space is load-bearing: it aligns the underline.
+        // The single leading space is necessary. It aligns the underline.
         RowContent::Header { text } => Parts::Whole(format!(" {}", text.to_uppercase())),
         RowContent::Blank => Parts::Whole(String::new()),
         RowContent::Window {
@@ -142,9 +151,9 @@ fn parts(content: &RowContent) -> Parts {
     }
 }
 
-/// The line drawn for a row, before it is fitted to the pane width. The drawing
-/// composes the same line out of styled spans, so this is where a change to the
-/// glyphs around a name is asserted.
+/// The line drawn for a row, before it is fitted to the width of the pane. The
+/// drawing composes the same line out of styled spans. A test of the glyphs
+/// around a name therefore asserts on this line.
 pub fn row_text(content: &RowContent) -> String {
     match parts(content) {
         Parts::Whole(text) => text,
@@ -154,10 +163,11 @@ pub fn row_text(content: &RowContent) -> String {
     }
 }
 
-/// The styled spans a row is drawn as, before they are fitted to the pane width.
+/// The styled spans a row is drawn as, before they are fitted to the width of
+/// the pane.
 ///
-/// A child's color rides on its icon alone. A whole row in an agent's color
-/// drowns the list once more than a couple of agents are up, and the icon is
+/// The color of a child rides on its icon alone. A whole row in the color of an
+/// agent drowns the list once more than a couple of agents run. The icon is
 /// enough to tie the row to the thing it points at.
 pub fn row_line(content: &RowContent) -> Line<'static> {
     let base = base_style(content);
@@ -176,13 +186,13 @@ pub fn row_line(content: &RowContent) -> Line<'static> {
     }
 }
 
-/// The style a row's own text draws in, which the right-edge indicator inherits
-/// when it carries no state color of its own.
+/// The style the text of a row draws in. If the right-edge indicator carries no
+/// state color of its own, it inherits this style.
 ///
-/// The channels are kept apart: intensity says where you are, and the kind icon
-/// says what the row is. A child's color belongs to the icon rather than the
-/// name, so only a tab row styles its whole line with a color. Nothing here
-/// varies with a row's turn state, which the indicator carries on its own.
+/// The channels stay apart: intensity says where you are, and the kind icon says
+/// what the row is. The color of a child belongs to the icon rather than to the
+/// name. Only a tab row draws its whole width in a color. Nothing here varies
+/// with the turn state of a row, which the indicator carries on its own.
 pub fn base_style(content: &RowContent) -> Style {
     match content {
         RowContent::Header { .. } => Style::new()
@@ -202,13 +212,13 @@ pub fn base_style(content: &RowContent) -> Style {
     }
 }
 
-/// How brightly a row draws, which is the one channel saying where you are: bold
-/// for the row you are on, dim for a tab you are not in, and plain for the rest
-/// of the tab you are in.
+/// How brightly a row draws, which is the one channel that says where you are.
+/// The row you are on is bold. A tab you are not in is dim. The rest of the tab
+/// you are in is plain.
 ///
-/// Dimming the whole of an unfocused tab (its icons and its inherited
-/// indicators included) sets it behind the current tab as a block, which is what
-/// makes the current tab findable at a glance in a long list.
+/// An unfocused tab is dim as a whole, its icons and its inherited indicators
+/// included. The tab therefore sits behind the current tab as a block, and the
+/// user finds the current tab at a glance in a long list.
 fn intensity(placement: Placement) -> Style {
     match placement {
         Placement::Here => Style::new().add_modifier(Modifier::BOLD),
@@ -217,7 +227,8 @@ fn intensity(placement: Placement) -> Style {
     }
 }
 
-/// Apply a thing's own color, leaving the style untouched when it has none.
+/// The style with the color of a thing added. If the thing has no color of its
+/// own, the style stays as it is.
 fn own_color(style: Style, color: Option<NamedColor>) -> Style {
     match color {
         Some(c) => style.fg(color_of(c)),
@@ -227,8 +238,8 @@ fn own_color(style: Style, color: Option<NamedColor>) -> Style {
 
 /// The terminal color a name in the palette is drawn in.
 ///
-/// Named rather than numbered, so what the user's theme calls cyan is what a
-/// cyan session is drawn in.
+/// The colors carry names rather than numbers. A cyan session is drawn in the
+/// color the theme of the user calls cyan.
 fn color_of(color: NamedColor) -> Color {
     match color {
         NamedColor::Red => Color::Red,
@@ -242,17 +253,17 @@ fn color_of(color: NamedColor) -> Color {
     }
 }
 
-/// What a selected row's cells take on: reverse video, with the color and the
-/// dimming of whatever it covers dropped.
+/// What the cells of a selected row take on: reverse video, with the color and
+/// the dimming of whatever it covers dropped.
 ///
-/// Under reverse video both land on what is now the background, so a colored
-/// icon would paint a block of color across the selected row and a dimmed one
-/// would wash it out. Pointing at somewhere you are not is what the selection is
-/// for, so the selected row is usually a dimmed one.
+/// Under reverse video both land on what is now the background. A colored icon
+/// there draws a block of color across the selected row, and a dimmed one washes
+/// the row out. The selection points at somewhere you are not, so the selected
+/// row is usually a dimmed one.
 ///
-/// It is applied over the finished row rather than folded into each span, which
-/// is what makes the bar span the full width: the padding a short row leaves is
-/// covered by the same patch as its text.
+/// The style goes over the finished row rather than into each span, which is
+/// what makes the bar span the full width. The same patch covers the text of a
+/// short row and the padding after it.
 fn selection() -> Style {
     Style::new()
         .fg(Color::Reset)
@@ -260,22 +271,22 @@ fn selection() -> Style {
         .remove_modifier(Modifier::DIM)
 }
 
-/// Fit a line to `field` columns, ending one that has to be cut with an
-/// ellipsis.
+/// A line fitted to `field` columns, with an ellipsis at the end of a line the
+/// fit had to cut.
 ///
-/// A name that simply stops reads as the whole name of something else, which is
-/// the one thing a list of names must not do: two panes in the same directory
-/// differ in their tails. The ellipsis takes the last column of the field rather
-/// than the one after it, so the column kept for the turn-state marker stays
-/// clear whatever a name does.
+/// A name that stops with no mark reads as the whole name of something else. A
+/// list of names must never do that, because two panes in the same directory
+/// differ in their tails. The ellipsis takes the last column of the
+/// field rather than the column after it. The column kept for the turn-state
+/// marker therefore stays clear, whatever a name does.
 ///
-/// The cut is made span by span so the styling survives it, and the ellipsis is
-/// drawn in the style of the span the cut fell in: it stands for the text it
+/// The cut goes span by span, so the styling survives it. The ellipsis draws in
+/// the style of the span the cut fell in, because it stands for the text it
 /// replaced. A field too narrow to hold even the tree in front of a name cuts
-/// into that instead, which is the same order the width takes them away in.
+/// into the tree instead. That is the same order the width takes them away in.
 ///
-/// Columns are counted as characters, the measure the tree in front of a name is
-/// composed with.
+/// Columns count as characters, which is the measure the tree in front of a name
+/// is composed with.
 fn elide(line: Line<'static>, field: usize) -> Line<'static> {
     let drawn: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
     if drawn <= field {
@@ -288,8 +299,9 @@ fn elide(line: Line<'static>, field: usize) -> Line<'static> {
     for span in line.spans {
         let head: String = span.content.chars().take(room).collect();
         room -= head.chars().count();
-        // Running out mid-span is certain: the line is longer than the field,
-        // and the field is one wider than the room its text was given.
+        // The room is certain to run out inside a span. The line is longer than
+        // the field, and the field is one column wider than the room its text
+        // was given.
         if room == 0 {
             kept.push(Span::styled(format!("{head}{ELLIPSIS}"), span.style));
             break;
@@ -299,27 +311,27 @@ fn elide(line: Line<'static>, field: usize) -> Line<'static> {
     Line::from(kept)
 }
 
-/// The finished pane: every row drawn in order, with the selected one in reverse
+/// The finished pane: every row drawn in order, with the selected row in reverse
 /// video.
 ///
-/// The rightmost column is kept for the turn-state indicator, so a long name is
-/// cut before it can collide with one, and the cut is marked with an ellipsis.
+/// The rightmost column stays free for the turn-state indicator. A long name is
+/// cut before it can reach that column, and an ellipsis marks the cut.
 pub struct Sidebar<'a> {
     pub lines: &'a [Row],
-    /// What the selection is on, which is nothing at all when the keys are not
-    /// coming to this client.
+    /// What the selection is on. If the keys do not come to this client, the
+    /// selection is nothing at all.
     pub selected: Option<&'a RowKey>,
 }
 
 impl Sidebar<'_> {
-    /// Whether this row is the one the selection is on. A row that points at
-    /// nothing is never it, however the selection compares.
+    /// Whether this row is the row the selection is on. A row that points at
+    /// nothing is never that row, whatever the selection holds.
     fn is_selected(&self, row: &Row) -> bool {
         row.key.is_some() && row.key.as_ref() == self.selected
     }
 
-    /// One row's cells: its text fitted to everything but the last column, then
-    /// the marker in the column kept back for it.
+    /// The cells of one row: the text fitted to everything but the last column,
+    /// then the marker in the column kept back for it.
     fn draw(&self, row: &Row, area: Rect, buf: &mut Buffer) {
         let field = area.width.saturating_sub(1);
         let base = base_style(&row.content);
@@ -350,8 +362,8 @@ impl Widget for Sidebar<'_> {
     }
 }
 
-/// Wrap `text` to `field` columns, breaking on whitespace where one fits and
-/// mid-word where a single word is longer than the field.
+/// `text` wrapped to `field` columns. The break falls on whitespace where a word
+/// fits, and inside a word that is longer than the field.
 pub fn wrap(text: &str, field: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -418,7 +430,7 @@ mod tests {
         }
     }
 
-    /// One row's cells, as a client `width` columns wide would draw them.
+    /// The cells of one row, as a client `width` columns wide draws them.
     fn drawn(row: &Row, width: u16, selected: bool) -> Buffer {
         let area = Rect::new(0, 0, width, 1);
         let mut buf = Buffer::empty(area);
@@ -434,7 +446,7 @@ mod tests {
         buf
     }
 
-    /// The text of one drawn line, the styling dropped.
+    /// The text of one drawn row, with the styling dropped.
     fn text(buf: &Buffer, y: u16) -> String {
         (buf.area().left()..buf.area().right())
             .map(|x| buf[(x, y)].symbol())
@@ -467,8 +479,8 @@ mod tests {
 
     #[test]
     fn a_pane_and_an_agent_land_in_the_same_columns() {
-        // Swapping which of a tab's panes runs an agent must not shift the tree,
-        // so the two forms differ only in the icon and the name.
+        // A change in which pane of a tab runs an agent must not shift the
+        // tree. The two forms therefore differ only in the icon and the name.
         let pane_row = row_text(&pane("0", "name", Branch::Last, Placement::Here));
         let agent_row = row_text(&agent("0", "name", Branch::Last, Placement::Here));
         assert_ne!(pane_row, agent_row);
@@ -481,10 +493,10 @@ mod tests {
 
     #[test]
     fn an_icon_takes_the_one_column_it_is_drawn_as() {
-        // The tree is composed by counting characters and drawn by measuring
-        // columns, and the two agree only while these glyphs measure one column.
-        // A glyph that measured two would take the cell after it and shift every
-        // name in the pane one place right.
+        // The tree is composed with a count of characters and drawn with a
+        // measure of columns. The two agree only while these glyphs measure one
+        // column. A glyph of two columns takes the cell after it and shifts
+        // every name in the pane one place right.
         for (content, icon) in [
             (
                 pane("1", "nvim", Branch::Last, Placement::Focused),
@@ -517,8 +529,9 @@ mod tests {
         assert_eq!(buf[(8, 0)].fg, Color::Cyan, "the icon carries the color");
         assert_eq!(buf[(7, 0)].fg, Color::Reset, "the tree stays default");
         assert_eq!(buf[(11, 0)].fg, Color::Reset, "the name stays default");
-        // Dimming is the placement channel and the color the identity one, so an
-        // unfocused agent keeps its icon color rather than trading it for dim.
+        // The dimming is the placement channel and the color is the identity
+        // channel. An unfocused agent therefore keeps its icon color, and the
+        // dimming does not replace it.
         for x in 0..12 {
             assert!(buf[(x, 0)].modifier.contains(Modifier::DIM), "{x}");
         }
@@ -577,8 +590,8 @@ mod tests {
 
     #[test]
     fn a_row_pointing_at_nothing_is_never_the_selected_one() {
-        // Every blank line would otherwise be drawn as the selection whenever
-        // nothing was selected.
+        // Without that rule, every blank row draws as the selection while
+        // nothing is selected.
         let row = Row::new(RowContent::Blank);
         let buf = drawn(&row, 8, true);
         assert!(!buf[(0, 0)].modifier.contains(Modifier::REVERSED));
@@ -638,8 +651,8 @@ mod tests {
 
     #[test]
     fn the_ellipsis_is_drawn_in_the_style_of_what_it_replaces() {
-        // It stands in for the name, so it takes the name's styling rather than
-        // the color riding on the icon two columns before it.
+        // It stands in for the name. It therefore takes the styling of the name
+        // rather than the color that rides on the icon two columns before it.
         let row = Row::new(RowContent::Agent {
             index: "0".to_string(),
             label: "a rather long session label".to_string(),
@@ -679,7 +692,7 @@ mod tests {
     #[test]
     fn the_description_field_leaves_room_for_the_indent_and_the_edge() {
         assert_eq!(notification_body_field(24), 19);
-        // Absurdly narrow panes still yield a field to wrap into.
+        // A very narrow pane still gives a field to wrap into.
         assert_eq!(notification_body_field(2), 1);
     }
 

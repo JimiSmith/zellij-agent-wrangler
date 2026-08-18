@@ -1,18 +1,19 @@
-//! Installing (and removing) the agent lifecycle hooks that call the hook
-//! client.
+//! The installation, and the removal, of the agent lifecycle hooks that call
+//! the hook client.
 //!
-//! The embedded manifest says which of an agent's events maps to which action;
-//! this writes those into the agent's own config with the absolute path of the
-//! running executable, so it works wherever the binary lives. Two config shapes,
-//! chosen by each agent's `format`:
+//! The embedded manifest says which of an agent's events maps to which action.
+//! This module writes those events into the agent's own config. It writes the
+//! absolute path of the executable that runs, so the hooks work wherever the
+//! binary lives. Each agent's `format` selects one of two config shapes:
 //!
-//! - `claude`: a shared `settings.json` holding the user's other keys too. Only
-//!   this project's own hook groups are touched; every other key, the order they
-//!   are in, the file's permissions, and a backup of what was there are kept.
+//! - `claude`: a shared `settings.json` that holds the user's other keys too.
+//!   This module touches only its own hook groups. It keeps every other key,
+//!   the order of the keys, the permissions of the file, and a backup of the
+//!   old content.
 //! - `copilot`: a dedicated file, written whole.
 //!
-//! Re-running install reproduces identical output, so it can be run as often as
-//! liked.
+//! A second run of install writes identical output, so you can run it as often
+//! as you want.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,23 +22,25 @@ use serde_json::{json, Map, Value};
 
 use agent_wrangler_core::command::words;
 
-/// Which of each agent's events call which action, embedded so the installed
-/// binary carries it.
+/// Which of each agent's events call which action. The manifest is embedded, so
+/// the installed binary carries it.
 const MANIFEST_JSON: &str = include_str!("../hooks-manifest.json");
 
 /// The name of the hook client, which is what identifies this project's hook
 /// commands.
 const CLIENT: &str = "agent-wrangler";
 
-/// The name of the client's windowless twin on Windows, which is what the hooks
-/// written there actually run.
+/// The name of the client's windowless twin on Windows. The hooks written on
+/// Windows run this twin.
 const WINDOWLESS: &str = "agent-wranglerw";
 
-/// The suffix of the copy taken before a shared config is rewritten.
+/// The suffix of the copy that this module takes before it rewrites a shared
+/// config.
 const BACKUP: &str = ".agent-wrangler.bak";
 
-/// Quote a string for a POSIX shell: unchanged when every character is safe,
-/// else wrapped in single quotes with embedded quotes escaped.
+/// A string quoted for a POSIX shell. If every character is safe, the string
+/// does not change. If not, single quotes wrap the string and an escape covers
+/// each quote inside it.
 fn shell_quote(text: &str) -> String {
     if text.is_empty() {
         return "''".to_string();
@@ -56,24 +59,26 @@ fn shell_quote(text: &str) -> String {
     }
 }
 
-/// The command a hook runs: this executable's `hook <agent> <action>`.
+/// The command that a hook runs: this executable's `hook <agent> <action>`.
 fn hook_command(exe: &str, agent: &str, action: &str) -> String {
     format!("{} hook {agent} {action}", shell_quote(exe))
 }
 
-/// Whether a program is one of the two this project installs hooks for.
+/// Whether a program is one of the two that this project installs hooks for.
 ///
-/// Either name counts wherever the file is read, because a config written by one
-/// of them is read by both, and an upgrade that stopped recognizing what an
-/// earlier version wrote would add its hooks beside those rather than over them.
+/// Either name counts wherever the code reads the file. Both clients read a
+/// config that either one of them wrote. An upgrade that no longer recognizes
+/// the work of an earlier version adds its hooks beside those hooks, and not
+/// over them.
 ///
-/// A `.exe` is taken off and the comparison ignores case, which is how the name
-/// arrives on the system that has both. Nothing else is stripped: only the
-/// extension Windows puts on the file is not part of what the program is called.
+/// The comparison removes a `.exe` and ignores case, because that is how the
+/// name arrives on the system that has both. It removes nothing else. Only the
+/// extension that Windows puts on the file is not part of the name of the
+/// program.
 ///
-/// Both separators end a path here rather than only the one this is running on,
-/// because what is read is a config file naming a path, and a test of this can
-/// then say what a Windows path does wherever it is run.
+/// Both separators end a path here, and not only the separator of the system
+/// that runs this code. The code reads a config file that names a path. A test
+/// of this function can therefore say what a Windows path does on any system.
 fn is_client(program: &str) -> bool {
     let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
     let bare = match name.rsplit_once('.') {
@@ -83,14 +88,14 @@ fn is_client(program: &str) -> bool {
     bare.eq_ignore_ascii_case(CLIENT) || bare.eq_ignore_ascii_case(WINDOWLESS)
 }
 
-/// Whether a hook command is one this installer owns for `agent`, so that it is
-/// replaced rather than added beside.
+/// Whether a hook command is one that this installer owns for `agent`. The
+/// installer replaces such a command rather than adds another one beside it.
 ///
 /// The command must run one of this project's clients, with `hook` and that
 /// agent as its first two arguments. The test is on the *name of the program
-/// being run* rather than on any word in the line, so a command that merely
-/// mentions a similar name, or runs a similarly named program from somewhere
-/// else, is not claimed.
+/// that runs* and not on any word in the line. The installer therefore does not
+/// claim a command that only mentions a similar name, or that runs a similarly
+/// named program from somewhere else.
 fn is_ours(command: &str, agent: &str) -> bool {
     let words = words(command);
     let [exe, hook, named, ..] = words.as_slice() else {
@@ -102,9 +107,9 @@ fn is_ours(command: &str, agent: &str) -> bool {
     is_client(exe)
 }
 
-/// The `(matcher, actions)` groups one manifest event describes: a list of
-/// action names is one group answering to everything, a list of objects is one
-/// group each.
+/// The `(matcher, actions)` groups that one manifest event describes. A list of
+/// action names is one group that answers to everything. A list of objects is
+/// one group for each object.
 fn groups(value: &Value) -> Vec<(Option<String>, Vec<String>)> {
     let Some(array) = value.as_array() else {
         return Vec::new();
@@ -150,7 +155,8 @@ fn claude_group(matcher: Option<String>, actions: &[String], exe: &str, agent: &
     Value::Object(group)
 }
 
-/// Whether one of claude's hook groups holds a command this installer owns.
+/// Whether one of claude's hook groups holds a command that this installer
+/// owns.
 fn group_is_ours(group: &Value, agent: &str) -> bool {
     group
         .get("hooks")
@@ -166,11 +172,11 @@ fn group_is_ours(group: &Value, agent: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Put this installer's hook groups into a shared settings document, or take
-/// them out again, leaving every other group and key exactly as it was.
+/// Puts this installer's hook groups into a shared settings document, or takes
+/// them out again. Every other group and key stays exactly as it was.
 ///
-/// This is the whole of the merge: it reads and writes nothing, so what it does
-/// to a user's settings can be stated as a value.
+/// This function is the whole of the merge. It reads no file and writes no
+/// file, so its effect on a user's settings is a value.
 pub fn merge(settings: &mut Value, agent: &str, events: &Value, exe: &str, uninstall: bool) {
     let Some(document) = settings.as_object_mut() else {
         return;
@@ -209,8 +215,8 @@ pub fn merge(settings: &mut Value, agent: &str, events: &Value, exe: &str, unins
     };
 }
 
-/// The document written to the file copilot reads, which this installer owns
-/// whole.
+/// The document that this installer writes whole to the file that copilot
+/// reads.
 pub fn copilot_document(agent: &str, events: &Value, exe: &str) -> Value {
     let mut hooks = Map::new();
     for (event, value) in events.as_object().cloned().unwrap_or_default() {
@@ -231,15 +237,16 @@ pub fn copilot_document(agent: &str, events: &Value, exe: &str) -> Value {
     json!({"version": 1, "hooks": hooks})
 }
 
-/// Serialize the way the file is kept: two-space indent and a trailing newline.
+/// The serialization that this module writes: a two-space indent and a newline
+/// at the end.
 fn dumps(value: &Value) -> String {
     let mut text = serde_json::to_string_pretty(value).unwrap_or_default();
     text.push('\n');
     text
 }
 
-/// Expand a leading `~` to the user's home, by whichever name this system gives
-/// it. A path is left as it is when there is no home to expand against.
+/// Expands a leading `~` to the user's home, by whichever name this system
+/// gives it. If there is no home to expand against, the path stays as it is.
 fn expand_user(path: &str) -> PathBuf {
     match path.strip_prefix("~/").zip(crate::paths::home()) {
         Some((rest, home)) => home.join(rest),
@@ -253,11 +260,12 @@ fn parent_dir(path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
-/// Replace a file's contents in one step, by writing a sibling and renaming it
-/// over the target, so a failure part way through leaves the original standing.
+/// Replaces the contents of a file in one step. The function writes a sibling
+/// file and renames it over the target, so a failure part way through leaves
+/// the original file in place.
 ///
-/// Side effect: creates the parent directory, and leaves no temporary file
-/// behind on either path.
+/// Side effect: the function creates the parent directory. It leaves no
+/// temporary file behind on either path.
 fn atomic_write(path: &Path, text: &str, mode: u32) -> std::io::Result<()> {
     fs::create_dir_all(parent_dir(path))?;
     let mut name = std::ffi::OsString::from(format!(".{CLIENT}-tmp-{}-", std::process::id()));
@@ -274,12 +282,12 @@ fn atomic_write(path: &Path, text: &str, mode: u32) -> std::io::Result<()> {
     written
 }
 
-/// Give a file the permissions it is to be written with.
+/// Gives a file the permissions that the write uses.
 ///
-/// A settings file of this kind holds credentials, so on a system with file
-/// modes the mode is set explicitly rather than left to the umask. Windows has
-/// no such mode: a file there inherits the access rules of the directory it is
-/// created in, which is what its own protection rests on.
+/// A settings file of this kind holds credentials. On a system with file modes,
+/// the code sets the mode explicitly and does not leave it to the umask.
+/// Windows has no such mode. A file on Windows inherits the access rules of the
+/// directory that it is created in, and those rules are its protection.
 #[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -291,8 +299,8 @@ fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The permissions a file already has, so rewriting it keeps them. `None` on a
-/// system with no file modes, and for a file that is not there yet.
+/// The permissions that a file already has, so that a rewrite keeps them.
+/// `None` on a system with no file modes, and for a file that is not there yet.
 #[cfg(unix)]
 fn file_mode(path: &Path) -> Option<u32> {
     use std::os::unix::fs::PermissionsExt;
@@ -306,11 +314,13 @@ fn file_mode(_path: &Path) -> Option<u32> {
     None
 }
 
-/// Merge this installer's hooks into the shared settings file an agent reads.
+/// Merges this installer's hooks into the shared settings file that an agent
+/// reads.
 ///
-/// Side effect: copies the file beside itself before rewriting it, and keeps the
-/// permissions it already had. A file that does not exist yet is created
-/// private, since settings of this kind hold credentials.
+/// Side effect: the function copies the file beside itself before the rewrite,
+/// and keeps the permissions that the file already had. The function creates a
+/// file that does not exist yet as a private file, because settings of this
+/// kind hold credentials.
 fn install_shared(agent: &str, spec: &Value, exe: &str, uninstall: bool) -> Result<String, String> {
     let path = expand_user(spec["target"].as_str().unwrap_or_default());
     let mut settings: Value = match fs::read_to_string(&path) {
@@ -344,7 +354,8 @@ fn install_shared(agent: &str, spec: &Value, exe: &str, uninstall: bool) -> Resu
     Ok(format!("{agent}: {verb} {}", path.display()))
 }
 
-/// Write, or delete, the dedicated file this installer owns for an agent.
+/// Writes, or deletes, the dedicated file that this installer owns for an
+/// agent.
 fn install_own(agent: &str, spec: &Value, exe: &str, uninstall: bool) -> Result<String, String> {
     let path = expand_user(spec["target"].as_str().unwrap_or_default());
     if uninstall {
@@ -369,18 +380,20 @@ fn install_agent(agent: &str, spec: &Value, exe: &str, uninstall: bool) -> Resul
     }
 }
 
-/// The client a hook should run, given the path of the one installing it.
+/// The client that a hook must run, from the path of the client that installs
+/// it.
 ///
-/// On Windows that is the windowless twin beside it rather than the file this is
-/// running from. Windows gives a console program whose parent has no console one
-/// of its own and draws a window for it, and the thing that runs a hook is an
-/// agent that is often exactly that, so a hook naming the console client is a
-/// window flashing up once per event.
+/// On Windows that client is the windowless twin beside it, and not the file
+/// that runs this code. Windows gives a console of its own to a console program
+/// whose parent has no console, and draws a window for it. The program that
+/// runs a hook is an agent, and an agent is often exactly such a parent. A hook
+/// that names the console client therefore flashes a window up once for each
+/// event.
 ///
-/// The twin is named beside whichever of the two is running, so installing from
-/// either writes the same path. A client that is somewhere without its twin
-/// names itself: a hook that flashes still reports what the agent did, where one
-/// naming a file that is not there reports nothing at all.
+/// The path of the twin comes from whichever of the two clients runs, so an
+/// install from either one writes the same path. A client without its twin
+/// beside it names itself. A hook that flashes still reports what the agent
+/// did, and a hook that names a file that is not there reports nothing at all.
 #[cfg(windows)]
 fn hook_client(exe: PathBuf) -> PathBuf {
     let twin = exe.with_file_name(format!("{WINDOWLESS}.exe"));
@@ -390,14 +403,15 @@ fn hook_client(exe: PathBuf) -> PathBuf {
     }
 }
 
-/// The client a hook should run, which off Windows is the one installing it:
-/// there is no console to be given, so there is no second client to name.
+/// The client that a hook must run. Off Windows that client is the one that
+/// installs it, because there is no console to give and no second client to
+/// name.
 #[cfg(not(windows))]
 fn hook_client(exe: PathBuf) -> PathBuf {
     exe
 }
 
-/// The path the installed hooks will run.
+/// The path that the installed hooks will run.
 fn exe_path() -> String {
     std::env::current_exe()
         .ok()
@@ -408,7 +422,7 @@ fn exe_path() -> String {
 
 pub const USAGE: &str = "usage: agent-wrangler install-hooks [all|claude|copilot] [--uninstall]";
 
-/// Install, or remove, the hooks for the agents named. Returns what happened,
+/// Installs, or removes, the hooks for the named agents. Returns what happened,
 /// line by line, and whether all of it worked.
 pub fn run(args: &[String]) -> (Vec<String>, bool) {
     let mut selector = "all";
@@ -498,12 +512,12 @@ mod tests {
         let exe = dir.join(format!("{CLIENT}.exe"));
         let twin = dir.join(format!("{WINDOWLESS}.exe"));
 
-        // On its own, a client is the only thing a hook could run.
+        // On its own, a client is the only thing that a hook can run.
         assert_eq!(hook_client(exe.clone()), exe);
 
         fs::write(&twin, "").expect("a twin to find");
         assert_eq!(hook_client(exe.clone()), twin);
-        // Installing from the twin itself writes the same path, so which of the
+        // An install from the twin itself writes the same path. Which of the
         // two ran `install-hooks` cannot change what the hooks say.
         assert_eq!(hook_client(twin.clone()), twin);
 
@@ -512,9 +526,9 @@ mod tests {
 
     #[test]
     fn a_command_this_writes_is_always_one_it_recognises() {
-        // The property the two halves have to agree on: whatever the path, a
-        // freshly written command is claimed on the next run rather than
-        // installed a second time beside itself.
+        // The two halves must agree on one property. Whatever the path, the
+        // next run claims a freshly written command. The next run does not
+        // install the command a second time beside itself.
         for exe in [
             "/home/u/bin/agent-wrangler",
             "/home/my files/agent-wrangler",
@@ -528,9 +542,9 @@ mod tests {
 
     #[test]
     fn either_client_is_recognised_however_windows_names_the_file() {
-        // A settings file written on Windows names the windowless client, with
-        // the extension the system puts on it and in whatever case the path
-        // arrived in. All of it has to read back as ours.
+        // A settings file written on Windows names the windowless client. The
+        // name carries the extension that the system puts on it, and whatever
+        // case the path arrived in. All of it must read back as ours.
         for exe in [
             r"C:\Users\u\AppData\Local\Programs\agent-wrangler\agent-wranglerw.exe",
             r"C:\Users\u\AppData\Local\Programs\agent-wrangler\agent-wrangler.exe",
@@ -602,8 +616,8 @@ mod tests {
         });
         installed(&mut settings);
         assert_eq!(settings["model"], json!("opus"));
-        // Ours is added beside the user's, and an event the manifest says
-        // nothing about is not touched at all.
+        // The merge adds ours beside the user's, and it does not touch an event
+        // that the manifest says nothing about.
         assert_eq!(
             settings["hooks"]["SessionStart"].as_array().unwrap().len(),
             2
@@ -653,8 +667,8 @@ mod tests {
 
     #[test]
     fn an_entry_from_another_path_is_replaced_rather_than_doubled() {
-        // The installed path moves with the binary, and a command left by an
-        // earlier install is still this project's to replace.
+        // The installed path moves with the binary. A command from an earlier
+        // install is still this project's to replace.
         let mut settings = json!({"hooks": {"SessionStart": [
             {"hooks": [{"type": "command",
                         "command": "/home/u/Development/zellij-agent-wrangler/target/debug/agent-wrangler hook claude start"}]}

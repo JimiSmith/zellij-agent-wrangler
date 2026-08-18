@@ -1,18 +1,17 @@
-// The layout `dev.sh` runs the prototype under.
+// The layout that `dev.sh` runs the prototype under.
 //
-// Only the first tab is given a sidebar. A tab without one gets a sidebar from
-// the sidebars already running, the moment the user goes to it, so the tab
-// template carries the tab bar and the status bar exactly as zellij's own
-// default layout does.
+// Only the first tab has a sidebar. If the user goes to a tab without one,
+// that tab gets a sidebar from the sidebars that already run. The tab template
+// therefore carries the tab bar and the status bar, exactly like the default
+// layout of zellij.
 //
-// PLUGIN_LOCATION is substituted for the built wasm's absolute path: a `file:`
-// location is resolved against the session's cwd rather than against this file.
+// PLUGIN_LOCATION takes the absolute path of the built wasm. A `file:` location
+// resolves against the cwd of the session and not against this file.
 //
-// CLIENT_LOCATION is substituted for the built client's absolute path. It has to
-// be a path rather than `on` here: `on` means the client is on `$PATH`, and a
-// development build is not. The sidebar reaches the daemon by running that
-// client, so a name it cannot find means a sidebar that draws no agents at all
-// and says nothing about why.
+// CLIENT_LOCATION takes the absolute path of the built client. The value must be
+// a path and not `on`. `on` means that the client is on `$PATH`, and a
+// development build is not. The sidebar runs that client to reach the daemon. If
+// the sidebar cannot find the name, it draws no agents and gives no reason.
 layout {
     default_tab_template {
         pane size=1 borderless=true {
@@ -21,10 +20,10 @@ layout {
         pane split_direction="vertical" {
             pane size=32 borderless=true {
                 plugin location="PLUGIN_LOCATION" {
-                    // Every option, at its default bar the client's path,
-                    // which has none. Both templates carry the same block: a
-                    // tab opened later is configured by the one it is built
-                    // from.
+                    // Every option, at its default value. The path of the
+                    // client is the exception, because it has no default. Both
+                    // templates carry the same block, because a later tab takes
+                    // its configuration from its own template.
                     label "name"
                     sections false
                     turn_state true
@@ -46,10 +45,10 @@ layout {
         pane split_direction="vertical" {
             pane size=32 borderless=true {
                 plugin location="PLUGIN_LOCATION" {
-                    // Every option, at its default bar the client's path,
-                    // which has none. Both templates carry the same block: a
-                    // tab opened later is configured by the one it is built
-                    // from.
+                    // Every option, at its default value. The path of the
+                    // client is the exception, because it has no default. Both
+                    // templates carry the same block, because a later tab takes
+                    // its configuration from its own template.
                     label "name"
                     sections false
                     turn_state true

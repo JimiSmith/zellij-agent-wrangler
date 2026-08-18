@@ -3,13 +3,13 @@ use std::collections::BTreeMap;
 use agent_wrangler_core::agent::{Agent, SessionId};
 use agent_wrangler_core::registry::Registry;
 
-/// The call each session was last seen answering.
+/// The last call that each session answered.
 ///
-/// A session raises attention once at a time, so only its latest answered
-/// `raised` decides anything: an older one can never come back, and the next
-/// call carries a `raised` this does not hold and so is not suppressed. Keeping
-/// one entry per session bounds this by the sessions the registry holds rather
-/// than by how many times they have called.
+/// A session raises attention once at a time. Only its latest answered
+/// `raised` decides anything. An older `raised` can never come back. The next
+/// call carries a `raised` that this map does not hold, so nothing suppresses
+/// that call. One entry per session limits the size to the number of sessions
+/// in the registry, not to the number of calls.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Answered(BTreeMap<SessionId, u64>);
 

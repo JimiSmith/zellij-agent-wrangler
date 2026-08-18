@@ -1,44 +1,48 @@
-# Install the client, and print the layout block for the plugin that goes with
-# it. The Windows half of install.sh, and the same shape: one program holding the
-# hook the agents invoke, the daemon those hooks feed, and this installer.
-# Nothing starts the daemon here, and nothing downloads the plugin here; zellij
-# fetches that itself from the url in the layout.
+# Install the client. Print the layout block for the plugin that goes with it.
+# This script is the Windows half of install.sh, with the same shape. One program
+# holds the hook that the agents invoke, the daemon that those hooks feed, and
+# this installer. This script does not start the daemon. This script does not
+# download the plugin. Zellij fetches the plugin itself from the url in the
+# layout.
 #
-# That program is installed twice, as agent-wrangler.exe and agent-wranglerw.exe.
-# They are the same build differing in one thing: the second is linked so that
-# Windows never gives it a console, and so never draws a window for it when
-# something that has no console of its own runs it. That is what the agents and
-# the zellij server do, so it is the second that the hooks and the layout name,
-# and the first that is left for running by hand.
+# The script installs that program twice, as agent-wrangler.exe and as
+# agent-wranglerw.exe. Both files come from the same build, with one difference.
+# The link of the second file tells Windows to give it no console. A program
+# without a console of its own can run the second file, and Windows draws no
+# window. The agents and the zellij server are such programs, so the hooks and
+# the layout name the second file. The first file remains for a run by hand.
 #
 #   irm https://raw.githubusercontent.com/JimiSmith/zellij-agent-wrangler/main/install.ps1 | iex
 #
-# A piped script takes no arguments. To pass one, run it as a script block:
+# A piped script takes no arguments. To pass an argument, run the script as a
+# script block:
 #
 #   & ([scriptblock]::Create((irm <url>))) -Version v0.1.12 -AddToPath
 [CmdletBinding()]
 param(
-    # The release to install. The latest one when this is not given.
+    # The release to install. Without this parameter, the script takes the
+    # latest release.
     [string]$Version,
 
-    # Where the client goes. Under Programs rather than beside the user's own
-    # scripts because this is a downloaded binary rather than something they
-    # wrote, and it is a path with no space in it on an ordinary account, which
-    # is what the hook commands written into the agents' configs are quoted for.
+    # The directory for the client. The client goes under Programs and not
+    # beside the scripts of the user. The client is a downloaded binary and not
+    # a file that the user wrote. On an ordinary account this path holds no
+    # space. The quotes around the hook commands in the configs of the agents
+    # cover a path with a space.
     [string]$Bin = $(if ($env:AGENT_WRANGLER_BIN) { $env:AGENT_WRANGLER_BIN }
                      elseif ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Programs\agent-wrangler' }
                      else { Join-Path $env:USERPROFILE '.local\bin' }),
 
-    # Put $Bin on the user's PATH as well. Off by default: the sidebar is told
-    # the client's whole path and never needs PATH, so this only buys running
-    # `agent-wrangler agents` by name from a shell, and it edits the environment
-    # every later process inherits.
+    # Put $Bin on the PATH of the user as well. The default is off. The sidebar
+    # gets the whole path of the client and never needs PATH. With this switch,
+    # you can run `agent-wrangler agents` by name in a shell. The switch also
+    # edits the environment that every later process inherits.
     [switch]$AddToPath
 )
 
 $ErrorActionPreference = 'Stop'
-# Invoke-WebRequest draws a progress bar per chunk in Windows PowerShell, which
-# costs more than the download does.
+# Invoke-WebRequest draws a progress bar for each chunk in Windows PowerShell.
+# That bar costs more than the download.
 $ProgressPreference = 'SilentlyContinue'
 
 $repo = 'JimiSmith/zellij-agent-wrangler'
@@ -47,33 +51,34 @@ if ($PSVersionTable.PSVersion.Major -lt 5) {
     throw "this needs PowerShell 5 or later; this is $($PSVersionTable.PSVersion)."
 }
 
-# Windows PowerShell defaults to protocols github stopped answering on. Adding
-# to what is already there rather than replacing it leaves a session that has
-# already been configured alone.
+# Windows PowerShell defaults to protocols that github no longer answers on.
+# This code adds to the current value and does not replace it. A session with
+# its own configuration stays as it is.
 try {
     [Net.ServicePointManager]::SecurityProtocol =
         [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 } catch {
-    # PowerShell 7 negotiates this itself and the type may not be settable.
+    # PowerShell 7 negotiates this itself, and the type can be read-only.
 }
 
-# PROCESSOR_ARCHITECTURE is the architecture of *this process*, so a 32-bit
-# PowerShell on a 64-bit machine says x86; PROCESSOR_ARCHITEW6432 is what the
-# machine actually is, and is only set when the two differ.
+# PROCESSOR_ARCHITECTURE holds the architecture of *this process*. A 32-bit
+# PowerShell on a 64-bit machine therefore reports x86. PROCESSOR_ARCHITEW6432
+# holds the architecture of the machine. It is set only for a difference between
+# the two.
 $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
 switch ($arch) {
     'AMD64' { $target = 'x86_64-pc-windows-msvc' }
-    # No arm64 client is released. Windows on arm runs the x64 one under
-    # emulation, which for a program that reads the process table and talks to a
-    # named pipe costs nothing worth a second build.
+    # There is no released arm64 client. Windows on arm runs the x64 client
+    # under emulation. This program reads the process table and talks to a named
+    # pipe, so the emulation costs too little for a second build.
     'ARM64' { $target = 'x86_64-pc-windows-msvc' }
     default {
         throw "no released client for $arch. build one: cargo build --release -p agent-wrangler"
     }
 }
 
-# `gh` is used where it is there, because it is also what reaches a private
-# repository; the api is the fallback for a machine without it.
+# This script uses `gh` where `gh` is present, because `gh` also reaches a
+# private repository. On a machine without `gh`, the api is the fallback.
 $gh = (Get-Command gh -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
 
 if (-not $Version) {
@@ -97,15 +102,16 @@ $quiet = Join-Path $Bin 'agent-wranglerw.exe'
 
 # One released file into one installed name.
 #
-# Downloaded beside the real one and moved over it, never written to it: a
-# download that dies halfway leaves nothing behind that could be run.
+# The download goes beside the real file. A move then puts it in place. This
+# function never writes to the real file. A download that stops halfway
+# therefore leaves nothing to run.
 #
-# Moving over it is also the only way there is on Windows. A running image
-# cannot be deleted or overwritten - the daemon this is replacing is very likely
-# running from that exact file - but it can be renamed, so the old one is moved
-# aside first and the new one put in the name it left. What is running goes on
-# running from the file it started as, under its new name, and the next run gets
-# the new build whole.
+# A move is also the only way on Windows. Windows cannot delete or overwrite a
+# running image, and the daemon under replacement very probably runs from that
+# exact file. Windows can rename a running image. The function therefore moves
+# the old file aside and puts the new file in the name of the old one. The
+# program that runs continues from its own file under the new name. The next run
+# gets the whole new build.
 function Install-Binary {
     param(
         [Parameter(Mandatory)][string]$Asset,
@@ -122,10 +128,10 @@ function Install-Binary {
             Invoke-WebRequest -UseBasicParsing -OutFile $temp `
                 -Uri "https://github.com/$repo/releases/download/$Version/$Asset"
         }
-        # A file fetched from the internet carries a zone marker, and a marked
-        # executable is what SmartScreen stops. Cleared here rather than left for
-        # the user, because the thing that runs it is a hook inside an agent's
-        # turn, where a blocked run is a row that never appears and says nothing.
+        # A file from the internet carries a zone marker, and SmartScreen stops
+        # a marked executable. This script clears the marker and does not leave
+        # it to the user. A hook inside the turn of an agent runs the file. A
+        # blocked run there gives a row that never appears, with no message.
         Unblock-File -LiteralPath $temp
 
         $aside = $null
@@ -144,15 +150,16 @@ function Install-Binary {
     }
 }
 
-# Both, or neither worth having: the hooks and the layout name the windowless
-# one, so installing the console one alone leaves every hook naming a file that
-# is not there.
+# Install both files, or neither. The hooks and the layout name the windowless
+# file. An install of the console file alone leaves every hook with the name of
+# a file that is absent.
 Install-Binary -Asset $client -Path $exe
 Install-Binary -Asset $windowless -Path $quiet
 
-# Every version moved aside, this run's and any left by an earlier one. The one
-# a daemon is still running from refuses to go and is left for the next install,
-# by which time that daemon has been restarted by a hook running the new build.
+# This command removes every file that a run moved aside, from this run and from
+# an earlier run. A file that a daemon still runs from refuses to go, and it
+# stays for the next install. By that time a hook started the daemon again from
+# the new build.
 Get-ChildItem -LiteralPath $Bin -Filter '.agent-wrangler*.old.*.exe' -Force -ErrorAction SilentlyContinue |
     ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
 
@@ -160,15 +167,16 @@ Get-ChildItem -LiteralPath $Bin -Filter '.agent-wrangler*.old.*.exe' -Force -Err
 if ($LASTEXITCODE -ne 0) { throw 'the hooks could not be installed.' }
 
 if ($AddToPath) {
-    # The user's own PATH, not the machine's: this installs for one user, and
-    # writing the machine's would need an elevated shell to do it.
+    # This code writes the PATH of the user and not the PATH of the machine.
+    # The install is for one user. A write to the PATH of the machine needs an
+    # elevated shell.
     $user = [Environment]::GetEnvironmentVariable('Path', 'User')
     $entries = @($user -split ';' | Where-Object { $_ })
     if ($entries -notcontains $Bin) {
         [Environment]::SetEnvironmentVariable('Path', (@($entries) + $Bin) -join ';', 'User')
-        # The change reaches processes started after it, which is not this
-        # session; setting it here as well means the lines below can be run
-        # without opening another shell.
+        # The change reaches the processes that start after it, and this
+        # session is not one of them. This line sets the value here as well, so
+        # the commands below can run without another shell.
         $env:Path = "$env:Path;$Bin"
         $path = "$Bin was added to your PATH. Shells already open still have the old one."
     } else {
@@ -180,19 +188,18 @@ full path. Run this again with -AddToPath to put it on, or leave it: nothing but
 you looks there, and the sidebar is told the path outright."
 }
 
-# The block names the client outright, always. The sidebar reaches the daemon by
-# running it, and left to itself it looks on PATH - but the one that matters is
-# the zellij server's, inherited from whatever started zellij, which is not
-# necessarily the shell this script is running in.
+# The block always names the client in full. The sidebar runs the client to
+# reach the daemon. Without a path, the sidebar looks on PATH. The PATH that
+# matters belongs to the zellij server, which took it from the program that
+# started zellij. That program is not always the shell of this script.
 #
-# It names the windowless one, because the server running it is the very case
-# that draws a console window: the sidebar runs the client once for every tab it
-# opens, and the server it is running under has no console for a child to be
-# given.
+# The block names the windowless file, because a run under the server is the
+# exact case that draws a console window. The sidebar runs the client once for
+# every tab that it opens, and the server above it has no console for a child.
 #
-# The path is written with its separators doubled: what the block goes into is
-# KDL, where a quoted string takes backslash escapes, so a Windows path put in
-# raw is a path with `\U` and `\a` in it rather than the one this just installed.
+# The path carries doubled separators. The block goes into KDL, where a quoted
+# string takes backslash escapes. A raw Windows path there becomes a path with
+# `\U` and `\a` in it, and not the path of this install.
 $url = "https://github.com/$repo/releases/download/$Version/$wasm"
 $kdl = $quiet -replace '\\', '\\'
 $block = @"

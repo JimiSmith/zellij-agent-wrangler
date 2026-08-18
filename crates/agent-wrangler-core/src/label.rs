@@ -1,17 +1,17 @@
-//! What a session is called, spelled out of the facts a record carries.
+//! What a session is called, spelled from the facts that a record carries.
 //!
-//! A record holds what a session is known by rather than the text naming it, so
-//! the spelling happens here and not where the facts are gathered. That is what
-//! lets the same session be named the same way by everything that mentions it,
-//! whether it is drawing a row or announcing a call.
+//! A record holds the facts that a session is known by, not the text that names
+//! it. This module spells the name. The code that collects the facts does not.
+//! Everything that mentions a session therefore names it the same way, both a
+//! drawn row and an announced call.
 
 use crate::agent::Agent;
 
 /// What a session is called by.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Label {
-    /// The title the session gave itself, falling back to its directory until
-    /// it has one.
+    /// The title that the session gave itself. A session with no title falls
+    /// back to its directory.
     #[default]
     Name,
     /// The working directory, whatever the session calls itself.
@@ -19,7 +19,8 @@ pub enum Label {
 }
 
 impl Label {
-    /// The mode a written value asks for, or `None` for a word that names none.
+    /// The mode that a written value asks for, or `None` for a word that names
+    /// no mode.
     pub fn read(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "name" => Some(Label::Name),
@@ -29,11 +30,11 @@ impl Label {
     }
 }
 
-/// What this session is called, spelled the way `mode` asks for.
+/// What this session is called, spelled the way that `mode` asks for.
 ///
-/// A teammate leads with its own name, so it is never mistaken for a session of
-/// its own. An untitled session falls back to where it is working, and one that
-/// cannot say even that falls back to what it is.
+/// A teammate leads with its own name, so nothing mistakes it for a session of
+/// its own. An untitled session falls back to the directory where it works. A
+/// session that cannot say even that falls back to what it is.
 pub fn label(agent: &Agent, mode: Label) -> String {
     let dir = match agent.meta.dir.is_empty() {
         true => agent.agent.as_str(),
@@ -80,7 +81,7 @@ mod tests {
         let teammate = labelled("wrangler", "scout", "reading the source");
         assert_eq!(label(&teammate, Label::Name), "@scout - reading the source");
         assert_eq!(label(&teammate, Label::Dir), "@scout - wrangler");
-        // A teammate with nothing to say for itself is still told apart from a
+        // A teammate that says nothing for itself is still told apart from a
         // session of its own.
         assert_eq!(
             label(&labelled("wrangler", "scout", ""), Label::Name),

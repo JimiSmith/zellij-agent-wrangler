@@ -1,9 +1,11 @@
-//! Building a client's rows from the session's tabs and their panes.
+//! How the rows of a client are built from the tabs of the session and their
+//! panes.
 //!
-//! The input is the session as a client cares about it: tabs in the order
-//! they are drawn, each with the panes it shows, already filtered and ordered.
-//! What is derived here is everything that follows from a thing's *position*:
-//! its placement, its branch, and the index it is labelled with.
+//! The input is the session as a client cares about it. The input holds the
+//! tabs in the order they are drawn. Each tab holds the panes it shows, already
+//! filtered and ordered. What is derived here is everything that follows from
+//! the *position* of a thing: its placement, its branch, and the index it is
+//! labeled with.
 
 use agent_wrangler_core::agent::{Agent, Turn};
 use agent_wrangler_core::label::label;
@@ -13,8 +15,8 @@ use crate::model::{
 };
 use crate::options::View;
 
-/// The marker an agent's row carries at its right edge, which is nothing at all
-/// when the client has been asked not to say whose turn it is.
+/// The marker the row of an agent carries at its right edge. If the client is
+/// asked not to say whose turn it is, the marker is nothing at all.
 fn indicator(agent: &Agent, options: &View) -> Indicator {
     match (options.turn_state, agent.turn) {
         (false, _) | (_, Turn::Idle) => Indicator::None,
@@ -41,20 +43,20 @@ fn agent_row(
     .with(indicator(agent, options))
 }
 
-/// A pane, and the agent sessions running in it.
+/// A pane, and the agent sessions that run in it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pane {
     pub id: PaneId,
     pub title: String,
     pub focused: bool,
-    /// The agents this pane hosts. A pane hosting agents is drawn as them
-    /// instead of as itself: the agent is what the user is looking for, and the
-    /// pane it happens to be in is not a second thing to point at.
+    /// The agents this pane hosts. A pane with agents is drawn as those agents
+    /// instead of as itself. The user looks for the agent, and the pane the
+    /// agent is in is not a second thing to point at.
     pub agents: Vec<Agent>,
 }
 
 impl Pane {
-    /// A pane hosting nothing, which is how every pane starts out.
+    /// A pane that hosts nothing, which is how every pane starts.
     pub fn new(id: impl Into<PaneId>, title: &str, focused: bool) -> Self {
         Pane {
             id: id.into(),
@@ -70,14 +72,14 @@ impl Pane {
 pub struct Tab {
     /// The tab's own stable identity.
     pub id: TabId,
-    /// The tab's current position, which orders and labels its row.
+    /// The current position of the tab, which orders and labels its row.
     pub position: TabPosition,
     pub name: String,
     pub active: bool,
     pub panes: Vec<Pane>,
 }
 
-/// Where a tab's own row sits: the active tab is one of the two rows carrying
+/// Where a tab's own row sits: the active tab is one of the two rows that carry
 /// the gutter, and any other tab recedes whole.
 fn tab_placement(active: bool) -> Placement {
     if active {
@@ -87,9 +89,10 @@ fn tab_placement(active: bool) -> Placement {
     }
 }
 
-/// Where a pane's row sits: the other gutter row is the pane focused in the
-/// active tab. A pane of a tab you are not in is `Unfocused` whether or not that
-/// tab would restore you to it, because a tab you are not in recedes as a block.
+/// Where the row of a pane sits: the other gutter row is the pane focused in the
+/// active tab. A pane of a tab you are not in is always `Unfocused`. That pane
+/// can be the pane the tab restores you to, or not. A tab you are not in recedes
+/// as a block.
 fn pane_placement(tab_active: bool, focused: bool) -> Placement {
     match (tab_active, focused) {
         (false, _) => Placement::Unfocused,
@@ -98,10 +101,11 @@ fn pane_placement(tab_active: bool, focused: bool) -> Placement {
     }
 }
 
-/// One row hanging off a tab: a pane, or one of the agents running in a pane.
+/// One row that hangs off a tab: a pane, or one of the agents that run in a
+/// pane.
 ///
-/// A pane contributes itself only when it hosts no agent, so the children of a
-/// tab are what the user can actually point at, numbered in one sequence.
+/// A pane that hosts no agent contributes itself. The children of a tab are
+/// therefore what the user can point at, numbered in one sequence.
 enum Child<'a> {
     Pane(&'a Pane),
     Agent(&'a Pane, &'a Agent),
@@ -133,7 +137,8 @@ fn window_row(tab: &Tab) -> Row {
     })
 }
 
-/// The branch a child at `position` carries, given the position of the last one.
+/// The branch a child at `position` carries, with `last` as the position of the
+/// last child.
 fn branch_at(position: usize, last: usize) -> Branch {
     if position == last {
         Branch::Last
@@ -160,8 +165,8 @@ fn tab_rows(tab: &Tab, options: &View) -> Vec<Row> {
                 color: None,
             })
             .at(RowKey::Pane(pane.id.clone())),
-            // An agent's placement is its pane's: the agent is where the pane
-            // is, and pointing at it takes you to that pane.
+            // An agent takes the placement of its pane. The agent is where the
+            // pane is, and the row takes you to that pane.
             Child::Agent(pane, agent) => agent_row(
                 agent,
                 index,
@@ -175,7 +180,7 @@ fn tab_rows(tab: &Tab, options: &View) -> Vec<Row> {
     rows
 }
 
-/// Every agent a session is running, in the order their blocks are drawn.
+/// Every agent a session runs, in the order their blocks are drawn.
 fn kinds(tabs: &[Tab]) -> Vec<&str> {
     let mut kinds: Vec<&str> = tabs
         .iter()
@@ -188,12 +193,12 @@ fn kinds(tabs: &[Tab]) -> Vec<&str> {
     kinds
 }
 
-/// One agent's block: the same sessions the tree holds, gathered under the tabs
-/// they are in and with everything else left out.
+/// The block of one agent: the same sessions the tree holds, gathered under the
+/// tabs they are in and with everything else left out.
 ///
-/// A tab's row appears here as a heading for the sessions beneath it and points
-/// at nothing: the tab itself is one row up in the tree, and one thing worth
-/// selecting twice would be two rows the selection has to tell apart.
+/// The row of a tab appears here as a heading for the sessions under it, and it
+/// points at nothing. The tab itself is one row up in the tree, and two rows for
+/// one thing are two rows the selection must tell apart.
 fn kind_rows(tabs: &[Tab], kind: &str, options: &View) -> Vec<Row> {
     let mut rows = vec![Row::new(RowContent::Header {
         text: kind.to_string(),
@@ -229,9 +234,9 @@ fn kind_rows(tabs: &[Tab], kind: &str, options: &View) -> Vec<Row> {
 /// The rows a client draws, in the order they are drawn and navigated.
 ///
 /// In sections mode the same sessions are drawn twice, once where they are and
-/// once under what they are, so both blocks carry a heading saying which is
-/// which. Grouping is all the option changes: a tab, a pane and an agent are
-/// drawn exactly the same wherever they appear.
+/// once under what they are. Both blocks therefore carry a heading that says
+/// which is which. The option changes the grouping and nothing else: a tab, a
+/// pane and an agent are drawn the same wherever they appear.
 pub fn build_tree(tabs: &[Tab], options: &View) -> Vec<Row> {
     let tree = tabs.iter().flat_map(|tab| tab_rows(tab, options));
     if !options.sections {
@@ -263,9 +268,9 @@ mod tests {
         running(pane, "claude", labels)
     }
 
-    /// The agents a pane hosts are handed to it here, so where a record says it
-    /// was raised is nothing this has to answer for: a tree is built from panes
-    /// that already hold their agents.
+    /// The agents a pane hosts are handed to it here. The place a record names
+    /// as its origin is nothing this helper answers for. A tree is built from
+    /// panes that already hold their agents.
     fn running(mut pane: Pane, kind: &str, labels: &[&str]) -> Pane {
         pane.agents = labels
             .iter()
@@ -599,9 +604,10 @@ mod tests {
 
     #[test]
     fn a_session_drawn_twice_is_drawn_the_same_both_times() {
-        // The option groups and nothing else. What differs is what position
-        // means: a session is the second child of its tab and the first of its
-        // block, and its index says where it is in the list it is drawn in.
+        // The option changes the grouping and nothing else. What differs is the
+        // meaning of position. A session is the second child of its tab and the
+        // first of its block. Its index says where it is in the list it is drawn
+        // in.
         let rows = sections(&sectioned());
         let (tree_row, section_row) = (&rows[3], &rows[8]);
         let same = |row: &Row| match &row.content {

@@ -1,4 +1,5 @@
-//! Reconcile multiplexer reports into the tree's session vocabulary.
+//! Reconciliation of multiplexer reports into the session vocabulary of the
+//! tree.
 
 use agent_wrangler_ui::model::{PaneId, TabPosition};
 use agent_wrangler_ui::tree::{Pane, Tab};
@@ -43,24 +44,25 @@ pub fn position_of(tabs: &[TabReport], id: &TabId) -> Option<TabPosition> {
         .map(|tab| tab.position)
 }
 
-/// Whether the tab report and the session layout describe the same moment.
+/// Tells whether the tab report and the session layout describe the same
+/// moment.
 ///
-/// The two arrive as separate events, so one can already describe a topology
-/// the other has not seen. Position is the only key a pane report offers, and a
-/// position names a different tab either side of a tab opening or closing:
-/// joining a stable id from one report with a pane from the other then produces
-/// a pair that never existed, and every validation of it agrees, since both
-/// halves of the pair are checked against the same stale layout.
+/// The two reports arrive as separate events. One report can describe a
+/// topology that the other did not see. Position is the only key that a pane
+/// report offers. A position names a different tab on each side of a tab that
+/// opens or closes. A stable id from one report and a pane from the other then
+/// make a pair that never existed. Every check of that pair agrees, because
+/// both halves of the pair go against the same stale layout.
 ///
-/// Every tab is listed in both reports, so a position in one and not the other
-/// says the two cannot be joined, and where the user is waits for a pair that
-/// can be. Rows do not wait: each is drawn from what its own report holds, so a
-/// row under the wrong tab is corrected by the report that follows, where an
-/// effect taken meanwhile would not be.
+/// Both reports list every tab. A position in one report and not in the other
+/// shows that the two cannot join. The position of the user waits for a pair
+/// that can join. Rows do not wait. Each row comes from its own report. The
+/// next report corrects a row under the wrong tab. The next report cannot
+/// correct an effect that ran in the meantime.
 ///
-/// A reordering that leaves the same positions occupied is not visible here.
-/// Nothing in a position-keyed pane report tells one arrangement of the same
-/// tabs from another.
+/// A reorder that leaves the same positions occupied is not visible here. A
+/// position-keyed pane report cannot tell one arrangement of the same tabs
+/// from another.
 pub fn coherent(tabs: &[TabReport], layout: &SessionLayout) -> bool {
     tabs.len() == layout.tabs.len()
         && tabs.iter().all(|tab| {
@@ -323,11 +325,11 @@ mod tests {
             tab: TabId::new("mine"),
             target: FocusTarget::Sidebar,
         };
-        // A tab has closed and the pane report has not caught up; a tab has
-        // opened and it has not caught up; as many tabs are reported as are
-        // listed but not at the same positions. Every check of such a pair
-        // passes on its own: the tab is reported, and the layout at its
-        // position holds a sidebar.
+        // A tab closed and the pane report did not catch up. A tab opened and
+        // the pane report did not catch up. The number of tabs agrees, but the
+        // positions do not. Every check of such a pair passes on its own. The
+        // report holds the tab, and the layout at the position of that tab
+        // holds a sidebar.
         for reports in [
             vec![tab("mine", 0)],
             vec![tab("mine", 0), tab("second", 1), tab("third", 2)],
@@ -336,9 +338,9 @@ mod tests {
             assert!(!coherent(&reports, &layout()));
             let resolved = observed(&reports, &layout(), &focus);
             assert_eq!(resolved.focus, ReconciledFocus::Pending);
-            // The tabs are still listed, since a row is drawn from the reports
-            // rather than from where the user is. It is only the gutter that
-            // waits, and only for as long as the two disagree.
+            // The tabs stay in the list, because each row comes from the
+            // reports and not from the position of the user. Only the gutter
+            // waits, and it waits only while the two reports disagree.
             assert_eq!(resolved.tabs.len(), reports.len());
             assert!(resolved.tabs.iter().all(|tab| !tab.active));
         }

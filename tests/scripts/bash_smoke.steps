@@ -1,5 +1,6 @@
-# Proves the pty driver against a program that needs no zellij: a bash shell.
-# Drives a prompt, an echo, and a line drawn in reverse video, then dumps.
+# This test proves the pty driver against a program that needs no zellij: a
+# bash shell. The test drives a prompt, an echo, and a line in reverse video.
+# The test then dumps the screen.
 
 env: PS1=rig>
 spawn: bash --noprofile --norc -i
@@ -9,9 +10,9 @@ wait: rig>
 keys: echo he$(echo ll)o\r
 wait: hello
 
-# A reverse video bar, which is the attribute the sidebar's selection uses.
-# `\\033` reaches bash as a literal backslash-zero-three-three for printf to
-# expand, rather than as an escape key press into the line editor.
+# A reverse video bar. The selection of the sidebar uses this attribute.
+# `\\033` reaches bash as a literal backslash-zero-three-three, which printf
+# expands. It does not reach bash as an escape key press into the line editor.
 keys: printf '\\033[7mBAR\\033[0m\\n'\r
 wait: BAR
 

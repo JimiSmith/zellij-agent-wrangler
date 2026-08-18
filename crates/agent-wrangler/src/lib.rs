@@ -1,14 +1,14 @@
-//! The one binary: the hook an agent invokes, the daemon those hooks feed, and
-//! the installer that wires the two together.
+//! The one binary: the hook that an agent invokes, the daemon that those hooks
+//! feed, and the installer that wires the two together.
 //!
-//! A hook runs inside the agent's own turn, so nothing on that path is allowed
-//! to fail loudly or to take long: it says what it saw and exits, and reading
-//! files is the daemon's. The only non-zero exit is a missing argument, which is
-//! a misconfiguration no event could describe.
+//! A hook runs inside the turn of the agent, so nothing on that path can fail
+//! loudly or take long. The hook says what it saw and then exits, and the daemon
+//! reads the files. The only non-zero exit is a missing argument, which is a
+//! misconfiguration that no event describes.
 //!
-//! Every subcommand is entered through [`run`], which is what makes this a
-//! library: the program can then be linked twice under two names, differing in
-//! how it is linked and in nothing it does.
+//! Every subcommand starts in [`run`], which is what makes this crate a library.
+//! The program links twice under two names. The two names differ in how they
+//! link and in nothing that they do.
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -26,15 +26,15 @@ mod proto;
 
 use proto::{Hook, Inbound, Sink};
 
-/// The most ancestry levels climbed looking for the agent that invoked a hook.
+/// The largest number of ancestry levels that the search for the agent climbs.
 ///
-/// A hook is invoked through a shell, sometimes two, and the agent is above
-/// those. Eight is far more than any of that and still stops long before the
-/// root of a deep process tree.
+/// A shell invokes a hook, sometimes two shells do, and the agent sits above
+/// them. Eight is far more than any of that, and eight still stops long before
+/// the root of a deep process tree.
 const HOPS: u32 = 8;
 
-/// Milliseconds since the epoch, which is what orders one call for the user
-/// against another. Read here because this process sees each call exactly once.
+/// The milliseconds since the epoch, which order one call for the user against
+/// another. This process reads the clock, because it sees each call once.
 pub(crate) fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -48,27 +48,27 @@ fn read_stdin() -> String {
     body
 }
 
-/// The process of the agent that invoked this hook, found by climbing to the
-/// nearest ancestor running that agent.
+/// The process of the agent that invoked this hook. The search climbs to the
+/// nearest ancestor that runs that agent.
 ///
-/// Side effect: reads the machine's process table. `None` when the agent is not
-/// in this process's ancestry at all, which is a record nothing can later check
-/// the liveness of.
+/// Side effect: this function reads the process table of the machine. When the
+/// agent is not in the ancestry of this process at all, the answer is `None`.
+/// Nothing can check the liveness of such a record later.
 fn agent_process(agent: &str) -> Option<Process> {
     let table = platform::processes();
     platform::agent_running(std::process::id(), agent, &table, HOPS)
 }
 
-/// Report one event to the daemon.
+/// Reports one event to the daemon.
 ///
-/// Side effect: reads the environment and the process table, and starts a daemon
-/// if none is running. Failure is silent by design: an agent's turn is not the
-/// place to report that a sidebar could not be told something.
+/// Side effect: this function reads the environment and the process table. If no
+/// daemon runs, this function starts one. A failure is silent by design. The
+/// turn of an agent is not the place to report that a sidebar heard nothing.
 fn hook(agent: &str, event: &str) {
     let origin = Origin::capture();
-    // A process in no multiplexer this knows about is in nothing that could draw
-    // it. Reporting it would fill the daemon with sessions nothing will ever ask
-    // for.
+    // A process in no multiplexer that this program knows about is in nothing
+    // that draws it. A report of that process fills the daemon with sessions
+    // that nobody ever asks for.
     if origin.is_empty() {
         return;
     }
@@ -93,7 +93,7 @@ fn hook(agent: &str, event: &str) {
     let _ = client::tell(&message);
 }
 
-/// The sink a client names for itself on the command line.
+/// The sink that a client names for itself on the command line.
 fn sink(kind: &str, id: &str) -> Option<Sink> {
     match kind {
         "zellij" => Some(Sink::Zellij {
@@ -106,13 +106,13 @@ fn sink(kind: &str, id: &str) -> Option<Sink> {
     }
 }
 
-/// What a registering client says a call should be announced with: everything
-/// after `--notify`, as the words to run.
+/// What a client that registers announces a call with: everything after
+/// `--notify`, as the words to run.
 ///
-/// The words arrive already separated rather than as one line to be split,
-/// because whoever wrote them has already had to decide where a program's path
-/// ends and its arguments begin. Nothing after a `--notify` that is not there
-/// is nothing to announce with.
+/// The words arrive already separate, and not as one line to split. The author
+/// of the words already decided where the path of the program ends and where its
+/// arguments begin. An absent `--notify`, and an empty run of words after it,
+/// both announce nothing.
 fn notify(args: &[String]) -> Vec<String> {
     match args.first().map(String::as_str) {
         Some("--notify") => args[1..].to_vec(),
@@ -129,7 +129,7 @@ const USAGE: &str = "usage: agent-wrangler hook <agent> <start|end|working|needs
        agent-wrangler install-hooks [all|claude|copilot] [--uninstall]
        agent-wrangler --version";
 
-/// Do what the command line asks for, and say how it went.
+/// Does what the command line asks for, and reports the outcome.
 pub fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -171,15 +171,17 @@ pub fn run() -> ExitCode {
             });
             ExitCode::SUCCESS
         }
-        // What the daemon does, a record to a line, for as long as this runs.
-        // For the questions a snapshot cannot answer: how often the state goes
-        // out, what sent it out, and how long each client took to reach.
+        // What the daemon does, one record to a line, for as long as this
+        // subcommand runs. It answers three questions that a snapshot cannot.
+        // How often does the state go out? What sent it out? How long did each
+        // client take to reach?
         Some("monitor") => {
             let mut out = std::io::stdout().lock();
             match client::watch(&mut out) {
                 Ok(()) => ExitCode::SUCCESS,
-                // A pipe that has gone is the ordinary way this ends: the reader
-                // was a `head`, or a pager the user left.
+                // A pipe that went away is the ordinary end of this
+                // subcommand. The reader was a `head`, or a pager that the
+                // user left.
                 Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("agent-wrangler monitor: {error}");
@@ -187,8 +189,8 @@ pub fn run() -> ExitCode {
                 }
             }
         }
-        // What the daemon holds, as it would send it. For looking at what is
-        // there when a row is not what was expected.
+        // What the daemon holds, in the form that it sends. When a row is not
+        // the expected one, this subcommand shows the true state.
         Some("agents") => match client::ask() {
             Ok(records) => {
                 println!("{records}");
@@ -199,8 +201,9 @@ pub fn run() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        // The record format is printed beside the version because it, not the
-        // version, is what has to match at both ends of the wire.
+        // This subcommand prints the record format beside the version. The
+        // record format, and not the version, must match at both ends of the
+        // wire.
         Some("--version") | Some("-V") => {
             println!(
                 "agent-wrangler {} (record format {FORMAT})",

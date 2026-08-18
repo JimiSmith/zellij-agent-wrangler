@@ -1,7 +1,8 @@
 """Unit tests for the terminal emulator in screen.py.
 
-Each case is a byte string with a known result, so the emulator can be trusted
-before it is pointed at anything as noisy as zellij. Run with:
+Each case is a byte string with a known result. The emulator is therefore
+trustworthy before it reads output as noisy as the output of zellij. Run the
+tests with this command:
 
     python3 -m unittest discover -s tests -v
 """
@@ -162,8 +163,8 @@ class TestRedraw(unittest.TestCase):
         second = b"\x1b[H\x1b[2J two \r\n\x1b[7m three \x1b[0m"
         screen = replay(first + second, rows=3, cols=20)
         self.assertEqual(screen.text(), [" two", " three", ""])
-        # The reverse video bar moved with the frame rather than accumulating:
-        # exactly one styled run survives, and it is on the second row.
+        # The reverse video bar moved with the frame and did not accumulate.
+        # Exactly one styled run survives, and it is on the second row.
         runs = screen.runs()
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0].row, 1)
@@ -175,8 +176,9 @@ class TestRedraw(unittest.TestCase):
         self.assertFalse(screen.sgr_of("plain").reverse)
 
     def test_two_reverse_bars_are_visible_as_two_runs(self):
-        # The failure this emulator exists to catch: more than one row drawn
-        # with the selection bar's reverse video at the same time.
+        # This emulator exists to catch one failure. That failure draws more
+        # than one row with the reverse video of the selection bar at the same
+        # time.
         data = b"\x1b[1;1H\x1b[7mrow one\x1b[0m\x1b[3;1H\x1b[7mrow three\x1b[0m"
         reverse = [run for run in replay(data).runs() if run.sgr.reverse]
         self.assertEqual([(run.row, run.text) for run in reverse],
@@ -193,7 +195,7 @@ class TestUnhandled(unittest.TestCase):
         screen = replay(b"\x1b[42Zvisible")
         self.assertEqual(screen.unhandled, 1)
         self.assertIn("CSI 42 Z", screen.unhandled_summary())
-        # Recovery matters as much as the count: the text after the unknown
+        # Recovery matters as much as the count. The text after the unknown
         # sequence still lands on the grid.
         self.assertEqual(screen.line(0), "visible")
 

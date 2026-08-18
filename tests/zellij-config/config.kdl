@@ -1,15 +1,15 @@
-// The zellij configuration test runs use, pointed at by ZELLIJ_CONFIG_DIR.
+// The zellij configuration that test runs use. ZELLIJ_CONFIG_DIR points at it.
 //
-// Its existence is the point: with no config file at all zellij opens its
-// first run setup wizard, which swallows the screen and every keystroke a test
-// tries to send. Stock keybindings are kept, so <C-q> quits and <C-p> enters
-// pane mode exactly as the documentation says.
+// The existence of this file is the point. With no configuration file at all,
+// zellij opens its first run setup wizard. The wizard swallows the screen and
+// every keystroke that a test sends. This file keeps the stock keybindings, so
+// <C-q> quits and <C-p> enters pane mode exactly as the documentation says.
 //
-// The developer's own configuration is deliberately not used: a test must not
+// A test run does not use the configuration of the developer. A test must not
 // change its result because someone rebound a key or picked a different theme.
 
-// The startup tip and release note panes open over the layout and would be the
-// first thing every dump caught.
+// The startup tip pane and the release note pane open over the layout. Every
+// dump then catches these panes first.
 show_startup_tips false
 show_release_notes false
 

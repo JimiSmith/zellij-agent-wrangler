@@ -1,20 +1,21 @@
 //! Where an agent reported itself from, as its own environment described it.
 //!
-//! The variables are captured verbatim and never read for meaning here. What
-//! `ZELLIJ_PANE_ID` or `TMUX_PANE` points at is known only to the thing drawing
-//! that multiplexer, so this carries the strings and lets it decide.
+//! The variables are captured word for word and never read for meaning here.
+//! Only the code that draws a multiplexer knows what `ZELLIJ_PANE_ID` or
+//! `TMUX_PANE` points at. This module carries the strings and lets that code
+//! decide.
 //!
 //! Only the variables in [`LOCATION_VARS`] are kept. An agent's environment
-//! holds credentials and a great deal else that is nobody's business; taking a
-//! named few is what keeps this a location rather than a copy of the process.
+//! holds credentials and much more that is nobody's business. A named few
+//! variables keep this a location rather than a copy of the process.
 
 use std::collections::BTreeMap;
 
 /// The variables that say which multiplexer a process is in, and where.
 ///
-/// The order is part of the wire format, because a captured set is written as
-/// its values in this order and nothing else. A new variable may be appended; a
-/// reordering silently moves every value to the wrong name.
+/// The order is part of the wire format. A captured set is written as its values
+/// in this order and nothing else. You can append a new variable. A change to
+/// the order moves every value to the wrong name, without a warning.
 pub const LOCATION_VARS: &[&str] = &[
     "ZELLIJ",
     "ZELLIJ_SESSION_NAME",
@@ -29,18 +30,18 @@ const UNIT: char = '\u{1f}';
 
 /// What one process's environment said about where it is.
 ///
-/// The run is always as long as the table, so one built any of the three ways
-/// compares equal to the same one built another way.
+/// The run is always as long as the table. An origin built one of the three ways
+/// compares equal to the same origin built another way.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Origin {
-    /// One entry per [`LOCATION_VARS`] name, in that order. Empty means the
-    /// variable was not set, which is how a process outside every multiplexer
-    /// this knows describes itself.
+    /// One value per [`LOCATION_VARS`] name, in that order. An empty value means
+    /// that the variable was not set. A process outside every multiplexer that
+    /// this module knows describes itself that way.
     values: Vec<String>,
 }
 
-/// Replace anything that would split the run, or the record it sits in, with a
-/// space. A location value cannot legitimately hold one of these.
+/// Replace with a space every character that can split the run or the record.
+/// A location value never holds such a character.
 fn clean(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -56,8 +57,9 @@ impl Default for Origin {
 impl Origin {
     /// What the current process's environment says about where it is.
     ///
-    /// Side effect: reads the environment. A hook runs as a descendant of the
-    /// pane it belongs to, so these are that pane's variables.
+    /// Side effect: this function reads the environment. A hook runs as a
+    /// descendant of the pane that it belongs to, so these variables are that
+    /// pane's variables.
     pub fn capture() -> Self {
         Origin::from(|name| std::env::var(name).ok())
     }
@@ -82,14 +84,14 @@ impl Origin {
         }
     }
 
-    /// Whether nothing was captured, which says the process was in no
-    /// multiplexer this knows about.
+    /// Whether nothing was captured. An empty origin says that the process was
+    /// in no multiplexer that this module knows about.
     pub fn is_empty(&self) -> bool {
         self.values.iter().all(String::is_empty)
     }
 
-    /// Every captured variable by name, for saying what was seen rather than
-    /// for deciding anything.
+    /// Every captured variable by name. This is a report of what was seen, not
+    /// a basis for a decision.
     pub fn named(&self) -> BTreeMap<&str, &str> {
         LOCATION_VARS
             .iter()
@@ -104,9 +106,9 @@ impl Origin {
 
     /// Read back what `encode` wrote.
     ///
-    /// A run shorter than the table is padded and a longer one is cut, so a
-    /// record written where the table had a different length is read for the
-    /// names both ends agree on rather than refused.
+    /// A run shorter than the table is padded, and a longer one is cut. A record
+    /// written when the table had a different length is read for the names that
+    /// both ends agree on, and is not refused.
     pub fn decode(text: &str) -> Self {
         let mut values: Vec<String> = match text.is_empty() {
             true => Vec::new(),

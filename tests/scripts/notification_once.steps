@@ -1,16 +1,17 @@
-# One call for the user raises one desktop notification, however many sidebars
-# are holding that call, and a flurry of calls raises one between them.
+# One call for the user raises one desktop notification. The number of sidebars
+# that hold the call makes no difference. A flurry of calls raises one
+# notification between them.
 #
-# A second tab is opened so that the session has two sidebars, since a sidebar
-# raising its own notification is only visible as a count: both of them draw the
-# same row and say the same words, and the difference is how many times the
-# notifier ran.
+# The test opens a second tab, so that the session has two sidebars. A sidebar
+# that raises its own notification is visible only as a count. Both sidebars
+# draw the same row and say the same words. The difference is the number of runs
+# of the notifier.
 #
-# The notifier writes a line to a file instead of reaching the desktop, so the
-# run stays silent and countable. The calls are reported from the host naming a
-# pane rather than typed into one, because what is being counted has nothing to
-# do with where the agent is: the daemon is what announces, and it has never
-# heard of panes.
+# The notifier writes a line to a file and does not reach the desktop, so the
+# run stays silent and countable. The test reports the calls from the host and
+# names a pane, rather than types the calls into a pane. The count has nothing
+# to do with where the agent is. The daemon is what announces, and the daemon
+# knows nothing of panes.
 
 env: ZELLIJ_CONFIG_DIR=$PWD/tests/zellij-config
 env: TERM=xterm-256color
@@ -28,8 +29,8 @@ spawn: zellij --session wrangler-test-notify --new-session-with-layout tests/out
 
 wait: notes @ 25
 
-# A second tab, built from the same template and so carrying a sidebar of its
-# own. Ctrl-t is the stock tab mode and n opens one.
+# A second tab, from the same template, with a sidebar of its own. Ctrl-t is
+# the stock tab mode, and n opens a tab.
 keys: <C-t>
 keys: n
 sleep: 2
@@ -42,24 +43,24 @@ sleep: 2
 # One call, two sidebars, one notification.
 sh: tests/scripts/expect-raised.sh 1
 
-# A call arriving while the last one is still recent is not a second
-# interruption. The daemon is freshly started by the reset above, so the call
-# before this one is what began the quiet rather than anything an earlier run
-# left behind.
+# If a call arrives while the last call is still recent, the call is not a
+# second interruption. The reset above started the daemon fresh, so the call
+# before this one began the quiet. Nothing that an earlier run left behind began
+# the quiet.
 sh: tests/scripts/raise-call.sh notify-one wrangler-test-notify 1 needsAttention
 sleep: 2
 sh: tests/scripts/expect-raised.sh 1
 
-# Once the quiet has run out, a call is announced again, so what the count
-# measures is calls and not a notifier that only ever runs once. The wait is
-# from the call that was announced: one passed over does not put the next one
-# further off.
+# After the quiet runs out, the daemon announces a call again. The count
+# therefore measures calls, and not a notifier that runs only one time. The wait
+# starts from the call that the daemon announced. A call that the daemon passed
+# over does not put the next call further off.
 sleep: 5
 sh: tests/scripts/raise-call.sh notify-one wrangler-test-notify 1 needsAttention
 sleep: 2
 sh: tests/scripts/expect-raised.sh 2
 
-# An agent going back to work is not something to announce.
+# An agent that goes back to work is not something to announce.
 sh: tests/scripts/raise-call.sh notify-one wrangler-test-notify 1 working
 sleep: 2
 sh: tests/scripts/expect-raised.sh 2

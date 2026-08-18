@@ -1,9 +1,9 @@
-//! Every agent session known about, newest state per session.
+//! Every agent session known about, with the newest state of each session.
 //!
-//! A record says everything there is to say about a session, so one can be
-//! picked up from whichever of its events is heard first. What a record leaves
-//! blank is not a withdrawal: an empty field keeps whatever is already known,
-//! which is what lets a report carry only what it could find at the time.
+//! A record says everything there is to say about a session. The registry can
+//! pick a session up from whichever of its events it hears first. A blank field
+//! withdraws nothing. An empty field keeps whatever the registry already knows,
+//! so a report can carry only what it found at the time.
 
 use std::collections::BTreeMap;
 
@@ -15,11 +15,11 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// File an agent announcing itself, keeping whose turn it already was.
+    /// Store an agent that announces itself, and keep whose turn it already was.
     ///
     /// An agent announces itself again whenever its own session restarts under
-    /// it, which says nothing new about the turn it is in the middle of. `true`
-    /// when this changed anything.
+    /// it. That announcement says nothing new about the turn in progress. If
+    /// this changed anything, the result is `true`.
     pub fn start(&mut self, mut agent: Agent) -> bool {
         if let Some(known) = self.sessions.get(&agent.session) {
             agent.turn = known.turn;
@@ -28,17 +28,17 @@ impl Registry {
         self.merge(agent)
     }
 
-    /// File what an agent reported of itself mid-session, whose turn it is
+    /// Store what an agent reported of itself mid-session, whose turn it is
     /// included.
     pub fn report(&mut self, agent: Agent) -> bool {
         self.merge(agent)
     }
 
-    /// File a record, keeping whatever it leaves blank that is already known.
+    /// Store a record, and keep every blank field that is already known.
     ///
-    /// A title that could not be found this time is not a title withdrawn, and
-    /// a color written once and since scrolled out of reach is still the color
-    /// of that session. `true` when this changed anything.
+    /// A title that the scan did not find this time is not a withdrawn title. A
+    /// color written once, and since scrolled out of reach, is still the color
+    /// of that session. If this changed anything, the result is `true`.
     fn merge(&mut self, mut agent: Agent) -> bool {
         if let Some(known) = self.sessions.get(&agent.session) {
             for (fresh, held) in [
@@ -52,8 +52,8 @@ impl Registry {
                 }
             }
             // Where an agent is, and what process it is, are found the same way
-            // every time, so a record that says neither was written by something
-            // that could not look rather than by an agent that has moved.
+            // every time. A record that says neither came from something that
+            // failed to look, not from an agent that moved.
             if agent.origin.is_empty() {
                 agent.origin = known.origin.clone();
             }
@@ -64,7 +64,8 @@ impl Registry {
         self.sessions.insert(agent.session.clone(), agent.clone()) != Some(agent)
     }
 
-    /// Drop an agent's session. `true` when there was one to drop.
+    /// Drop an agent's session. If there was a session to drop, the result is
+    /// `true`.
     pub fn end(&mut self, session: &SessionId) -> bool {
         self.sessions.remove(session).is_some()
     }
@@ -80,11 +81,11 @@ impl Registry {
         calling
     }
 
-    /// Answer one session that was asking for the user.
+    /// Answer one session that asked for the user.
     ///
-    /// Attention is a fact about an agent the user has not got to yet, so
-    /// arriving at it is what settles it. Which arrival counts is not decided
-    /// here: only whatever is drawing the session knows where the user is.
+    /// Attention is a fact about an agent that the user did not reach yet. The
+    /// arrival of the user settles it. Which arrival counts is not decided here.
+    /// Only the code that draws the session knows where the user is.
     pub fn seen(&mut self, session: &SessionId) -> bool {
         match self.sessions.get_mut(session) {
             Some(agent) if agent.turn == Turn::Attention => {
@@ -117,13 +118,14 @@ impl Registry {
             .join(&RECORD.to_string())
     }
 
-    /// Become exactly the run of records `encode` wrote, dropping every session
-    /// it does not mention. `true` when this changed anything.
+    /// Become exactly the run of records that `encode` wrote, and drop every
+    /// session that the run does not mention. If this changed anything, the
+    /// result is `true`.
     ///
-    /// This is for a whole statement of what there is, where [`absorb`] is for
-    /// news to add to what is already held: a session the sender no longer has
-    /// is a session that has ended, and keeping it would leave a row nothing
-    /// will ever take away.
+    /// This is for a whole statement of what there is. [`absorb`] is for news to
+    /// add to what the registry already holds. A session that the sender no
+    /// longer has is a session that ended. To keep it leaves a row that nothing
+    /// ever takes away.
     ///
     /// [`absorb`]: Registry::absorb
     pub fn adopt(&mut self, text: &str) -> bool {
@@ -138,9 +140,9 @@ impl Registry {
         changed
     }
 
-    /// Take in every record of a run `encode` wrote, turns included, keeping
-    /// what is already known about a session the run does not mention. `true`
-    /// when this changed anything.
+    /// Take in every record of a run that `encode` wrote, turns included. Keep
+    /// what is already known about a session that the run does not mention. If
+    /// this changed anything, the result is `true`.
     pub fn absorb(&mut self, text: &str) -> bool {
         let mut changed = false;
         for line in text.split(RECORD) {
@@ -197,12 +199,12 @@ mod tests {
     #[test]
     fn a_record_written_in_another_format_says_which_one() {
         // The two ends of the wire are installed separately, so one can be
-        // older than the other, and a record it wrote is not a line to pass
-        // over in silence.
+        // older than the other. A record that the older end wrote is not a line
+        // to pass over in silence.
         let record = agent("one", 3).encode();
         let older = record.replacen(&FORMAT.to_string(), "0", 1);
         assert_eq!(Agent::decode(&older), Record::Foreign(0));
-        // Absorbing takes nothing from a format it does not know.
+        // The registry takes nothing from a format that it does not know.
         let mut registry = Registry::default();
         assert!(!registry.absorb(&older));
     }
@@ -212,14 +214,14 @@ mod tests {
         let mut registry = Registry::default();
         assert!(registry.report(reporting("one", 3, Turn::Working, 0)));
         assert_eq!(registry.get(&session("one")).unwrap().turn, Turn::Working);
-        // Saying the same thing twice is not a change.
+        // The same report twice is not a change.
         assert!(!registry.report(reporting("one", 3, Turn::Working, 0)));
     }
 
     #[test]
     fn announcing_a_session_again_leaves_its_turn_alone() {
-        // An agent re-registers whenever its own session restarts under it,
-        // which says nothing about the turn it is in the middle of.
+        // An agent registers again whenever its own session restarts under it.
+        // That says nothing about the turn in progress.
         let mut registry = Registry::default();
         registry.start(agent("one", 3));
         registry.report(reporting("one", 3, Turn::Working, 0));
@@ -243,11 +245,11 @@ mod tests {
 
     #[test]
     fn a_color_found_once_outlives_the_window_it_was_found_in() {
-        // A session records its color as it begins, and only a fixed window
-        // over the end of the transcript is read, so the color scrolls out of
-        // sight as the session runs. It is held here rather than looked for
-        // again: the session keeps the color it was given, and only a record
-        // that names a different one changes it.
+        // A session records its color as it begins. Only a fixed window over
+        // the end of the transcript is read, so the color scrolls out of sight
+        // as the session runs. The registry holds the color, and nothing looks
+        // for it again. The session keeps the color it was given, and only a
+        // record that names a different color changes it.
         let mut registry = Registry::default();
         registry.start(colored("one", "red"));
         registry.report(reporting("one", 1, Turn::Working, 0));
@@ -289,7 +291,7 @@ mod tests {
         registry.report(reporting("two", 9, Turn::Attention, 0));
         assert!(registry.seen(&session("one")));
         assert_eq!(registry.get(&session("one")).unwrap().turn, Turn::Idle);
-        // Every other session is still asking.
+        // Every other session still asks.
         assert_eq!(registry.get(&session("two")).unwrap().turn, Turn::Attention);
     }
 
@@ -299,7 +301,7 @@ mod tests {
         for (id, at) in [("one", 10), ("two", 30), ("three", 20)] {
             registry.report(reporting(id, 1, Turn::Attention, at));
         }
-        // An agent that is not calling is not listed at all.
+        // An agent that does not call is not listed at all.
         registry.start(agent("quiet", 1));
         let calling: Vec<&str> = registry
             .calling()
@@ -320,12 +322,13 @@ mod tests {
 
     #[test]
     fn arriving_at_a_session_that_is_working_leaves_it_alone() {
-        // Only a call for the user is answered by turning up; work carries on.
+        // The arrival of the user answers only a call for the user. Work
+        // carries on.
         let mut registry = Registry::default();
         registry.report(reporting("one", 3, Turn::Working, 0));
         assert!(!registry.seen(&session("one")));
         assert_eq!(registry.get(&session("one")).unwrap().turn, Turn::Working);
-        // A session nobody has heard of is nothing to answer.
+        // A session that nobody knows of is nothing to answer.
         assert!(!registry.seen(&session("gone")));
     }
 

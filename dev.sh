@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# Build the plugin and open a zellij session whose every tab carries it.
+# Build the plugin and open a zellij session with the plugin in every tab.
 #
-# A session loads the wasm once and holds it, so an existing `wrangler-proto` is
-# killed rather than attached to: attaching would silently run the build before
-# last. Anything else in that session goes with it.
+# This script kills an existing `wrangler-proto` session. Everything else in
+# that session stops with it. A session loads the wasm once and holds it, so an
+# attach runs the build before the last one, and it gives no message.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# The plugin is built optimized. Drawing a frame is what a session with many
-# tabs pays on every event, and unoptimized that is ten times the work: a
-# prototype slow enough to be mistaken for one that is drawing the wrong thing.
+# The build of the plugin is optimized. A session with many tabs draws a frame
+# on every event. An unoptimized build makes that work ten times larger. The
+# prototype is then slow enough to look like a prototype that draws the wrong
+# thing.
 wasm="$root/target/wasm32-wasip1/dev-wasm/zellij-agent-wrangler.wasm"
 
 cargo build --manifest-path "$root/Cargo.toml" --target wasm32-wasip1 \
@@ -19,9 +20,9 @@ cargo build --manifest-path "$root/Cargo.toml" -p agent-wrangler
 client="$root/target/debug/agent-wrangler"
 echo "client: $client"
 
-# A daemon already running is one built before this build, and it is the daemon
-# every hook and every sidebar will reach. Stopping it leaves the next event to
-# start the one that was just built.
+# A daemon that already runs comes from an earlier build, and every hook and
+# every sidebar reaches that daemon. This command stops it. The next event then
+# starts the daemon from this build.
 ps -e -o pid=,args= | grep -F "$client daemon" | grep -v grep |
     awk '{print $1}' | xargs -r kill 2>/dev/null || true
 
@@ -31,6 +32,6 @@ sed -e "s#PLUGIN_LOCATION#file:$wasm#" \
 
 zellij delete-session wrangler-proto --force >/dev/null 2>&1 || true
 
-# `--session` alone with `--layout` attaches instead of creating, so the layout
-# rides in on the flag that always starts a new session.
+# `--session` with `--layout` attaches and creates nothing. The layout
+# therefore comes in on the flag that always starts a new session.
 exec zellij --session wrangler-proto --new-session-with-layout "$layout"

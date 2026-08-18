@@ -1,20 +1,21 @@
-//! Saying a call for the user out loud.
+//! This module announces one call to the user.
 //!
-//! Running the notifier is waited for rather than left to run on its own. It is
-//! a program that prints nothing and exits, and waiting is what reaps it: a
-//! notification abandoned as it starts would leave a dead child behind, once per
-//! call, for as long as this runs.
+//! This module waits for the notifier, and does not leave it to run on its own.
+//! The notifier is a program that prints nothing and then exits. The wait reaps
+//! it. A notification abandoned at its start leaves a dead child behind, once
+//! per call, for as long as this process runs.
 //!
-//! Two things bound what the notifier costs. It is run at most once every
-//! [`QUIET`], because agents call in bursts and a burst is one interruption
-//! rather than several. And it is run with the calling agent's location rather
-//! than with this process's, because a notifier that reaches back into a
-//! multiplexer has to be told which session, and this process's own environment
-//! is not an answer to that.
+//! Two limits bound the cost of the notifier. First, the notifier runs at most
+//! once every [`QUIET`], because agents call in bursts, and a burst is one
+//! interruption rather than several. Second, the notifier runs with the
+//! location of the agent that called, and not with the location of this
+//! process. A notifier that reaches back into a multiplexer must know which
+//! session to speak to. The environment of this process is not an answer to
+//! that question.
 //!
-//! The waiting is bounded as well, because a notifier is somebody else's
-//! program and one that never exits would otherwise hold the thread that served
-//! the hook for as long as the daemon runs.
+//! The wait is bounded as well. Somebody else writes the notifier. A notifier
+//! that never exits holds the thread that served the hook, for as long as the
+//! daemon runs.
 
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -25,40 +26,41 @@ use agent_wrangler_core::origin::LOCATION_VARS;
 use crate::daemon::state::Call;
 use crate::platform::{command, ran, Ran};
 
-/// How long the notifier is left alone after a call has been said out loud.
+/// The time after one announcement in which this module announces nothing.
 ///
-/// A notification is an interruption, and interruptions do not add up: an agent
-/// that asks twice while the user is away from the machine has asked once as
-/// far as the user is concerned. Agents also call in flurries - one finishing
-/// as another stops for permission - and each notification is a process, and
-/// for some notifiers a message back into the multiplexer, so a flurry
-/// announced call by call costs far more than it tells anyone.
+/// A notification is an interruption, and interruptions do not add up. An agent
+/// that asks twice while the user is away from the machine asked once, as far
+/// as the user is concerned. Agents also call in flurries. One agent finishes
+/// while another agent stops for permission. Each notification is a process,
+/// and for some notifiers it is also a message back into the multiplexer. A
+/// flurry announced call by call costs far more than it tells anyone.
 ///
-/// Nothing here decides what a call does to what is held or to what is
-/// delivered. Only the saying out loud is passed over.
+/// This limit changes nothing about the state that the daemon holds or
+/// delivers. It passes over only the announcement.
 const QUIET: Duration = Duration::from_secs(5);
 
-/// How long a notifier is given to finish before it is killed.
+/// The time that a notifier gets to finish. After this time the daemon kills it.
 ///
-/// The quiet is what sets it. Nothing else is announced inside [`QUIET`]
-/// anyway, so bounding the wait by it means a notifier that never exits is one
-/// of it at a time rather than one more per call, whether the count is of
-/// processes left in the table or of threads waiting on them.
+/// [`QUIET`] sets this time. The daemon announces nothing else inside [`QUIET`]
+/// anyway. A wait bounded by [`QUIET`] therefore holds at most one notifier
+/// that never exits at a time, rather than one more per call. The count is the
+/// same for the processes left in the table and for the threads that wait on
+/// them.
 const PATIENCE: Duration = QUIET;
 
-/// When a call was last said out loud, which is the whole of what keeps a run
-/// of calls from being a run of notifications.
+/// The moment of the last announcement, which is the whole of what turns a run
+/// of calls into one notification.
 #[derive(Debug, Default)]
 pub struct Announced {
     last: Option<Instant>,
 }
 
 impl Announced {
-    /// Whether a call arriving at `now` is one to say out loud, taking the
-    /// moment if it is.
+    /// Whether the daemon announces a call that arrives at `now`. If the
+    /// answer is yes, this method keeps `now` as the last announcement.
     ///
-    /// The moment is passed in rather than read here, so that what this does
-    /// can be said in a test without waiting [`QUIET`] to find out.
+    /// The caller passes the moment in, and this method reads no clock. A test
+    /// can then check this behavior without a wait of [`QUIET`].
     pub fn worth_saying(&mut self, now: Instant) -> bool {
         if let Some(last) = self.last {
             if now.duration_since(last) < QUIET {
@@ -70,12 +72,13 @@ impl Announced {
     }
 }
 
-/// What the notifier should see for every location variable there is: the
-/// call's own value, or nothing at all for one the call carries nothing for.
+/// What the notifier must see for every location variable. The notifier sees
+/// the value of the call. For a variable that the call carries no value for,
+/// the notifier sees nothing at all.
 ///
-/// Every name is decided rather than only the ones the call knows about, which
-/// is the whole of the rule: a variable left undecided is one the notifier
-/// reads off whatever this process is carrying.
+/// This function decides every name, and not only the names that the call knows
+/// about. That rule is the whole point. The notifier reads an undecided
+/// variable off the environment of this process.
 fn where_it_is(call: &Call) -> Vec<(&'static str, Option<&str>)> {
     let named = call.origin.named();
     LOCATION_VARS
@@ -84,20 +87,22 @@ fn where_it_is(call: &Call) -> Vec<(&'static str, Option<&str>)> {
         .collect()
 }
 
-/// Announce one call with one notifier, and say whether it ran.
+/// Announces one call with one notifier, and reports whether the notifier ran.
 ///
-/// Side effect: runs the program the notifier names, with the agent and what it
-/// is called as the last two arguments, which is the shape `notify-send` and
-/// its like take. It is given no input and its output is discarded; the exit
-/// status is the whole of what is read back, and it is killed if it has not
-/// finished within [`PATIENCE`].
+/// Side effect: this function runs the program that the notifier names. The
+/// agent and the label of the call are the last two arguments, which is the
+/// shape that `notify-send` and similar programs take. The program gets no
+/// input, and this function discards its output. The exit status is the whole
+/// of the answer. If the program does not finish within [`PATIENCE`], this
+/// function kills it.
 ///
-/// Side effect: every name in [`LOCATION_VARS`] is set on that program from the
-/// call's own origin, and cleared where the call carries nothing for it. So the
-/// notifier reads where the agent that called is, and never what this process
-/// happens to have inherited: a notifier that speaks to a multiplexer reads
-/// exactly these variables to know which session to speak to, and this
-/// process's are not that agent's.
+/// Side effect: this function sets every name in [`LOCATION_VARS`] on that
+/// program from the origin of the call. For a name that the call carries no
+/// value for, this function clears the variable. The notifier then reads the
+/// location of the agent that called, and never a value that this process
+/// inherited. A notifier that speaks to a multiplexer reads exactly these
+/// variables to find the session. The variables of this process are not the
+/// variables of that agent.
 pub fn raise(notifier: &Notifier, call: &Call) -> bool {
     let mut announce = command(notifier.program());
     announce.args(notifier.arguments(&call.agent, &call.label));
@@ -114,7 +119,7 @@ pub fn raise(notifier: &Notifier, call: &Call) -> bool {
     match ran(&mut announce, PATIENCE) {
         Ran::Worked => true,
         Ran::Failed => false,
-        // The user was told, whatever the program went on to do about exiting.
+        // The user heard the call, whatever the program then did about its exit.
         Ran::Abandoned => true,
     }
 }
@@ -142,8 +147,8 @@ mod tests {
         assert!(!raise(&missing, &call()));
     }
 
-    /// A notifier that exits successfully only if the two arguments it is
-    /// handed last are exactly `test`, whatever they hold.
+    /// A notifier that tests its last two arguments. If those arguments are
+    /// exactly `test`, whatever they hold, the notifier exits with success.
     #[cfg(unix)]
     fn expecting(agent: &str, label: &str) -> Notifier {
         Notifier::new(vec![
@@ -158,14 +163,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_agent_and_what_it_is_called_arrive_last_and_whole() {
-        // The body holds a space, so a notifier receiving it as two arguments
-        // rather than one is the failure this catches.
+        // The body holds a space. This test catches a notifier that gets the
+        // body as two arguments rather than as one.
         assert!(raise(&expecting("claude", "the port"), &call()));
         assert!(!raise(&expecting("claude", "the"), &call()));
     }
 
-    /// A notifier that exits successfully only if one named variable holds
-    /// exactly this, where a variable that is not set reads as empty.
+    /// A notifier that tests one named variable. If that variable holds
+    /// exactly this value, the notifier exits with success. An unset variable
+    /// reads as empty.
     #[cfg(unix)]
     fn reading(name: &str, value: &str) -> Notifier {
         Notifier::new(vec![
@@ -185,8 +191,8 @@ mod tests {
             told.get("ZELLIJ_SESSION_NAME"),
             Some(&Some("wrangler-proto"))
         );
-        // A variable the call says nothing about is cleared rather than left
-        // standing: a stale pane id is as wrong as a stale session name.
+        // This module clears a variable that the call says nothing about. A
+        // stale pane id is as wrong as a stale session name.
         assert_eq!(told.get("ZELLIJ_PANE_ID"), Some(&None));
         assert_eq!(
             told.len(),
@@ -198,8 +204,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_location_reaches_the_program_that_is_run() {
-        // What is asserted comes from the call rather than from this process's
-        // environment, so the test says nothing about where it is run.
+        // The asserted value comes from the call, and not from the environment
+        // of this process. The test therefore holds wherever it runs.
         assert!(raise(
             &reading("ZELLIJ_SESSION_NAME", "wrangler-proto"),
             &call()
@@ -218,9 +224,9 @@ mod tests {
 
     #[test]
     fn the_quiet_runs_from_what_was_said_rather_than_from_what_was_passed_over() {
-        // Otherwise an agent calling faster than the quiet is an agent that is
-        // never announced at all: every call passed over would put the next one
-        // further off.
+        // An agent that calls faster than the quiet still gets one
+        // announcement. Otherwise each call passed over moves the next
+        // announcement further off, and the daemon announces nothing at all.
         let mut announced = Announced::default();
         let began = Instant::now();
         assert!(announced.worth_saying(began));
@@ -232,15 +238,15 @@ mod tests {
 
     #[test]
     fn a_notifier_that_never_exits_is_one_of_it_at_a_time() {
-        // What the bound is for: the next call cannot be announced sooner than
-        // the quiet, so a notifier that hangs is waited out before another is
-        // ever started.
+        // The reason for the bound. The daemon cannot announce the next call
+        // sooner than the quiet. A notifier that hangs therefore ends before
+        // the daemon starts another one.
         assert!(PATIENCE <= QUIET);
     }
 
     #[test]
     fn the_first_call_of_all_is_said_at_once() {
-        // Nothing has been said, so there is no quiet to be inside of.
+        // The daemon announced nothing, so there is no quiet to be inside of.
         assert!(Announced::default().worth_saying(Instant::now()));
     }
 }

@@ -1,25 +1,26 @@
 """An ANSI terminal emulator that keeps enough state to assert on.
 
-The sidebar plugin's output only exists as escape sequences on a terminal, so a
-test cannot read it back without replaying those sequences into a grid. This
-module is that grid: every cell remembers both its character and the SGR
-attributes that were active when it was drawn, because several of the plugin's
-behaviours (the selection bar, an agent's status colour) are carried entirely in
-attributes and are invisible in the text alone.
+The output of the sidebar plugin exists only as escape sequences on a terminal.
+A test must replay those sequences into a grid to read the output back. This
+module is that grid. Every cell holds its character and the SGR attributes that
+were active at the moment of the draw. Attributes alone carry several behaviors
+of the plugin, such as the selection bar and the status color of an agent. The
+text alone does not show them.
 
-Fidelity is deliberately partial. Sequences that do not move the cursor or
-change a cell are recorded and skipped rather than emulated, and anything the
-parser does not recognise is counted in `unhandled` so a test can notice that
-the emulator has fallen behind what the program under test actually emits.
+Fidelity is partial by design. This module records and skips the sequences that
+do not move the cursor and do not change a cell. It does not emulate them. It
+counts every sequence that the parser does not recognize in `unhandled`. A test
+can therefore see that the emulator fell behind the output of the program under
+test.
 """
 
 import codecs
 import json
 from dataclasses import dataclass, replace
 
-# Sequences that reach a real terminal but leave the visible grid alone. They
-# are skipped without being counted as unhandled, so `unhandled` stays a useful
-# signal instead of being drowned by zellij's start-up mode setting.
+# Sequences that reach a real terminal but leave the visible grid alone. This
+# module skips them and does not count them as unhandled. `unhandled` stays a
+# useful signal, and the start-up mode settings of zellij do not drown it.
 _IGNORED_CSI_FINALS = frozenset("hlnctqrpx")
 
 _DEFAULT_ROWS = 24
@@ -29,12 +30,12 @@ _TAB_WIDTH = 8
 
 @dataclass(frozen=True)
 class Sgr:
-    """The character attributes active on a cell.
+    """The character attributes that are active on a cell.
 
-    `fg` and `bg` hold the whole colour introducer as written, so `(31,)` is
-    plain red and `(38, 5, 9)` is palette index 9. Keeping the parameters rather
-    than a resolved colour means a test asserts on what the program emitted,
-    which is what a rendering bug actually changes.
+    `fg` and `bg` hold the whole color introducer as written, so `(31,)` is
+    plain red and `(38, 5, 9)` is palette index 9. These fields hold the
+    parameters and not a resolved color. A test therefore asserts on the output
+    of the program, which is what a bug in the render changes.
     """
 
     fg: tuple = None
@@ -49,7 +50,7 @@ class Sgr:
         return self == DEFAULT_SGR
 
     def params(self):
-        """The SGR parameters that would reproduce this state from a reset."""
+        """The SGR parameters that reproduce this state from a reset."""
         out = []
         if self.bold:
             out.append(1)
@@ -68,7 +69,7 @@ class Sgr:
         return out
 
     def as_dict(self):
-        """A JSON-friendly view, carrying only the attributes that are set."""
+        """A JSON-friendly view with only the attributes that are set."""
         out = {}
         if self.fg is not None:
             out["fg"] = list(self.fg)
@@ -94,7 +95,7 @@ BLANK = Cell()
 
 @dataclass(frozen=True)
 class Run:
-    """A stretch of cells on one row sharing a single set of attributes."""
+    """A stretch of cells on one row with a single set of attributes."""
 
     row: int
     col: int
@@ -115,13 +116,13 @@ class Screen:
         self.rows = rows
         self.cols = cols
         self.unhandled = 0
-        # Keyed by a short description of the sequence, so a test that trips the
-        # counter can report which sequence it was rather than only how many.
+        # The key is a short description of the sequence. A test that trips the
+        # counter can then report the sequence and not only the count.
         self.unhandled_seen = {}
-        # Answers owed to the program under test for queries such as "where is
-        # the cursor". The screen cannot write to the pty itself, so the driver
-        # drains this after every feed; leaving it undrained can wedge a program
-        # that blocks on the reply.
+        # Answers that the program under test is owed for queries such as
+        # "where is the cursor". The screen cannot write to the pty itself, so
+        # the driver drains this buffer after every feed. Without a drain, a
+        # program that waits for the reply can hang.
         self.replies = bytearray()
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self.reset()
@@ -164,10 +165,11 @@ class Screen:
         return self.find(substring) is not None
 
     def sgr_of(self, substring):
-        """The attributes on the first cell of `substring`, or None if absent.
+        """The attributes on the first cell of `substring`.
 
-        This is how a test says "that row's icon is red": find the glyph, read
-        the attributes that were active when it was drawn.
+        The return value is None for a `substring` that is absent. A test uses
+        this method to say "the icon of that row is red". The method finds the
+        glyph and reads the attributes that were active at the draw.
         """
         found = self.find(substring)
         if found is None:
@@ -176,12 +178,12 @@ class Screen:
         return self.grid[row][col].sgr
 
     def runs(self, include_default=False):
-        """Contiguous same-attribute stretches of text, row by row.
+        """Contiguous stretches of text with the same attributes, row by row.
 
-        Trailing blank cells at default attributes are dropped so a dump stays
-        readable. With `include_default` false this is a list of everything on
-        screen that is styled at all, which is what makes "exactly one reverse
-        video bar is drawn" a one-line assertion.
+        This method drops the trailing blank cells that hold default attributes,
+        so a dump stays readable. With `include_default` false, the result lists
+        everything on screen that has any style. One assertion of one line can
+        then state that the screen holds exactly one reverse video bar.
         """
         out = []
         for row in range(self.rows):
@@ -202,7 +204,7 @@ class Screen:
         return out
 
     def unhandled_summary(self):
-        """Unrecognised sequences and how often each was seen."""
+        """The unrecognized sequences and the count of each one."""
         return dict(self.unhandled_seen)
 
     def dump_text(self):
@@ -220,7 +222,7 @@ class Screen:
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
     def take_replies(self):
-        """Hand over (and clear) the bytes owed to the program under test."""
+        """Returns the bytes for the program under test, and clears them."""
         out = bytes(self.replies)
         self.replies.clear()
         return out
@@ -243,8 +245,8 @@ class Screen:
         elif self._state == "string":
             self._string_char(ch)
         elif self._state == "charset":
-            # The single character naming the character set, which this
-            # emulator has no use for.
+            # This is the single character for the name of the character set.
+            # This emulator has no use for it.
             self._state = "ground"
 
     def _ground(self, ch):
@@ -270,8 +272,8 @@ class Screen:
             self._csi = ""
             self._state = "csi"
         elif ch in "]P^_X":
-            # OSC and the other string-terminated sequences: the payload is
-            # inspected only far enough to answer colour queries.
+            # This is OSC or another string-terminated sequence. This module
+            # inspects the payload only far enough to answer color queries.
             self._pending = ""
             self._state = "string"
         elif ch == "(" or ch == ")" or ch == "*" or ch == "+":
@@ -301,8 +303,8 @@ class Screen:
             self._state = "ground"
 
     def _string_char(self, ch):
-        # Both terminators are accepted: BEL is what most programs actually
-        # send, ST is what the standard asks for.
+        # This code accepts both terminators. Most programs send BEL. The
+        # standard asks for ST.
         if ch == "\x07":
             self._string_done()
         elif ch == "\x1b":
@@ -317,8 +319,8 @@ class Screen:
         body = self._pending
         self._pending = ""
         self._state = "ground"
-        # A program that asks for the foreground or background colour may wait
-        # for the answer before drawing anything at all.
+        # A program that asks for the foreground color or the background color
+        # can wait for the answer before it draws anything.
         if body.startswith("10;?"):
             self.replies += b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"
         elif body.startswith("11;?"):
@@ -350,8 +352,8 @@ class Screen:
         return default
 
     def _csi_final(self, final):
-        # A tuple, not a string: `"" in "?<>=!"` is true, which would make every
-        # parameterless sequence look private.
+        # This is a tuple and not a string. `"" in "?<>=!"` is true, and a
+        # string makes every sequence without parameters look private.
         private = self._csi[:1] in ("?", "<", ">", "=", "!")
 
         if final == "m" and not private:
@@ -412,7 +414,7 @@ class Screen:
         elif final == "n" and not private:
             self._device_status(self._params())
         elif final == "c":
-            # Device attributes: claim to be a plain VT100 with colour.
+            # Device attributes. This emulator reports a plain VT100 with color.
             self.replies += b"\x1b[>0;95;0c" if private else b"\x1b[?1;2c"
         elif final in _IGNORED_CSI_FINALS:
             pass
@@ -467,14 +469,15 @@ class Screen:
                 else:
                     self.sgr = replace(self.sgr, bg=colour)
             elif code in (5, 6, 8, 9, 25, 28, 29, 53, 55, 59, 73, 74, 75):
-                # Blink, conceal, strikethrough and friends: recognised so they
-                # do not inflate the unhandled count, but not tracked per cell.
+                # Blink, conceal, strikethrough and similar codes. This module
+                # recognizes them, so they do not inflate the unhandled count.
+                # It does not keep them for each cell.
                 pass
             else:
                 self._note_unhandled("SGR %d" % code)
 
     def _extended_colour(self, params, index, introducer):
-        """Consume a 38/48 colour and return it with the new parameter index."""
+        """Reads a 38/48 color and returns it with the new parameter index."""
         if index < len(params) and params[index] == 5:
             return (introducer, 5) + tuple(params[index + 1 : index + 2]), index + 2
         if index < len(params) and params[index] == 2:

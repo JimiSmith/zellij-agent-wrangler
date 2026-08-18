@@ -22,32 +22,33 @@ use agent_wrangler_core::agent::Started;
 
 use super::Row;
 
-/// A program to run and wait for, built so that running it cannot make a window
+/// A program to run and wait for. A run of this program cannot make a window
 /// appear.
 ///
-/// Windows gives a console program whose parent has no console one of its own,
-/// and draws a window for it. Everything that runs a program here is the daemon,
-/// which is started detached and so has exactly no console, which would make a
-/// delivery to a client and a desktop notification each a window flashing up on
-/// the user's screen. `CREATE_NO_WINDOW` is what says to give it a console with
-/// no window rather than one with.
+/// If the parent has no console, Windows gives a console program a console of
+/// its own, and draws a window for that console. The daemon runs every program
+/// here. The daemon starts detached and so has no console at all. Without the
+/// flag, a delivery to a client and a desktop notification each show a window
+/// on the screen of the user. `CREATE_NO_WINDOW` asks for a console with no
+/// window.
 ///
-/// A program is built through this rather than the flag being set at each call,
-/// so that adding a program to run is not a thing to remember.
+/// This builds every program, and no call sets the flag for itself. A new
+/// program to run is therefore not a thing to remember.
 pub fn command(program: &str) -> Command {
     let mut command = Command::new(program);
     command.creation_flags(CREATE_NO_WINDOW);
     command
 }
 
-/// Start a program that outlives the process that started it.
+/// Starts a program that outlives the process that started it.
 ///
 /// Side effect: spawns a process and never waits for it. `DETACHED_PROCESS`
-/// keeps it off the console the hook was given, so the console that goes away
-/// with that pane cannot take this with it, and `CREATE_NEW_PROCESS_GROUP`
-/// keeps the Ctrl+C that group receives from reaching it. `CREATE_NO_WINDOW` is
-/// ignored while `DETACHED_PROCESS` is set and is asked for anyway, because it
-/// is what stops a console window flashing up if the detachment is ever dropped.
+/// keeps the new process off the console of the hook. That console goes away
+/// with its pane, and cannot take the new process with it.
+/// `CREATE_NEW_PROCESS_GROUP` keeps the Ctrl+C of that group away from the new
+/// process. Windows ignores `CREATE_NO_WINDOW` while `DETACHED_PROCESS` is set.
+/// This asks for it anyway. If somebody ever drops the detachment, the flag
+/// stops a console window.
 pub fn spawn_detached(program: &Path, args: &[&str]) -> io::Result<()> {
     Command::new(program)
         .args(args)
@@ -59,63 +60,67 @@ pub fn spawn_detached(program: &Path, args: &[&str]) -> io::Result<()> {
         .map(|_| ())
 }
 
-/// Whether a process is still running.
+/// Whether a process still runs.
 ///
-/// Opening the process is not on its own an answer. A process that has exited
-/// keeps its kernel object, and so keeps answering `OpenProcess`, for as long as
-/// anything still holds a handle to it, so the exit code has to be read as well.
-/// A process that exists but is out of reach answers `ERROR_ACCESS_DENIED`
-/// rather than a failure to find it, which is still an answer that it exists.
+/// A successful `OpenProcess` is not an answer on its own. A process that
+/// exited keeps its kernel object for as long as anything holds a handle to it,
+/// and `OpenProcess` still succeeds for it. This therefore reads the exit code
+/// as well. A process that exists but is out of reach answers
+/// `ERROR_ACCESS_DENIED` and not a failure to find it. That answer still means
+/// that the process exists.
 pub fn pid_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
-    // SAFETY: `OpenProcess` only reads kernel state and returns either a handle
-    // this owns or null. The rights asked for are the narrowest that allow the
-    // exit code to be read, so the handle cannot be used to alter the process.
+    // SAFETY: `OpenProcess` only reads kernel state, and returns either a
+    // handle that this owns or null. The rights are the narrowest rights that
+    // give a read of the exit code, so the handle cannot alter the process.
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
     if process.is_null() {
         return io::Error::last_os_error().raw_os_error() == Some(ERROR_ACCESS_DENIED as i32);
     }
 
     let mut code = 0u32;
-    // SAFETY: `process` is a live handle this just opened, and `code` is a `u32`
-    // this owns, which is what the out parameter is documented to want.
+    // SAFETY: `process` is a live handle that this opened above, and `code` is
+    // a `u32` that this owns. The documentation of the out parameter asks for
+    // exactly that.
     let read = unsafe { GetExitCodeProcess(process, &mut code) };
-    // SAFETY: `process` came from `OpenProcess` above and is not used again.
+    // SAFETY: `process` came from `OpenProcess` above, and nothing uses it
+    // again.
     unsafe { CloseHandle(process) };
 
-    // A handle that opened but would not answer is counted as alive, on the same
-    // reasoning as `still_running`.
+    // A handle that opened but gave no answer counts as alive, for the same
+    // reason as `still_running`.
     read == FALSE || still_running(code)
 }
 
-/// Whether an exit code read back from a process handle means it is running.
+/// Whether an exit code from a process handle means that the process runs.
 ///
-/// `STILL_ACTIVE` is also an exit code a process is free to end with, and
-/// nothing in the API tells the two apart, so a process that exits with 259
-/// reads as alive until every handle to it is closed and its pid stops
-/// resolving. That is the error worth making: an agent counted live one poll too
-/// long is a row that goes stale, an agent counted dead while it works is a row
-/// that vanishes under someone.
+/// A process is also free to end with `STILL_ACTIVE` as its exit code, and
+/// nothing in the API tells the two cases apart. A process that exits with 259
+/// therefore reads as alive until somebody closes every handle to it, and until
+/// its pid no longer resolves. That is the error to accept. An agent counted
+/// live one poll too long leaves a stale row. An agent counted dead while it
+/// works makes a row vanish under someone.
 fn still_running(exit_code: u32) -> bool {
     exit_code == STILL_ACTIVE as u32
 }
 
-/// When a process started, or `None` for one this cannot ask about.
+/// The start time of a process, or `None` for a process that answers no
+/// question.
 ///
 /// Side effect: opens the process for the length of the call. The creation time
 /// comes back as a `FILETIME`, which is a count of hundred-nanosecond intervals
-/// split across two words; the two are folded back into the one number they
-/// stand for and left in those units, since nothing reads the figure and only
-/// ever compares it with another reading of the same process.
+/// across two words. This folds the two words back into the one number that
+/// they stand for, and keeps those units. Nothing reads the figure. The only
+/// use of it is a comparison with another reading of the same process.
 pub fn started(pid: u32) -> Option<Started> {
     if pid == 0 {
         return None;
     }
-    // SAFETY: as in `pid_alive`, this only reads kernel state and returns either
-    // a handle this owns or null, with the narrowest rights that answer the
-    // question.
+    // SAFETY: as in `pid_alive`, this only reads kernel state, and returns
+    // either a handle that this owns or null. The rights are the narrowest
+    // rights that answer the question.
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
     if process.is_null() {
         return None;
@@ -125,12 +130,14 @@ pub fn started(pid: u32) -> Option<Started> {
     let mut exited = FILETIME::default();
     let mut kernel = FILETIME::default();
     let mut user = FILETIME::default();
-    // SAFETY: `process` is a live handle this just opened, and all four out
-    // parameters are records owned here that outlive the call. The API writes
-    // every one of them, so all four are passed even though one is wanted.
+    // SAFETY: `process` is a live handle that this opened above, and all four
+    // out parameters are records that this owns and that outlive the call. The
+    // API writes every one of them, so this passes all four although it wants
+    // one.
     let read =
         unsafe { GetProcessTimes(process, &mut creation, &mut exited, &mut kernel, &mut user) };
-    // SAFETY: `process` came from `OpenProcess` above and is not used again.
+    // SAFETY: `process` came from `OpenProcess` above, and nothing uses it
+    // again.
     unsafe { CloseHandle(process) };
 
     match read == FALSE {
@@ -139,46 +146,47 @@ pub fn started(pid: u32) -> Option<Started> {
     }
 }
 
-/// The one number a `FILETIME`'s two words stand for.
+/// The one number that the two words of a `FILETIME` stand for.
 fn moment(time: FILETIME) -> u64 {
     ((time.dwHighDateTime as u64) << 32) | time.dwLowDateTime as u64
 }
 
-/// Every process, its parent and what it is running, as one snapshot.
+/// Every process, its parent and the image that it runs, as one snapshot.
 ///
 /// Side effect: takes a ToolHelp snapshot, which walks the whole process list at
-/// the moment it is called. Each record already carries both the parent and the
-/// image, so one walk answers both and neither can be read a moment apart from
-/// the other.
+/// the moment of the call. Each record carries both the parent and the image.
+/// One walk therefore answers both questions, and no moment separates the two
+/// answers.
 ///
-/// The name comes back as the system gave it, which here is a bare file name
-/// with its extension still on it, `claude.exe` rather than `claude`. Nothing is
-/// stripped, because what counts as a match belongs to the caller.
+/// The name comes back as the system gave it. Here that is a bare file name
+/// with its extension still on it, `claude.exe` and not `claude`. This strips
+/// nothing, because the caller decides what counts as a match.
 ///
-/// Unlike a unix parent id, the one recorded here is not updated when the parent
-/// dies: an orphan keeps naming the pid it was started by rather than being
-/// reparented, and Windows reuses pids, so a long enough climb can arrive at a
-/// process that merely inherited the number. Climbing by name over a bounded
-/// number of hops is what keeps that from mattering.
+/// When the parent dies, a unix parent id changes. The id here does not. An
+/// orphan keeps the pid that started it, and gets no new parent. Windows also
+/// uses pids again, so a long climb can arrive at a process that only inherited
+/// the number. A climb by name over a bounded number of hops makes that
+/// harmless.
 pub fn processes() -> HashMap<u32, Row> {
-    // SAFETY: `TH32CS_SNAPPROCESS` with pid 0 asks for the process list, which
-    // takes no buffer from this and returns either a handle this owns or
-    // `INVALID_HANDLE_VALUE`.
+    // SAFETY: `TH32CS_SNAPPROCESS` with pid 0 asks for the process list. That
+    // call takes no buffer from this, and returns either a handle that this
+    // owns or `INVALID_HANDLE_VALUE`.
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
         return HashMap::new();
     }
 
     let mut table = HashMap::new();
-    // The walk refuses to start unless the size is filled in, which is how the
-    // API tells which version of the record it has been handed.
+    // If the size is not filled in, the walk refuses to start. The API reads
+    // the size to tell which version of the record it received.
     let mut entry = PROCESSENTRY32W {
         dwSize: size_of::<PROCESSENTRY32W>() as u32,
         ..Default::default()
     };
 
-    // SAFETY: `snapshot` is a live snapshot handle and `entry` is owned here,
-    // outlives the call, and has the `dwSize` the API reads to size its write.
+    // SAFETY: `snapshot` is a live snapshot handle. This owns `entry`, `entry`
+    // outlives the call, and `entry` holds the `dwSize` that the API reads to
+    // size its write.
     let mut more = unsafe { Process32FirstW(snapshot, &mut entry) };
     while more != FALSE {
         table.insert(
@@ -188,25 +196,26 @@ pub fn processes() -> HashMap<u32, Row> {
                 name: image_name(&entry.szExeFile),
             },
         );
-        // SAFETY: the same handle and the same owned record, which the previous
-        // call left with its `dwSize` intact.
+        // SAFETY: the same handle and the same owned record. The previous call
+        // left its `dwSize` intact.
         more = unsafe { Process32NextW(snapshot, &mut entry) };
     }
 
-    // SAFETY: `snapshot` came from `CreateToolhelp32Snapshot` and the walk over
-    // it has finished.
+    // SAFETY: `snapshot` came from `CreateToolhelp32Snapshot`, and the walk
+    // over it ended.
     unsafe { CloseHandle(snapshot) };
     table
 }
 
-/// Read the image name out of the fixed-width field a snapshot record carries.
+/// Reads the image name out of the fixed-width field of a snapshot record.
 ///
-/// The field is a NUL-terminated wide string in an array that is always its full
-/// width, so the name ends at the first NUL and not at the end of the buffer. A
-/// field with no NUL at all is taken whole rather than dropped. Decoding is lossy
-/// because a file name Windows permits need not be well-formed UTF-16, and a row
-/// with an unpaired surrogate in it is still a row worth having: it keeps its pid
-/// and its parent, which is most of what the climb wants.
+/// The field is a NUL-terminated wide string in an array that always has its
+/// full width. The name therefore ends at the first NUL and not at the end of
+/// the buffer. This takes a field with no NUL at all whole, and does not drop
+/// it. The decode is lossy, because Windows permits a file name that is not
+/// well-formed UTF-16. A row with an unpaired surrogate in it is still a row
+/// worth a record. It keeps its pid and its parent, which is most of what the
+/// climb wants.
 fn image_name(raw: &[u16]) -> String {
     let end = raw.iter().position(|unit| *unit == 0).unwrap_or(raw.len());
     String::from_utf16_lossy(&raw[..end])
@@ -225,8 +234,9 @@ mod tests {
 
     #[test]
     fn an_ordinary_exit_code_is_not_mistaken_for_running() {
-        // The neighbours of 259 are ordinary exit codes and must read as exited,
-        // which is what pins the comparison to the constant rather than a range.
+        // The neighbors of 259 are ordinary exit codes and must read as exited.
+        // That is the reason for a comparison with the constant and not with a
+        // range.
         assert!(!still_running(258));
         assert!(!still_running(260));
     }
@@ -245,17 +255,17 @@ mod tests {
 
     #[test]
     fn this_process_started_at_a_moment_it_keeps_reporting() {
-        // Whatever the number is, it is the same number every time it is asked
-        // for, which is the whole of what telling one process from another
-        // needs of it.
+        // The value of the number does not matter. The number is the same
+        // number at every reading, which is all that a difference between one
+        // process and another needs of it.
         let mine = started(std::process::id()).expect("this process has a start time");
         assert_eq!(started(std::process::id()), Some(mine));
-        // Pid 0 is the idle process, which is nothing an agent could be.
+        // Pid 0 is the idle process, and an agent is never the idle process.
         assert_eq!(started(0), None);
     }
 
-    /// A field as the snapshot leaves it: the name, a NUL, then whatever was
-    /// already in the buffer.
+    /// A field as the snapshot leaves it: the name, a NUL, and then whatever
+    /// the buffer already held.
     fn field(name: &str, trailing: &[u16]) -> Vec<u16> {
         let mut raw: Vec<u16> = name.encode_utf16().collect();
         raw.push(0);
@@ -265,7 +275,7 @@ mod tests {
 
     #[test]
     fn a_name_ends_at_the_first_nul_and_not_at_the_end_of_the_field() {
-        // The bytes past the NUL are not cleared, and reading them would turn
+        // Nothing clears the bytes past the NUL. A read of those bytes turns
         // the name of one process into the name of whatever was there before.
         let raw = field("claude.exe", &[b'j' as u16, b'u' as u16, 0, 0, 0]);
         assert_eq!(image_name(&raw), "claude.exe");
@@ -291,8 +301,8 @@ mod tests {
 
     #[test]
     fn a_name_that_is_not_well_formed_still_yields_a_row() {
-        // An unpaired surrogate cannot be decoded, and losing the whole row over
-        // it would lose the parent id that the climb actually needs.
+        // Nothing can decode an unpaired surrogate. A loss of the whole row
+        // over it is a loss of the parent id that the climb needs.
         let raw = field("cla\u{FFFF}", &[0xD800, 0]);
         assert!(!image_name(&raw).is_empty());
     }

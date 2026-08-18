@@ -1,10 +1,9 @@
 #!/bin/sh
-# Stand in for the desktop notifier: write down what was raised, one line per
-# notification, and say nothing on screen.
+# This script stands in for the desktop notifier. It writes down what the run
+# raised, one line for each notification, and puts nothing on the screen.
 #
-# The path is derived from this script's own location rather than from the
-# working directory, because whatever runs it was not started from anywhere in
-# particular.
+# The script derives the path from its own location, not from the working
+# directory. The program that runs this script starts from no fixed directory.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 mkdir -p "$root/tests/out"

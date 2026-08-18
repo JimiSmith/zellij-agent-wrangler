@@ -1,14 +1,15 @@
 #!/bin/sh
-# Install the client, and print the layout block for the plugin that goes with
-# it.
+# Install the client. Print the layout block for the plugin that goes with it.
 #
-# The client is one binary holding the hook the agents invoke, the daemon those
-# hooks feed, and this installer. Nothing starts the daemon here: the first hook
-# to find none running starts it, by running this same binary.
+# The client is one binary. It holds the hook that the agents invoke, the daemon
+# that those hooks feed, and this installer. This script does not start the
+# daemon. The first hook that finds no daemon starts it, and it runs this same
+# binary.
 #
-# Both halves come from one release and are named for its tag, so the block this
-# prints pins the plugin to the version of the client it just installed. Nothing
-# downloads the plugin here: zellij fetches it itself from the url in the layout.
+# Both halves come from one release, and the tag of that release names them. The
+# block that this script prints therefore pins the plugin to the version of the
+# client that this script installed. This script does not download the plugin.
+# Zellij fetches the plugin itself from the url in the layout.
 #
 # Usage: install.sh [version]   (default: the latest release)
 set -eu
@@ -28,8 +29,8 @@ case "$(uname -s)/$(uname -m)" in
         ;;
 esac
 
-# `gh` is used where it is there, because it is also what reaches a private
-# repository; the api is the fallback for a machine without it.
+# This script uses `gh` where `gh` is present, because `gh` also reaches a
+# private repository. On a machine without `gh`, the api is the fallback.
 have_gh=$(command -v gh >/dev/null 2>&1 && echo yes || echo no)
 
 version=${1:-}
@@ -50,16 +51,17 @@ wasm="zellij-agent-wrangler-$version.wasm"
 
 mkdir -p "$bin"
 
-# Downloaded beside the real one and renamed over it, never written to it.
+# The download goes beside the real file. A rename then puts it in place. This
+# script never writes to the real file.
 #
-# Writing in place keeps the file the system already knows, and macOS validates a
-# signed binary against what it recorded for that file: rewriting the contents
-# under it leaves every later run killed outright, with nothing said about why.
-# Renaming puts a new file there instead, so what was running before goes on
-# running from what it started as and the next run gets the new one whole.
+# A write in place keeps the file that the system already knows. macOS validates
+# a signed binary against the record for that file. New content under that record
+# kills every later run, and macOS gives no reason. A rename puts a new file
+# there instead. A program that already runs continues from its own file, and the
+# next run gets the whole new file.
 #
-# It also means a download that dies halfway leaves nothing behind that could be
-# run: the temporary is what is half-written, and it is only ever renamed once it
+# A download that stops halfway also leaves nothing to run. The temporary file
+# holds the half-written content, and the rename happens only after the download
 # is complete.
 temp="$bin/.agent-wrangler.$$"
 trap 'rm -f "$temp"' EXIT INT TERM
@@ -76,12 +78,12 @@ trap - EXIT INT TERM
 
 "$bin/agent-wrangler" install-hooks
 
-# The block names the client outright, always. The sidebar reaches the daemon by
-# running it, and left to itself it looks on `$PATH` - but the one that matters
-# is the zellij server's, inherited from whatever started zellij, which is not
-# necessarily the shell this script is running in. Naming the path is the only
-# thing that is true whatever started zellij, and getting it wrong costs every
-# agent row while saying nothing about why.
+# The block always names the client in full. The sidebar runs the client to
+# reach the daemon. Without a path, the sidebar looks on `$PATH`. The `$PATH`
+# that matters belongs to the zellij server, which took it from the program that
+# started zellij. That program is not always the shell of this script. The full
+# path is the only value that is true for every start of zellij. A wrong value
+# costs every agent row, and it gives no reason.
 url="https://github.com/$repo/releases/download/$version/$wasm"
 found=$(command -v agent-wrangler 2>/dev/null || true)
 

@@ -1,9 +1,11 @@
 #!/bin/sh
-# Assert that the daemon holds one session in a given turn state.
+# This script makes sure that the daemon holds one session in a given turn
+# state.
 #
-# Reading it back from the daemon rather than from the screen is what makes this
-# an assertion about the reverse channel: the sidebar is what noticed the user
-# was already there, and the daemon only knows because the sidebar told it.
+# The script reads the state back from the daemon, not from the screen. This
+# makes the test an assertion about the reverse channel. The sidebar noticed
+# that the user was already there, and the daemon knows only because the sidebar
+# told it.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 XDG_STATE_HOME="$root/tests/out/state"

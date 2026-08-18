@@ -1,8 +1,9 @@
 //! What an agent session is, and what it is called by.
 //!
-//! A session is filed under the id the agent gives it and described by what the
-//! agent writes about itself. Nothing here names a pane, a tab, a window or a
-//! row: these are facts about agents, not about anywhere they are shown.
+//! A session is stored under the id that the agent gives it. A session is
+//! described by what the agent writes about itself. Nothing here names a pane, a
+//! tab, a window or a row. These are facts about agents, not facts about the
+//! places that show them.
 
 pub mod agent;
 pub mod command;
@@ -11,8 +12,8 @@ pub mod notify;
 pub mod origin;
 pub mod registry;
 
-/// Finding what a session calls itself means reading the agent's own files, so
-/// the modules that do it are behind the feature that turns file reading on.
+/// What a session calls itself comes from the agent's own files. The modules
+/// that read those files are behind the feature that turns file reading on.
 #[cfg(feature = "native")]
 pub mod payload;
 #[cfg(feature = "native")]

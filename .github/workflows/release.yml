@@ -1,10 +1,10 @@
 name: release
 
-# The two halves are released together and named for the same tag. That is what
-# lets a layout pin the plugin to the version of the client that is installed:
-# zellij caches a downloaded plugin under the last segment of its url and never
-# re-fetches a name it already holds, so a wasm named for its version is the only
-# kind an update can actually replace.
+# The two halves go out together, and carry the name of the same tag. A layout
+# can therefore pin the plugin to the version of the installed client. Zellij
+# caches a downloaded plugin under the last segment of its url, and never
+# fetches a name that it already holds again. A wasm with its version in the
+# name is therefore the only kind that an update can replace.
 on:
   push:
     tags: ["v*"]
@@ -19,25 +19,27 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup component add clippy rustfmt
       - run: rustup target add wasm32-wasip1
-      # `--all` because the root is a virtual manifest, where the plain form
-      # covers the default members rather than every crate.
+      # `--all` is necessary because the root is a virtual manifest. In a
+      # virtual manifest, the plain form covers the default members and not
+      # every crate.
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # The plugin ships as wasm and nothing else builds it that way, so the
-      # host lint above says nothing about the artifact that is actually
-      # released.
+      # The plugin ships as wasm, and no other job builds it that way. The
+      # host lint above therefore says nothing about the released artifact.
       - run: >
           cargo clippy -p zellij-agent-wrangler --target wasm32-wasip1
           --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
-  # The native half is released for Windows, so it is built and run there before
-  # a tag can ship one. Compiling it from Linux catches a great deal and cannot
-  # catch the process table, the local socket or the paths actually working, all
-  # of which are written twice and only tested once anywhere else.
+  # The native half goes out for Windows, so this job builds it and runs it on
+  # Windows before a tag can ship it. A build from Linux catches a great deal.
+  # A build from Linux cannot catch the process table, the local socket or the
+  # paths at work. The code for each of these is written twice, and every other
+  # place tests one copy only.
   #
-  # The plugin is not built here: it is wasm, and off wasm its dependency pulls
-  # in the whole of zellij, which is neither wanted nor portable.
+  # This job does not build the plugin. The plugin is wasm, and off wasm its
+  # dependency pulls in the whole of zellij, which is neither wanted nor
+  # portable.
   check-windows:
     runs-on: windows-latest
     steps:
@@ -46,10 +48,11 @@ jobs:
       - run: cargo clippy -p agent-wrangler -p agent-wrangler-core --all-targets --locked -- -D warnings
       - run: cargo test -p agent-wrangler -p agent-wrangler-core --locked
 
-  # The same, for macOS. Asking a process when it started is answered by a
-  # different kernel interface on each system, so the one written here for macOS
-  # is compiled and run nowhere else: without this it would first be built by the
-  # job that attaches the asset, which is after the release exists.
+  # The same, for macOS. A different kernel interface on each system answers
+  # the question of when a process started. No other job compiles and runs the
+  # macOS code for that question. Without this job, the first build of that code
+  # happens in the job that attaches the asset, which runs after the release
+  # exists.
   check-macos:
     runs-on: macos-latest
     steps:
@@ -63,10 +66,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Opened as a draft and published at the end, so nothing ever sees a
-      # release that is missing the platform it is on. A draft that is already
-      # there is left alone: this runs again whenever a tag is re-cut, and
-      # deleting a tag turns its release back into a draft.
+      # This job opens the release as a draft, and a later job publishes it.
+      # Nothing ever sees a release without the platform that it is on. This job
+      # leaves an existing draft alone. The job runs again after every re-cut of
+      # a tag, and the delete of a tag turns its release back into a draft.
       - name: Open the release this tag names, as a draft
         env:
           GH_TOKEN: ${{ github.token }}
@@ -104,10 +107,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-          # Both mac targets are built on Apple silicon, cross-compiling the
-          # Intel one. Its SDK carries both architectures, and the Intel runners
-          # have been retired, so a label naming one is a job that waits for a
-          # machine that is not coming.
+          # Apple silicon builds both mac targets, and cross-compiles the
+          # Intel target. The SDK of Apple silicon carries both architectures.
+          # The Intel runners are retired, so a label that names one gives a job
+          # that waits for a machine that never comes.
           - runner: macos-latest
             target: aarch64-apple-darwin
           - runner: macos-latest
@@ -116,8 +119,8 @@ jobs:
             target: x86_64-pc-windows-msvc
             suffix: .exe
     runs-on: ${{ matrix.runner }}
-    # The upload step is written for a POSIX shell, which the Windows runner
-    # also has; naming it keeps one script for every platform in the matrix.
+    # The upload step needs a POSIX shell, which the Windows runner also has. A
+    # name for the shell keeps one script for every platform in the matrix.
     defaults:
       run:
         shell: bash
@@ -136,10 +139,10 @@ jobs:
           cp "target/${{ matrix.target }}/release/agent-wrangler${{ matrix.suffix }}" "$asset"
           gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
 
-      # The same program linked so that Windows never gives it a console, which
-      # is what the hooks and the sidebar run there. It is attached only for
-      # Windows because it is the same file as the one above everywhere else:
-      # nothing but Windows has a console to be given.
+      # The same program, linked so that Windows never gives it a console. The
+      # hooks and the sidebar run this program on Windows. This job attaches the
+      # program for Windows only. Everywhere else the program is the same file
+      # as the one above, because only Windows has a console to give.
       - name: Attach the windowless client, which only Windows has a use for
         if: matrix.target == 'x86_64-pc-windows-msvc'
         env:
@@ -149,9 +152,9 @@ jobs:
           cp "target/${{ matrix.target }}/release/agent-wranglerw.exe" "$asset"
           gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
 
-  # Nothing below the release is allowed to be half done: the install script
-  # asks for the latest release and takes what it finds, so a release carrying
-  # some of its platforms is worse than one carrying none.
+  # No step below the release can be half done. The install script asks for the
+  # latest release and takes what it finds. A release with some of its platforms
+  # is worse than a release with none.
   publish:
     needs: [plugin, client]
     runs-on: ubuntu-latest

@@ -1,9 +1,9 @@
-//! Keeping what is held between one run of the daemon and the next.
+//! This module keeps the state between one run of the daemon and the next.
 //!
-//! The file is written whole and moved into place, so a reader either sees the
-//! previous state or the new one and never half of either. A file that cannot be
-//! written is not reported anywhere: the daemon carries on with the state in
-//! memory, which is the state that matters.
+//! This module writes the file whole and then moves it into place. A reader sees
+//! either the previous state or the new state, and never half of either one.
+//! Nothing reports a file that this module cannot write. The daemon carries on
+//! with the state in memory, which is the state that matters.
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -17,15 +17,16 @@ use agent_wrangler_core::notify::Notifier;
 use crate::daemon::state::{Client, Source};
 use crate::proto::Sink;
 
-/// Counts the writes this process has made, so no two of them name the same
-/// temporary file.
+/// The number of writes that this process made. No two of those writes name the
+/// same temporary file.
 static WRITES: AtomicU64 = AtomicU64::new(0);
 
-/// One session as it is kept: the record exactly as it goes over the wire, and
-/// where its own account of itself is read from.
+/// One session as this module keeps it. The session holds the record exactly
+/// as it goes over the wire. The session also holds the place that the account
+/// of the session comes from.
 ///
-/// The record is kept as its encoded line rather than as fields, so what is
-/// saved and what is sent cannot drift apart.
+/// This module keeps the record as its encoded line, and not as fields. The
+/// saved form and the sent form cannot drift apart.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Saved {
     record: String,
@@ -33,12 +34,12 @@ struct Saved {
     source: Source,
 }
 
-/// One client as it is kept: where to reach it, and what it asked to have a
-/// call announced with.
+/// One client as this module keeps it: where to reach the client, and what the
+/// client asked to announce a call with.
 ///
-/// The notifier is kept as the words it runs rather than as the notifier
-/// itself, since what is stored is text either way and words are what a client
-/// said in the first place.
+/// This module keeps the notifier as the words that it runs, and not as the
+/// notifier itself. The stored form is text either way, and words are what the
+/// client sent first.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Listening {
     sink: Sink,
@@ -46,12 +47,12 @@ struct Listening {
     notify: Vec<String>,
 }
 
-/// Everything kept between one run and the next.
+/// Everything that this module keeps between one run and the next.
 ///
-/// The clients are kept as well as the sessions, because a client registers
-/// once and has no way of knowing it is talking to a daemon that has restarted
-/// since. Forgetting them would leave every sidebar drawing whatever it last
-/// received, for good, with nothing said about why.
+/// This module keeps the clients as well as the sessions. A client registers
+/// once, and it cannot know that the daemon restarted since then. A daemon that
+/// forgets the clients leaves every sidebar with the state that it last
+/// received, for good, and tells nobody why.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Kept {
     #[serde(default)]
@@ -64,10 +65,11 @@ fn file(dir: &Path) -> PathBuf {
     dir.join("agents.json")
 }
 
-/// Write every session out, replacing whatever was there.
+/// Writes every session out, and replaces whatever was there.
 ///
-/// Side effect: creates the state directory if it is not there, writes a
-/// temporary file beside the real one and renames over it.
+/// Side effect: if the state directory is not there, this function creates it.
+/// This function writes a temporary file beside the real file, and then renames
+/// the temporary file over the real one.
 pub fn save(dir: &Path, sessions: &[(String, Source)], clients: &[Client]) {
     let kept = Kept {
         sessions: sessions
@@ -95,11 +97,11 @@ pub fn save(dir: &Path, sessions: &[(String, Source)], clients: &[Client]) {
     if fs::create_dir_all(dir).is_err() {
         return;
     }
-    // The temporary is named for this write and no other. Two saves running at
-    // once otherwise open, truncate and rename the same path, which ends with
-    // one of them writing through its own descriptor into the file the other
-    // has already put in place: a torn document, or an empty one, which reads
-    // back as every session having ended.
+    // The name of the temporary file belongs to this write and to no other
+    // write. Two saves that run at once otherwise open, truncate and rename the
+    // same path. One save then writes through its own descriptor into the file
+    // that the other save already put in place. The result is a torn document,
+    // or an empty one, and it reads back as the end of every session.
     let temp = file(dir).with_extension(format!(
         "json.{}.{}",
         std::process::id(),
@@ -107,8 +109,8 @@ pub fn save(dir: &Path, sessions: &[(String, Source)], clients: &[Client]) {
     ));
     let written = File::create(&temp).and_then(|mut file| {
         file.write_all(text.as_bytes())?;
-        // Renaming an unflushed file is a rename of nothing in particular if
-        // the machine stops here.
+        // If the machine stops here, a rename of an unflushed file renames
+        // nothing in particular.
         file.sync_all()
     });
     match written {
@@ -121,8 +123,8 @@ pub fn save(dir: &Path, sessions: &[(String, Source)], clients: &[Client]) {
     }
 }
 
-/// Read back what `save` wrote. Nothing at all for a first run, an unreadable
-/// file, or one written by something else.
+/// Reads back what `save` wrote. This function reads nothing at all for a first
+/// run, for an unreadable file, or for a file that something else wrote.
 pub fn load(dir: &Path) -> (Vec<(String, Source)>, Vec<Client>) {
     let Ok(text) = fs::read_to_string(file(dir)) else {
         return (Vec::new(), Vec::new());
@@ -151,8 +153,8 @@ mod tests {
     #[cfg(unix)]
     use std::sync::Arc;
 
-    /// Enough records that one write is several calls into the kernel, because
-    /// the tear happens between them.
+    /// Enough records that one write is several calls into the kernel. The tear
+    /// happens between those calls.
     #[cfg(unix)]
     const RECORDS: usize = 400;
 
@@ -196,21 +198,21 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // Renaming over a file another thread holds open succeeds on unix and can
-    // be refused on Windows, so a run there would be measuring that rather than
-    // the tear this is about. The fix it checks is not unix-only; the method is.
+    // A rename over a file that another thread holds open works on unix, and
+    // Windows can refuse it. A run on Windows measures that refusal rather than
+    // the tear. The fix under test is not unix-only. The method is unix-only.
     #[cfg(unix)]
     #[test]
     fn saving_at_the_same_moment_from_two_threads_leaves_one_whole_file() {
-        // Two saves naming one temporary file end with one of them writing
-        // through its own descriptor into the file the other has already put
-        // into place.
+        // Two saves can name one temporary file. One save then writes through
+        // its own descriptor into the file that the other save already put into
+        // place.
         //
-        // Two things this test needs to bite. Each writer writes a document of
-        // its own, because writers producing identical bytes tear into
-        // something that still reads back correctly; and a reader runs
-        // alongside them, because a tear exists only between one save and the
-        // next, and whatever the last writer leaves is always whole.
+        // This test needs two things to bite. First, each writer writes a
+        // document of its own, because writers of identical bytes tear into
+        // something that still reads back correctly. Second, a reader runs
+        // beside the writers. A tear exists only between one save and the
+        // next, and the last writer always leaves a whole file.
         let dir = scratch("concurrent");
         let torn = Arc::new(AtomicUsize::new(0));
         let done = Arc::new(AtomicBool::new(false));

@@ -1,7 +1,8 @@
 //! Multiplexer-neutral state and decisions for an agent wrangler sidebar.
 //!
-//! Adapters report session facts in this crate's vocabulary and execute the
-//! effects it returns. No host API or host-owned type crosses this boundary.
+//! An adapter reports session facts in the vocabulary of this crate. The
+//! adapter then runs the effects that this crate returns. No host API and no
+//! host-owned type crosses this boundary.
 
 pub mod application;
 pub mod calls;

@@ -1,9 +1,10 @@
 #!/bin/sh
-# Assert that exactly this many desktop notifications were raised.
+# This script makes sure that the run raised exactly this many desktop
+# notifications.
 #
-# Counting rather than looking for one is the whole point: a call announced by
-# each sidebar holding it would still put the right words on screen, and would
-# put them there once per sidebar.
+# The count is the point, not the presence of one notification. If each sidebar
+# that holds a call announces that call, the screen still shows the right words.
+# The notifier then runs one time for each sidebar.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 log="$root/tests/out/raised.log"

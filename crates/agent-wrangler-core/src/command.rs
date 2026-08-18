@@ -1,15 +1,16 @@
-//! Reading a command line written as one string into the words a process is
-//! spawned from.
+//! This module reads a command line written as one string. It gives back the
+//! words that a process is spawned from.
 //!
-//! Quoting is honoured, so a path with a space in it survives the round trip
-//! from the text a human wrote to the argument a program receives.
+//! The reader honors quotes. A path with a space survives the round trip from
+//! the text a human wrote to the argument that a program receives.
 
-/// Split `line` into words, treating a run inside single or double quotes as
-/// one word however much whitespace it holds.
+/// Split `line` into words. A run inside single or double quotes is one word,
+/// however much whitespace it holds.
 ///
-/// A quote is a boundary rather than a character: it opens a word even when the
-/// text inside it is empty, so `''` is one empty argument rather than none. No
-/// escape is recognised, and an unclosed quote runs to the end of the line.
+/// A quote is a boundary, not a character. A quote opens a word even when the
+/// text inside it is empty, so `''` is one empty argument rather than none. The
+/// function recognizes no escape character. An unclosed quote runs to the end of
+/// the line.
 pub fn words(line: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();

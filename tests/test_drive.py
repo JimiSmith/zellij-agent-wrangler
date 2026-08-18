@@ -1,11 +1,11 @@
 """Tests for the pty driver in drive.py.
 
-Everything here drives a real child through a real pty. The bash cases need no
-zellij and so always run; the zellij cases skip themselves when the binary is
-absent rather than pretending to have passed.
+Every test here drives a real child through a real pty. The bash cases need no
+zellij, so they always run. If the zellij binary is absent, the zellij cases
+skip themselves. They do not report a pass.
 
-Run from the repository root, because the step scripts name paths relative to
-it:
+The step scripts name paths relative to the repository root. Run the tests from
+the repository root:
 
     python3 -m unittest discover -s tests -v
 """
@@ -49,8 +49,8 @@ class TestUnescape(unittest.TestCase):
         self.assertEqual(unescape("<C-o>d"), b"\x0fd")
 
     def test_double_backslash_stays_literal(self):
-        # A script sends `printf '\033[7m'` this way, so the backslash must not
-        # be eaten and the following letter must not become an escape.
+        # A script sends `printf '\033[7m'` in this way. The backslash must
+        # survive, and the next letter must not become an escape.
         self.assertEqual(unescape("\\\\033"), b"\\033")
         self.assertEqual(unescape("\\\\r"), b"\\r")
 
@@ -160,8 +160,8 @@ class TestStepsAgainstBash(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("FAILED", result.stderr)
         self.assertIn("NEVER-APPEARS", result.stderr)
-        # The dump must carry the screen as it actually was and the raw tail,
-        # since that is the only evidence a failing run leaves behind.
+        # The dump must carry the screen as it was, and the raw tail. A run
+        # that fails leaves no other evidence.
         self.assertIn("--- screen", result.stderr)
         self.assertIn("ON-SCREEN", result.stderr)
         self.assertIn("--- last", result.stderr)
@@ -196,8 +196,8 @@ class TestZellij(unittest.TestCase):
         self.assertIn("wrangler-test-smoke", text)
         self.assertIn("Ctrl", text)
         self.assertNotIn("First Run Setup Wizard", text)
-        # Zellij paints in 256 colour, so a screen with no attributes at all
-        # means the emulator dropped the styling rather than zellij omitting it.
+        # Zellij paints in 256 colors. If the screen holds no attributes, the
+        # emulator dropped the style. Zellij did not omit it.
         self.assertGreater(len(sgr["runs"]), 10)
         self.assertNotIn("wrangler-test-smoke", drive.live_sessions())
 
@@ -210,8 +210,8 @@ class TestZellij(unittest.TestCase):
                 "env: ZELLIJ_CONFIG_DIR=tests/zellij-config",
                 "spawn: zellij --session wrangler-test-reap",
                 "wait: Ctrl @ 20",
-                # Ctrl-o enters session mode, d detaches. The session stays
-                # alive with no client, which is exactly what cleanup is for.
+                # Ctrl-o enters session mode, and d detaches. The session
+                # stays alive with no client. Cleanup exists for that state.
                 "keys: <C-o>d",
                 "sleep: 2",
             ]

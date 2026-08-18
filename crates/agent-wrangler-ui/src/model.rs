@@ -1,20 +1,21 @@
 //! The row vocabulary a client is drawn from.
 //!
-//! A row's content names *what* the row is; its `Branch` and `Placement` follow
-//! from where it sits, and its `Indicator` from the turn state of the thing it
-//! points at. A row's strings are the literal names of things, and every glyph
-//! drawn around them is chosen when the row is painted.
+//! The content of a row names *what* the row is. The `Branch` and the
+//! `Placement` follow from the place of the row. The `Indicator` follows from
+//! the turn state of the thing the row points at. The strings of a row are the
+//! literal names of things, and the client chooses every glyph around them when
+//! it draws the row.
 //!
-//! Nothing here knows what a terminal is: a row says what is to be drawn, and
-//! never how.
+//! Nothing here knows what a terminal is. A row says what to draw, and never how
+//! to draw it.
 
 use agent_wrangler_core::agent::{Agent, SessionId};
 
-/// A multiplexer pane's own stable name.
+/// The stable name a multiplexer gives a pane.
 ///
-/// Multiplexers do not agree on the shape of pane ids. Keeping the native id
-/// as opaque text lets every adapter preserve it without allocating a second
-/// identity of its own.
+/// Multiplexers do not agree on the shape of a pane id. The native id stays
+/// opaque text, so every adapter can keep it without a second identity of its
+/// own.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PaneId(String);
 
@@ -34,11 +35,11 @@ impl From<u32> for PaneId {
     }
 }
 
-/// A multiplexer tab's own stable name.
+/// The stable name a multiplexer gives a tab.
 ///
-/// A tab's position can change whenever another tab opens or closes. This id
-/// names the tab itself, while [`TabPosition`] remains the metadata that orders
-/// and labels it.
+/// If another tab opens or closes, the position of a tab can change. This id
+/// names the tab itself. [`TabPosition`] is the metadata that orders and labels
+/// the tab.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TabId(String);
 
@@ -52,17 +53,17 @@ impl TabId {
     }
 }
 
-/// Where a tab sits in the tab bar, counted from zero.
+/// The place of a tab in the tab bar, counted from zero.
 ///
-/// A position is not a name: closing a tab moves every tab after it along, so
-/// the tab at a position is only the tab that was there while nothing before it
-/// has opened or closed. It orders the tabs, labels their rows, and is passed to
-/// host APIs that can address tabs only by position.
+/// A position is not a name. If a tab closes, every tab after it moves along.
+/// The tab at a position is therefore only the tab that was there while nothing
+/// before it opened or closed. A position orders the tabs, labels their rows,
+/// and goes to host APIs that can address tabs only by position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TabPosition(usize);
 
 impl TabPosition {
-    /// The tab sitting at this place in the bar.
+    /// The tab at this place in the bar.
     pub const fn at(position: usize) -> Self {
         TabPosition(position)
     }
@@ -72,22 +73,22 @@ impl TabPosition {
         self.0
     }
 
-    /// The number this tab is called by, which counts from one: tabs are the one
-    /// thing the user is shown numbered that way.
+    /// The number the user calls this tab by, which counts from one. Tabs are
+    /// the one thing the user sees numbered that way.
     pub const fn one_based(self) -> usize {
         self.0 + 1
     }
 }
 
-/// A child's position in its tab: the last one closes the tree.
+/// The position of a child in its tab. The last child closes the tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Branch {
     More,
     Last,
 }
 
-/// Where a row sits relative to the user: the one channel a client reads
-/// both the gutter and the row's intensity off.
+/// The place of a row relative to the user. A client reads both the gutter and
+/// the intensity of the row off this one channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placement {
     /// The focused pane of the focused tab, or that tab itself.
@@ -104,8 +105,8 @@ impl Placement {
     }
 }
 
-/// The palette a thing's identity is drawn from. Terminal-named rather than
-/// RGB, so the user's own theme decides what the colors look like.
+/// The palette the identity of a thing is drawn from. The colors carry terminal
+/// names rather than RGB values, so the theme of the user decides how they look.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NamedColor {
     Red,
@@ -119,13 +120,13 @@ pub enum NamedColor {
 }
 
 impl NamedColor {
-    /// The terminal color an agent's own color name is drawn in, or `None` for
+    /// The terminal color a color name from an agent is drawn in, or `None` for
     /// a session with no color of its own.
     ///
-    /// An agent names eight colors and a terminal has six it can count on, so
-    /// the two with no name of their own are drawn in the bright form of their
-    /// nearest neighbour. That is what keeps eight sessions eight colors apart,
-    /// which is the whole of what the color is for.
+    /// An agent names eight colors, and a terminal has six colors it can count
+    /// on. The two colors with no name of their own are drawn in the bright form
+    /// of their nearest neighbor. That keeps eight sessions eight colors apart,
+    /// which is the whole purpose of the color.
     pub fn agent(name: &str) -> Option<Self> {
         Some(match name {
             "red" => NamedColor::Red,
@@ -158,12 +159,12 @@ pub enum Indicator {
 }
 
 impl Indicator {
-    /// The glyph this marker draws, and the color it carries of its own. A
-    /// `None` color leaves the row's own style standing.
+    /// The glyph this marker draws, and the color the marker carries of its own.
+    /// A `None` color leaves the style of the row unchanged.
     ///
     /// Both glyphs are one column wide and share a shape, so the two states read
-    /// as one channel: filled for the agent that wants you, hollow for the one
-    /// still going.
+    /// as one channel. The glyph is filled for the agent that wants you, and
+    /// hollow for the agent that still works.
     pub fn resolve(self) -> Option<(char, Option<NamedColor>)> {
         match self {
             Indicator::None => None,
@@ -175,9 +176,9 @@ impl Indicator {
 
 /// What a selectable row points at.
 ///
-/// The selection is carried as one of these rather than as a position, so a
-/// pane opening or closing above the selected row moves the row without moving
-/// the selection off the thing it was on.
+/// The selection travels as one of these rather than as a position. If a pane
+/// opens or closes above the selected row, the row moves and the selection stays
+/// on the thing it was on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowKey {
     Tab(TabId),
@@ -185,18 +186,18 @@ pub enum RowKey {
     Agent(SessionId),
     /// The same session as [`RowKey::Agent`], drawn a second time under the
     /// agent it belongs to rather than under the tab it is in. It is a kind of
-    /// its own because a key has to name one row: two rows sharing one would
-    /// both be drawn selected, and the selection could never reach the second.
+    /// its own because a key must name one row. Two rows with one key both draw
+    /// as selected, and the selection never reaches the second row.
     Section(SessionId),
-    /// An entry in the notification area. It names the same session an agent
-    /// row does, and is a separate kind so that opening the entry can do more
-    /// than selecting the agent does.
+    /// An entry in the notification area. It names the same session that an
+    /// agent row names. It is a separate kind. When the user opens this entry,
+    /// the client can do more than the selection of an agent row does.
     Notification(SessionId),
 }
 
 impl RowKey {
     /// The key as one line of text, which is how it travels between the
-    /// clients sharing a selection.
+    /// clients that share a selection.
     pub fn encode(&self) -> String {
         match self {
             RowKey::Tab(id) => format!("tab-id:{}", id.as_str()),
@@ -207,8 +208,8 @@ impl RowKey {
         }
     }
 
-    /// The key `encode` wrote, or `None` for anything else. A client running
-    /// older code than the one that sent this says nothing rather than guessing.
+    /// The key `encode` wrote, or `None` for anything else. A client that runs
+    /// older code than the sender gives `None` rather than a guess.
     pub fn decode(text: &str) -> Option<Self> {
         let (kind, value) = text.split_once(':')?;
         match kind {
@@ -258,21 +259,22 @@ pub enum RowContent {
     },
 }
 
-/// An agent's call for attention, as the notification area lists it: the agent
-/// that raised it, and the message describing where it is.
+/// The call of an agent for attention, as the notification area lists it. The
+/// entry holds the agent that raised the call, and the message that describes
+/// where the agent is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notification {
-    /// The agent session this entry points at, which is what opening it goes
-    /// to and what stops the same session being listed twice.
+    /// The agent session this entry points at. When the user opens the entry,
+    /// the entry goes to this session. Two entries never name one session.
     pub session: SessionId,
     pub agent: String,
     pub color: Option<NamedColor>,
     pub message: String,
 }
 
-/// A drawn line: its content, the marker pinned to its right edge, and the thing
-/// the selection lands on when it is here. A row with no key cannot be selected
-/// or clicked.
+/// A drawn row: the content, the marker pinned to the right edge, and the thing
+/// the selection lands on at this row. A row with no key is not selectable and
+/// not clickable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     pub content: RowContent,
@@ -323,8 +325,9 @@ mod tests {
 
     #[test]
     fn a_session_is_drawn_in_the_color_the_agent_gives_it() {
-        // The two an agent names that a terminal does not are drawn in the
-        // bright form of their neighbour, so all eight stay apart.
+        // An agent names two colors that a terminal does not name. Those two
+        // are drawn in the bright form of their neighbor, so all eight stay
+        // apart.
         for (name, want) in [
             ("red", NamedColor::Red),
             ("green", NamedColor::Green),
@@ -372,8 +375,9 @@ mod tests {
 
     #[test]
     fn a_sanitized_id_is_the_one_that_comes_back() {
-        // Sanitizing on the way in is what makes the round trip total: an id
-        // decoded from the wire is already the shape the constructor allows.
+        // The constructor sanitizes an id on the way in, which makes the round
+        // trip total. An id decoded from the wire already has the shape the
+        // constructor allows.
         let key = RowKey::Agent(SessionId::new("a/b").unwrap());
         assert_eq!(RowKey::decode(&key.encode()), Some(key));
     }

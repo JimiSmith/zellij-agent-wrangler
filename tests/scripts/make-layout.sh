@@ -1,18 +1,22 @@
 #!/bin/sh
-# Write everything the end to end run needs before zellij starts: the layout
-# with the built wasm and the built client substituted in, the transcript the
-# test session reads its own title from, and the permission cache.
+# This script writes everything that the end to end run needs before zellij
+# starts:
+# - the layout, with the built wasm and the built client put in place
+# - the transcript that the test session reads its own title from
+# - the permission cache
 #
-# The permissions are pre-answered because zellij asks by drawing over the
-# plugin's pane and does not render a plugin at all while its request is
-# pending, so a run that did not answer them in advance would be asserting on a
-# sidebar that has not been allowed to read anything.
+# The script answers the permissions in advance. To ask for permission, zellij
+# draws over the pane of the plugin. Zellij draws no plugin at all while the
+# request waits. If a run does not answer the permissions in advance, the run
+# asserts on a sidebar that has no permission to read anything.
 #
-# The notifier is off unless one is named, since a run that raised a real
-# desktop notification would interrupt whoever is running the tests. Every
-# template is given the same one: the sidebars of a session are one client, and
-# the last of them to register is what that client is taken to want, so a layout
-# whose templates disagree would settle it by the order its tabs were opened.
+# The notifier stays off unless the caller names one. If a run raises a real
+# desktop notification, the run interrupts the person who runs the tests.
+#
+# Every template gets the same notifier. The sidebars of a session are one
+# client, and the last sidebar to register sets what that client wants. If the
+# templates of a layout disagree, the order of the tabs at open time settles the
+# result.
 set -eu
 out=$1
 notifier=${2:-off}

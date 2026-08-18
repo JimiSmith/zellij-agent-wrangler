@@ -70,13 +70,13 @@ pub fn numeric_pane(id: &PaneId) -> Option<u32> {
     id.as_str().parse().ok()
 }
 
-/// The focus a host focus query answers with.
+/// The focus that a host focus query gives as its answer.
 ///
 /// `tab_id` is a stable tab identity and not a position, whatever the host API
-/// calls the number: the two agree until a tab before the focused one closes,
-/// and this takes it as the identity, which is what it is. `pane` says which
-/// kind of pane holds the focus, so this sidebar can tell the user's own pane
-/// from itself and from another plugin.
+/// calls the number. The two agree until a tab before the focused tab closes.
+/// This function takes the number as the identity, because that is what it is.
+/// `pane` tells which kind of pane holds the focus. The sidebar can therefore
+/// tell the pane of the user from itself and from another plugin.
 pub fn focus(tab_id: usize, pane: ZellijPaneId, plugin_id: u32) -> Focus {
     let target = match pane {
         ZellijPaneId::Terminal(id) => FocusTarget::Content(PaneId::new(id.to_string())),
@@ -89,29 +89,29 @@ pub fn focus(tab_id: usize, pane: ZellijPaneId, plugin_id: u32) -> Focus {
     }
 }
 
-/// Whether a frame is owed, between the change that made one stale and the
-/// draw that replaces it.
+/// Tells whether a frame is owed, between the change that made one frame stale
+/// and the draw that replaces it.
 ///
-/// A host sends one change as several events, and drawing each of them draws
-/// the halves of a change as well as the whole of it. Holding the debt here
-/// lets one draw settle a burst of them, so what reaches the screen is the
-/// state the burst arrived at rather than every state it passed through.
+/// A host sends one change as several events. A draw for each event shows the
+/// halves of a change as well as the whole change. This debt lets one draw
+/// settle a burst of events. The screen then shows the state at the end of the
+/// burst, and not every state inside it.
 #[derive(Default)]
 pub struct RenderSchedule {
     owed: bool,
 }
 
 impl RenderSchedule {
-    /// Record that the frame on screen is out of date.
+    /// Records that the frame on screen is out of date.
     ///
-    /// True when the draw has to be arranged, which is only for the first of a
-    /// burst: the rest are already covered by the draw it asks for, and that
-    /// is what makes them one frame instead of several.
+    /// The return value is true for the first event of a burst. That event
+    /// must arrange the draw. The draw that it asks for covers the rest of the
+    /// burst, so the burst gives one frame and not several.
     pub fn invalidate(&mut self) -> bool {
         !std::mem::replace(&mut self.owed, true)
     }
 
-    /// Settle the debt, if there is one, at the moment the draw can happen.
+    /// Settles any debt at the moment of the draw.
     pub fn due(&mut self) -> bool {
         std::mem::take(&mut self.owed)
     }
@@ -325,8 +325,9 @@ mod tests {
         assert!(!schedule.invalidate());
         assert!(!schedule.invalidate());
         assert!(schedule.due());
-        // The draw that settled the burst leaves nothing owed, so a later one
-        // that finds no debt draws nothing and a change after it starts over.
+        // The draw that settled the burst leaves nothing owed. A later draw
+        // finds no debt and draws nothing. A change after that draw starts
+        // over.
         assert!(!schedule.due());
         assert!(schedule.invalidate());
     }

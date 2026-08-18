@@ -1,8 +1,8 @@
-//! Delivering one state change to one client.
+//! This module delivers one state change to one client.
 //!
-//! A sink says how to reach a client and nothing about what the client is. That
-//! is what keeps adding a multiplexer to a variant and an arm here, with nothing
-//! else having to learn about it.
+//! A sink says how to reach a client, and says nothing about what the client is.
+//! A new multiplexer therefore costs one variant and one arm in this module.
+//! Nothing else learns about the new multiplexer.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -15,44 +15,46 @@ use agent_wrangler_core::agent::AGENTS_MESSAGE;
 use crate::platform::{command, ran, Ran};
 use crate::proto::Sink;
 
-/// How long one client is given to take one delivery.
+/// The time that one client gets to take one delivery.
 ///
-/// A healthy `zellij pipe` is back in twenty to fifty milliseconds, so this is
-/// forty times over what a working client needs. The room is worth having:
-/// killed too soon, the one delivery that had not yet handed its payload over
-/// leaves that sidebar drawing its last state until something else changes, and
-/// a machine under load is exactly when there is something to draw.
+/// A healthy `zellij pipe` returns in twenty to fifty milliseconds, so this
+/// limit is forty times what a working client needs. The extra room is worth
+/// the cost. A delivery killed too soon never hands its payload over, and that
+/// sidebar then holds its last state until something else changes. A machine
+/// under load is exactly the moment with something to draw.
 ///
-/// The other end of the choice is what a client that never lets go costs.
-/// Clients are delivered to one after another on one thread, and only when
-/// something changed, so each wedged one adds this much to a publish and
-/// nothing adds more.
+/// The other end of the choice is the cost of a client that never lets go. This
+/// module delivers to clients one after another on one thread, and only after a
+/// change. Each wedged client adds this much time to a publish, and nothing
+/// adds more.
 const PATIENCE: Duration = Duration::from_secs(2);
 
-/// What became of one delivery.
+/// The outcome of one delivery.
 ///
-/// A client that cannot be reached is one that has gone, so the answer is what
-/// decides whether the sink is kept. It is deliberately not an error type: there
-/// is nothing to report and nobody to report it to.
+/// A client that this module cannot reach is a client that went away. This
+/// outcome therefore decides whether the daemon keeps the sink. This type is
+/// deliberately not an error type. There is nothing to report, and nobody to
+/// report it to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Delivery {
     Sent,
     Failed,
-    /// The wait ran out, so the program handing the payload over was killed.
+    /// The wait ran out, so this module killed the program that handed the
+    /// payload over.
     ///
-    /// Not a refusal, and the difference matters: `zellij pipe` gives the
-    /// payload to the plugins and then, now and then, never exits. The state is
-    /// there. Counting that as a client that could not be reached would retire
-    /// a sidebar that is alive and being drawn to, and a sidebar never
-    /// registers a second time.
+    /// This outcome is not a refusal, and the difference matters. `zellij pipe`
+    /// gives the payload to the plugins, and then, now and then, it never
+    /// exits. The state arrived. A count of this outcome as an unreachable
+    /// client retires a live sidebar that still receives the state. A sidebar
+    /// never registers a second time.
     Abandoned,
 }
 
-/// Hand one payload to one client.
+/// Hands one payload to one client.
 ///
-/// Side effect: runs a program, or writes to a file, depending on the sink. Both
-/// are given no input and their output is discarded; the exit status is the
-/// whole of what is read back.
+/// Side effect: this function runs a program, or writes to a file. The sink
+/// decides which one. Both get no input, and this module discards their output.
+/// The exit status is the whole of the answer.
 pub fn deliver(sink: &Sink, payload: &str) -> Delivery {
     match sink {
         Sink::Zellij { session } => zellij(session, payload),
@@ -63,11 +65,11 @@ pub fn deliver(sink: &Sink, payload: &str) -> Delivery {
     }
 }
 
-/// Pipe into one named zellij session, addressed to no plugin so that every
+/// Pipes into one named zellij session. The message names no plugin, so every
 /// sidebar in that session hears it.
 ///
-/// Side effect: runs `zellij`, and kills it if it has not finished within
-/// [`PATIENCE`].
+/// Side effect: this function runs `zellij`. If `zellij` does not finish within
+/// [`PATIENCE`], this function kills it.
 fn zellij(session: &str, payload: &str) -> Delivery {
     let mut piping = command("zellij");
     piping
@@ -90,11 +92,11 @@ fn zellij(session: &str, payload: &str) -> Delivery {
     }
 }
 
-/// Append one line to a named pipe, which is how a client that is not a process
-/// this can run is reached.
+/// Appends one line to a named pipe. A named pipe reaches a client that is not
+/// a process that this module can run.
 ///
-/// The payload is written as a single line, so the reader at the other end takes
-/// one state per read regardless of how the writes interleave.
+/// This function writes the payload as a single line. The reader at the other
+/// end takes one state per read, whatever the order of the writes.
 fn pipe(path: &Path, payload: &str) -> bool {
     let one_line: String = payload
         .chars()
@@ -137,10 +139,10 @@ mod tests {
 
     #[test]
     fn a_wedged_client_costs_a_bounded_part_of_every_delivery() {
-        // Both ends of the choice. Short of this, a machine under load has its
-        // deliveries killed on the way out; beyond it, a handful of wedged
-        // clients is a daemon that has stopped saying anything, which is the
-        // failure the wait was written for.
+        // Both ends of the choice. Below this limit, a machine under load
+        // loses its deliveries to the kill. Above this limit, a few wedged
+        // clients stop the daemon from any delivery at all, which is the
+        // failure that the wait prevents.
         assert!(PATIENCE >= Duration::from_millis(500));
         assert!(PATIENCE <= Duration::from_secs(5));
     }

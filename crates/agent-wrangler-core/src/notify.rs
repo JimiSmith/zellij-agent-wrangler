@@ -1,16 +1,15 @@
-//! The command a call for the user is announced with.
+//! The command that announces a call for the user.
 //!
-//! What to run is carried as the words it is run from rather than as a line to
-//! be split, so the splitting happens once where the user wrote it and every
-//! hand it passes through after that holds the arguments a process is actually
-//! spawned with.
+//! A notifier carries what to run as words, not as a line to split. The split
+//! happens once, where the user wrote the line. Every later holder of the
+//! notifier therefore holds the arguments that a process is spawned with.
 //!
-//! The program is kept apart from its arguments, because a notifier with nothing
-//! to run is not a notifier: refusing it here is what leaves nothing to check at
-//! the moment a call is raised.
+//! The program stays apart from its arguments. A notifier with no program to run
+//! is not a notifier. This module refuses such a notifier, so nothing is left to
+//! test at the moment when a call is raised.
 
-/// What a desktop notification is raised by. The title and the body are appended
-/// to the arguments, which is the shape `notify-send` and its like take.
+/// What raises a desktop notification. The title and the body come after the
+/// arguments, which is the shape that `notify-send` and similar programs take.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Notifier {
     program: String,
@@ -18,11 +17,11 @@ pub struct Notifier {
 }
 
 impl Notifier {
-    /// The notifier these words name, or `None` where they name nothing that
-    /// could be run.
+    /// The notifier that these words name, or `None` where they name nothing to
+    /// run.
     ///
-    /// A notifier that is no program is not one that fails when a call comes: it
-    /// is one that was never asked for, which is the same answer as off.
+    /// A notifier with no program does not fail when a call comes. Nobody asked
+    /// for that notifier, which is the same answer as off.
     pub fn new(words: Vec<String>) -> Option<Self> {
         let mut words = words.into_iter();
         let program = words.next()?;
@@ -35,7 +34,7 @@ impl Notifier {
         }
     }
 
-    /// The words it was built from, for handing on unchanged.
+    /// The words that built it, to pass on unchanged.
     pub fn words(&self) -> Vec<String> {
         let mut words = vec![self.program.clone()];
         words.extend(self.arguments.iter().cloned());
@@ -47,8 +46,8 @@ impl Notifier {
         &self.program
     }
 
-    /// Everything to run it with for one notification: whatever it was given,
-    /// then the title and the body.
+    /// Everything to run it with for one notification: the arguments it was
+    /// given, then the title and the body.
     pub fn arguments(&self, title: &str, body: &str) -> Vec<String> {
         let mut arguments = self.arguments.clone();
         arguments.push(title.to_string());

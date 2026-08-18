@@ -1,13 +1,12 @@
-//! What a session calls itself, read from the files the agent running it keeps.
+//! What a session calls itself, read from the files that the agent keeps.
 //!
-//! Neither agent puts its title in the hook body, so both are read from disk at
-//! the moment a hook fires. That is also what keeps a label current: an agent
-//! fires hooks throughout its turn, and each one is another look at a title
-//! that may have changed since the last.
+//! Neither agent puts its title in the hook body, so both titles are read from
+//! disk at the moment when a hook fires. That is also what keeps a label
+//! current. An agent fires hooks throughout its turn, and each hook is another
+//! look at a title that can differ from the last one.
 //!
-//! Nothing here fails: a file that is missing, unreadable or not what was
-//! expected yields an empty title, which is the same answer as a session that
-//! has not titled itself yet.
+//! Nothing here fails. A file that is missing, unreadable or unexpected gives an
+//! empty title. That is the same answer as a session with no title yet.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -16,14 +15,14 @@ use serde_json::Value;
 
 use crate::agent::Meta;
 
-/// How much of a transcript's end is read. Reading a fixed amount keeps the cost
-/// of a hook the same however long the session has run.
+/// How much of a transcript's end is read. A fixed amount keeps the cost of a
+/// hook the same, however long the session runs.
 ///
-/// Only the end: what a session records once, as it begins, falls out of this
-/// window as the session grows, and is not looked for again. It does not need to
-/// be. A record carries what the client could find *this time*, and one that
-/// finds nothing says nothing - the sidebar keeps what it already knew. So a
-/// color has to be found once, early, and never again.
+/// Only the end is read. What a session records once, as it begins, falls out of
+/// this window as the session grows, and nothing looks for it again. A record
+/// carries what the client found this time. A record that finds nothing says
+/// nothing, and the sidebar keeps what it already knew. A color must be found
+/// once, early, and never again.
 const TAIL: u64 = 64 * 1024;
 
 /// The last `TAIL` bytes of a file, and whether anything was cut off the front
@@ -47,17 +46,19 @@ fn text<'a>(record: &'a Value, key: &str) -> Option<&'a str> {
 
 /// What a Claude session is called, read from its transcript.
 ///
-/// Two kinds of title are recorded: the one the user gave it and the one Claude
-/// wrote for itself. A given name wins wherever both appear, since it was asked
-/// for; between two of a kind the later one wins, since it is the later name.
+/// The transcript records two kinds of title: the title that the user gave, and
+/// the title that Claude wrote for itself. A given title wins wherever both
+/// appear, because the user asked for it. Between two titles of a kind, the
+/// later one wins, because it is the later name.
 ///
-/// The color is read the same way as a title Claude wrote for itself: the last
-/// one in the window is the one in force.
+/// The color is read the same way as a title that Claude wrote for itself. The
+/// last color in the window is the one in force.
 ///
-/// A teammate's own name rides on every conversation record it writes, so the
-/// first one found in the window answers. The record that *renames* a teammate
-/// carries the same field and is passed over: it says what the name became, and
-/// the conversation records after it already say so.
+/// A teammate's own name rides on every conversation record that it writes, so
+/// the first name found in the window answers. The record that renames a
+/// teammate carries the same field, and the reader passes over it. That record
+/// says what the name became, and the conversation records after it already say
+/// so.
 pub fn claude(transcript: &str) -> Meta {
     let Some((bytes, cut)) = tail(Path::new(transcript)) else {
         return Meta::default();
@@ -71,9 +72,9 @@ pub fn claude(transcript: &str) -> Meta {
     let (mut given, mut written) = (String::new(), String::new());
     let (mut name, mut color) = (String::new(), String::new());
     for line in lines {
-        // Reading every record as JSON would parse the whole conversation; the
-        // records worth reading name themselves in bytes that can be looked for
-        // first.
+        // A JSON parse of every record parses the whole conversation. The
+        // records that matter name themselves in bytes, and a search for those
+        // bytes comes first.
         let wanted = [
             b"\"custom-title\"".as_slice(),
             b"\"ai-title\"",
@@ -121,11 +122,11 @@ fn workspace(home: &Path, session: &str) -> PathBuf {
         .join("workspace.yaml")
 }
 
-/// What a Copilot session is called: the name it was given, or the summary it
-/// wrote for itself.
+/// What a Copilot session is called: the name that it was given, or the summary
+/// that it wrote for itself.
 ///
-/// Copilot has no teammates of its own, so a session read here is always one of
-/// its own.
+/// Copilot has no teammates of its own, so a session read here is always a
+/// session of its own.
 pub fn copilot(home: &Path, session: &str) -> Meta {
     let Ok(text) = std::fs::read_to_string(workspace(home, session)) else {
         return Meta::default();
@@ -142,9 +143,9 @@ pub fn copilot(home: &Path, session: &str) -> Meta {
 
 /// One top-level field of a workspace file, reduced to a single line.
 ///
-/// Only the quoting a written-out YAML scalar uses is undone, and a value
-/// written as a block is taken as its first non-empty line: a title is one line
-/// of text, and the rest of a block is not part of it.
+/// The reader undoes only the quotes that a written-out YAML scalar uses. A
+/// value written as a block is taken as its first non-empty line. A title is one
+/// line of text, and the rest of a block is not part of it.
 fn field(text: &str, key: &str) -> String {
     let prefix = format!("{key}:");
     let mut lines = text.lines();
@@ -156,7 +157,7 @@ fn field(text: &str, key: &str) -> String {
         return scalar(first);
     }
     lines
-        // A line starting in the first column has left the block behind.
+        // A line that starts in the first column is outside the block.
         .take_while(|line| line.starts_with(char::is_whitespace) || line.trim().is_empty())
         .map(str::trim)
         .find(|line| !line.is_empty())
@@ -265,7 +266,7 @@ mod tests {
         let path = transcript(
             scratch.path(),
             &[
-                // The rename record says what the name became; the records
+                // The rename record says what the name became. The records
                 // written afterwards are what it is called by.
                 r#"{"type":"agent-name","agentName":"scout"}"#,
                 r#"{"type":"assistant","agentName":"scout","teamName":"port"}"#,
@@ -292,9 +293,10 @@ mod tests {
 
     #[test]
     fn a_session_that_has_run_long_reports_only_what_is_still_in_the_window() {
-        // What a session records once, as it begins, scrolls out of the window
-        // and is not looked for again: a scan says what it can see now, and
-        // saying nothing about a color is not saying the color is gone.
+        // What a session records once, as it begins, scrolls out of the window,
+        // and nothing looks for it again. A scan says what it can see now. A
+        // scan that says nothing about a color does not say that the color is
+        // gone.
         let scratch = Scratch::new("long");
         let mut lines = vec![r#"{"type":"agent-color","agentColor":"red"}"#.to_string()];
         let filler = format!(r#"{{"type":"assistant","text":"{}"}}"#, "x".repeat(500));

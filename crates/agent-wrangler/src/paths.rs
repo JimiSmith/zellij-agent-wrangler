@@ -1,23 +1,23 @@
-//! Where this keeps its things, on each of the systems it runs on.
+//! Where this program keeps its files, on each system that it runs on.
 //!
-//! Every path is derived rather than configured, and every lookup falls through
-//! to something that exists: a machine that answers none of these gets the
-//! working directory rather than an error, because none of the callers have
-//! anywhere to report one to.
+//! This module derives every path, and nobody configures one. Every lookup falls
+//! through to a place that exists. A machine that answers none of these lookups
+//! gets the working directory rather than an error. No caller has anywhere to
+//! report an error to.
 
 use std::path::PathBuf;
 
-/// The user's home, by whichever name this system gives it.
+/// The home directory of the user, by whatever name this system gives it.
 pub fn home() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
 }
 
-/// Where the daemon keeps the records it has been told about.
+/// Where the daemon keeps the records that it received.
 ///
-/// `XDG_STATE_HOME` where it is set, `%LOCALAPPDATA%` on Windows, and
-/// `~/.local/state` otherwise.
+/// The directory is `XDG_STATE_HOME` where that variable is set,
+/// `%LOCALAPPDATA%` on Windows, and `~/.local/state` otherwise.
 pub fn state_dir() -> PathBuf {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -27,18 +27,18 @@ pub fn state_dir() -> PathBuf {
     base.join("agent-wrangler")
 }
 
-/// The name of the socket the daemon listens on.
+/// The name of the socket that the daemon listens on.
 ///
-/// One daemon per user, and the name carries the user because the namespace it
-/// is claimed in is shared by everyone on the machine: two users each running
-/// their own daemon must not be one user failing to start theirs.
+/// There is one daemon per user, and the name carries the user. Everybody on the
+/// machine shares the namespace that the name is claimed in. Two users must each
+/// run a daemon of their own, and neither user must fail to start one.
 pub fn socket_name() -> String {
     format!("agent-wrangler-{}.sock", user())
 }
 
-/// Who this is running as, as far as the environment says. A machine that says
-/// nothing gets one shared name, which is the same answer a single-user machine
-/// would have given anyway.
+/// The user that this program runs as, as far as the environment says. A machine
+/// that says nothing gets one shared name, which is the same answer that a
+/// machine with a single user gives anyway.
 fn user() -> String {
     let name = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
@@ -62,7 +62,7 @@ mod tests {
         let name = socket_name();
         assert!(name.starts_with("agent-wrangler-"), "{name}");
         assert!(name.ends_with(".sock"), "{name}");
-        // Whatever the user is called, the name is one the namespace accepts.
+        // Whatever the name of the user, the namespace accepts the socket name.
         assert!(name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')));

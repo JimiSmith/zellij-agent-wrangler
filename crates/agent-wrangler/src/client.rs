@@ -1,8 +1,9 @@
-//! Reaching the daemon, and starting it when there is none.
+//! This module reaches the daemon. When there is no daemon, this module starts
+//! one.
 //!
-//! Everything here runs inside somebody else's turn, so nothing is allowed to
-//! fail loudly or to wait long. A daemon that cannot be reached or started
-//! costs the event, not the agent that reported it.
+//! Everything in this module runs inside the turn of somebody else, so nothing
+//! can fail loudly or wait long. A daemon that this module cannot reach or start
+//! costs the event, and not the agent that reported it.
 
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::time::Duration;
@@ -16,8 +17,8 @@ use crate::paths;
 use crate::platform::spawn_detached;
 use crate::proto::{read_message, write_message, Inbound, Outbound};
 
-/// How long to keep trying a socket that a freshly started daemon has not
-/// claimed yet, as attempts and the pause between them.
+/// How long this module tries a socket that a new daemon did not claim yet, as
+/// a number of attempts and the pause between them.
 const TRIES: u32 = 40;
 const PAUSE: Duration = Duration::from_millis(50);
 
@@ -26,16 +27,18 @@ fn connect() -> std::io::Result<Stream> {
     Stream::connect(name)
 }
 
-/// Start a daemon, which is this same executable under another argument.
+/// Starts a daemon, which is this same executable under another argument.
 ///
-/// Side effect: spawns a detached process. Running our own path is what makes a
-/// daemon and the hook that started it impossible to have at different versions.
+/// Side effect: this function spawns a detached process. It runs the path of
+/// this executable, so a daemon and the hook that started it always have the
+/// same version.
 fn start() -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
     spawn_detached(&exe, &["daemon"])
 }
 
-/// Connect, starting a daemon and waiting for it if nothing is listening.
+/// Connects to the daemon. If nothing listens, this function starts a daemon
+/// and waits for it.
 fn reach() -> std::io::Result<Stream> {
     if let Ok(stream) = connect() {
         return Ok(stream);
@@ -52,21 +55,23 @@ fn reach() -> std::io::Result<Stream> {
     Err(last.unwrap_or_else(|| std::io::Error::other("no daemon")))
 }
 
-/// Say one thing to the daemon and stop listening.
+/// Says one thing to the daemon, and then stops.
 ///
-/// The connection is dropped rather than read back, because there is nothing the
-/// caller could do with an answer: what the daemon does with the message reaches
-/// the user through the clients it delivers to, not through here.
+/// This function drops the connection and does not read it back, because the
+/// caller can do nothing with an answer. What the daemon does with the message
+/// reaches the user through the clients that it delivers to, and not through
+/// this function.
 pub fn tell(message: &Inbound) -> std::io::Result<()> {
     let stream = reach()?;
     let mut writer = BufWriter::new(&stream);
     write_message(&mut writer, message)
 }
 
-/// Ask the daemon for the state it holds.
+/// Asks the daemon for the state that it holds.
 ///
-/// The daemon answers as soon as it reads the question and closes only when this
-/// end does, so the reply is read before the connection is dropped.
+/// The daemon answers as soon as it reads the question, and it closes only after
+/// this end closes. This function therefore reads the reply before it drops the
+/// connection.
 pub fn ask() -> std::io::Result<String> {
     let stream = reach()?;
     {
@@ -80,12 +85,13 @@ pub fn ask() -> std::io::Result<String> {
     }
 }
 
-/// Ask the daemon to say what it does, and write it out until it stops.
+/// Asks the daemon to say what it does, and writes the answer out until the
+/// daemon stops.
 ///
-/// Side effect: writes a line per record to `out`, flushing each, so that a run
-/// being read as it happens is not held in a buffer waiting for the next one.
-/// Returns when the daemon goes away, which for a watcher is the only ending
-/// there is: nothing here asks to stop.
+/// Side effect: this function writes one line per record to `out`, and flushes
+/// each line. A buffer therefore never holds a record while a reader waits for
+/// the next one. When the daemon goes away, this function returns. That end is
+/// the only end that a watcher has, because nothing here asks to stop.
 pub fn watch<W: Write>(out: &mut W) -> std::io::Result<()> {
     let stream = reach()?;
     {
@@ -93,9 +99,9 @@ pub fn watch<W: Write>(out: &mut W) -> std::io::Result<()> {
         write_message(&mut writer, &Inbound::Monitor { format: FORMAT })?;
     }
     let mut reader = BufReader::new(&stream);
-    // Written out as it arrived rather than decoded and encoded again: what the
-    // daemon says is already one record to a line, and passing it through means
-    // a watcher of a later build cannot silently drop a field it does not know.
+    // This loop writes each line as it arrived, and does not decode and encode
+    // it again. What the daemon says is already one record to a line. A watcher
+    // of a later build therefore cannot drop an unknown field without a word.
     let mut line = String::new();
     loop {
         line.clear();
@@ -113,8 +119,9 @@ mod tests {
 
     #[test]
     fn giving_up_takes_a_bounded_time() {
-        // A hook runs inside an agent's turn. Whatever goes wrong, this has to
-        // end, and end soon enough that the agent is not visibly held up.
+        // A hook runs inside the turn of an agent. Whatever goes wrong, this
+        // function must end, and end soon enough that nobody sees the agent
+        // held up.
         assert!(PAUSE * TRIES <= Duration::from_secs(3));
     }
 }

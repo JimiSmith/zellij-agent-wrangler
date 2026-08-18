@@ -1,17 +1,18 @@
-//! What a client has been asked to show.
+//! What a client is asked to show.
 //!
-//! Only the questions the drawing answers to. How a client is configured is its
-//! own business: a plugin is handed strings by a layout and a program reads a
-//! command line, and neither of those is a fact about what a row looks like.
+//! Only the questions the drawing answers. The configuration of a client is the
+//! business of that client. A layout hands strings to a plugin, and a program
+//! reads a command line. Neither of those is a fact about the look of a row.
 
 pub use agent_wrangler_core::label::Label;
 
-/// Everything the drawing can be asked for.
+/// Everything that the drawing can be asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct View {
     pub label: Label,
-    /// Whether the tree is followed by a block per agent, the same sessions
-    /// gathered by which agent they are rather than by where they are.
+    /// Whether a block per agent follows the tree. A block holds the same
+    /// sessions, gathered by the agent they are rather than by the place they
+    /// are in.
     pub sections: bool,
     /// Whether an agent's row says whose turn it is.
     pub turn_state: bool,

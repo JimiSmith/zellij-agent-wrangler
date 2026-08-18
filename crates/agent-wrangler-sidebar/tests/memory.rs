@@ -1,11 +1,12 @@
-//! The sidebar's state must not grow with how long a session has been running.
+//! The state of the sidebar must not grow with the duration of a session.
 //!
-//! The plugin lives in wasm linear memory, which only ever grows: nothing is
-//! handed back to the host, so anything the application keeps per event becomes
-//! memory the pane never gives up. This drives `Application` through the burst
-//! of inputs a real session produces and compares the live heap early against
-//! the live heap much later. Steady state is the only acceptable answer; a
-//! reading that climbs with the step count is state accumulating per call.
+//! The plugin lives in wasm linear memory, which only grows. The plugin gives
+//! nothing back to the host. Data that the application keeps for each event
+//! becomes memory that the pane never releases. This test drives `Application`
+//! through the burst of inputs of a real session. It compares the live heap
+//! early against the live heap much later. A steady state is the only
+//! acceptable result. A reading that climbs with the step count shows state
+//! that accumulates for each call.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
@@ -23,7 +24,7 @@ use agent_wrangler_ui::{ansi, Rect};
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 
-/// The system allocator, counting the bytes currently handed out.
+/// The system allocator, with a count of the bytes that are in use.
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
@@ -58,14 +59,15 @@ const TABS: usize = 10;
 const PANES_PER_TAB: usize = 3;
 const AGENTS: usize = 6;
 
-/// Where the readings are taken, and how far apart they are allowed to drift.
+/// The points of the two readings, and the drift that is permitted between
+/// them.
 ///
-/// The early reading is late enough that everything reached once has been
-/// reached, so what separates the two checkpoints is only what the steps
-/// between them left behind. Standing still costs tens of bytes across this
-/// many steps while anything held per attention call runs into hundreds of
-/// kilobytes, which leaves room for a tolerance loose enough never to be flaky
-/// and still decisive.
+/// The first reading comes late enough for every one-time allocation to
+/// complete. Only the steps between the two checkpoints separate the readings.
+/// A sidebar that stands still costs tens of bytes across this number of
+/// steps. State that the sidebar holds for each attention call costs hundreds
+/// of kilobytes. That gap makes room for a tolerance that is loose enough to
+/// avoid a flaky test and still decisive.
 const SETTLE: usize = 400;
 const STEPS: usize = 4_000;
 const TOLERANCE: usize = 8 * 1024;
@@ -83,7 +85,8 @@ fn tabs(step: usize) -> Vec<TabReport> {
         .map(|tab| TabReport {
             id: TabId::new(tab.to_string()),
             position: TabPosition::at(tab),
-            // Tab names change as the user renames and as zellij renumbers.
+            // Tab names change with renames by the user and with renumbers by
+            // zellij.
             name: format!("tab-{tab}-{}", step % 7),
             active: tab == step % TABS,
         })
@@ -99,8 +102,8 @@ fn layout(step: usize) -> SessionLayout {
                 content_panes: (0..PANES_PER_TAB)
                     .map(|pane| PaneReport {
                         id: PaneId::new(pane_id(tab, pane)),
-                        // A shell prompt retitles its pane constantly; every
-                        // one of these is a string the sidebar has not seen.
+                        // A shell prompt retitles its pane again and again.
+                        // Each title is a new string for the sidebar.
                         title: format!("~/work/repo-{tab}-{pane} $ step {step}"),
                         focused: tab == step % TABS && pane == step % PANES_PER_TAB,
                     })
@@ -111,12 +114,11 @@ fn layout(step: usize) -> SessionLayout {
     }
 }
 
-/// The wire payload one state message carries, built the way the daemon builds
-/// it: every session it holds, encoded as a run of records.
+/// The wire payload of one state message, built the way that the daemon builds
+/// it. The payload holds every session as a run of records.
 ///
-/// Every agent sits in the pane the user is focusing, so each step answers
-/// whichever of them are calling and the cost of an answered call is what the
-/// readings measure.
+/// Every agent sits in the pane that the user focuses. Each step answers the
+/// agents that call. The readings measure the cost of an answered call.
 fn payload(step: usize) -> String {
     let mut registry = Registry::default();
     for n in 0..AGENTS {
@@ -151,8 +153,8 @@ fn payload(step: usize) -> String {
     agent::state(&registry.encode())
 }
 
-/// Read a state message into the registry and pane placement a snapshot
-/// carries, keeping only the records this session is the one drawing.
+/// Reads a state message into the registry and the pane placement of a
+/// snapshot. It keeps only the records that this session draws.
 fn snapshot(payload: &str) -> AgentSnapshot {
     let (_, records) = agent::read_state(payload).expect("a state message");
     let mut registry = Registry::default();
@@ -176,8 +178,8 @@ fn snapshot(payload: &str) -> AgentSnapshot {
     AgentSnapshot::Compatible { registry, panes }
 }
 
-/// One burst of host events and one frame, exactly as the plugin receives and
-/// draws them.
+/// One burst of host events and one frame, exactly as the plugin receives them
+/// and draws them.
 fn step(app: &mut Application, step: usize) {
     app.reduce(Input::TabsReported(tabs(step)));
     app.reduce(Input::LayoutReported(layout(step)));

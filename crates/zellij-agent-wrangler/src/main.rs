@@ -7,25 +7,26 @@ use agent_wrangler_ui::{ansi, Rect};
 use zellij_agent_wrangler::adapter;
 use zellij_tile::prelude::*;
 
-/// Run the client from a directory that cannot disappear.
+/// The directory that the client runs from. This directory cannot disappear.
 ///
-/// Zellij otherwise uses the directory the sidebar pane was opened in. A
-/// removed worktree can take that directory away while the session remains,
-/// causing every later spawn to fail before reaching even an absolute client
-/// path. None of these calls reads a working directory, so the root is safe.
+/// Zellij otherwise uses the directory where the sidebar pane opened. A removed
+/// worktree can take that directory away while the session remains. Every later
+/// spawn then fails before it reaches even an absolute client path. None of
+/// these calls reads a working directory, so the root is safe.
 const RUN_FROM: &str = "/";
 const CALL: &str = "call";
 
-/// How long a stale frame waits before it is drawn, in seconds.
+/// The wait of a stale frame before the draw, in seconds.
 ///
-/// Zero is not immediate: the timer comes back behind the events already
-/// queued, which is the wait this wants. Measured at ten tabs it arrives 1ms
-/// after the ask when nothing else is happening and 22ms when a tab switch is
-/// in flight, by which time the visibility change and the pane and tab reports
-/// that make up the switch have all been reduced and one frame can show the
-/// end of it. A fixed 15ms wait was measured beside it and coalesced no
-/// better, the queue being the longer of the two; it only moved every frame
-/// 15ms later.
+/// Zero is not immediate. The timer comes back behind the events in the queue,
+/// and that queue is the wait that this code wants. A measurement at ten tabs
+/// shows this behavior. With nothing else in progress, the timer arrives 1ms
+/// after the request. During a tab switch, the timer arrives 22ms after the
+/// request. By that time the application reduced the visibility change and the
+/// pane and tab reports of the switch. One frame can therefore show the end of
+/// the switch. A fixed 15ms wait was measured beside zero. It coalesced no
+/// better, because the queue was the longer of the two. It only moved every
+/// frame 15ms later.
 const SETTLE: f64 = 0.0;
 
 #[derive(Default)]
@@ -51,9 +52,9 @@ impl Plugin {
             effects.extend(self.application.reduce(Input::EventSettled).effects);
             self.drain(&mut repaint, &mut effects);
         }
-        // The draw is arranged rather than performed: a change is reported as
-        // several events, and the timer is what lets the last of them be drawn
-        // instead of each of them.
+        // This code arranges the draw and does not perform it. A change
+        // arrives as several events. The timer draws the frame after the last
+        // event instead of after each event.
         if repaint && self.schedule.invalidate() {
             set_timeout(SETTLE);
         }
@@ -194,15 +195,16 @@ impl ZellijPlugin for Plugin {
             EventType::SessionUpdate,
             EventType::RunCommandResult,
         ]);
-        // `Visible` reports later changes, but Zellij does not necessarily
-        // emit an initial `Visible(true)` for a newly opened plugin pane. Seed
-        // that fact now. The initial tab and pane reports provide focus.
+        // `Visible` reports later changes. Zellij does not always emit an
+        // initial `Visible(true)` for a new plugin pane. This code seeds that
+        // fact now. The first tab and pane reports give the focus.
         self.application.reduce(Input::VisibilityChanged(true));
     }
 
     fn update(&mut self, event: Event) -> bool {
-        // The timer carries no facts. It is the moment a frame owed for the
-        // events before it can be drawn, and the only event that draws one.
+        // The timer carries no facts. It marks the moment for the draw of a
+        // frame that the earlier events owe. It is the only event that draws a
+        // frame.
         if let Event::Timer(_) = event {
             return self.schedule.due();
         }
@@ -220,8 +222,8 @@ impl ZellijPlugin for Plugin {
         let input = if message.name == AGENTS_MESSAGE {
             adapter::agents(
                 message.payload.as_deref().unwrap_or_default(),
-                // Agent reports cannot belong here until the session is named;
-                // an empty name matches no Zellij session.
+                // Agent reports cannot belong here until the session has a
+                // name. An empty name matches no Zellij session.
                 self.application.session_name().unwrap_or_default(),
             )
             .map(Input::Agents)

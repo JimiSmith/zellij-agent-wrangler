@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Drive a program in a real pty and assert on what it puts on screen.
+"""Drives a program in a real pty and asserts on what it puts on screen.
 
-A test script is a list of steps, one per line, read from a file or passed in
-as strings. Each step is `name: argument`; blank lines and lines starting with
-`#` are ignored. See tests/README.md for the step reference.
+A test script is a list of steps, one step per line. The steps come from a file
+or from a list of strings. Each step has the form `name: argument`. The harness
+ignores blank lines and lines that start with `#`. For the step reference, see
+tests/README.md.
 
-Every failure is loud: the current screen and the tail of the raw byte stream
-are printed before the run exits non-zero, because a harness that fails quietly
-costs more time than no harness at all.
+Every failure is loud. The harness prints the current screen and the tail of the
+raw byte stream before the run exits with a non-zero status. A harness that
+fails quietly costs more time than no harness at all.
 
-Session safety: this harness only ever creates and deletes zellij sessions
-whose names start with `wrangler-test-`. Cleanup works from the names this run
-itself mentioned, and `_guard_session_name` rejects anything outside the
-prefix, so a developer's own sessions are never in reach.
+Session safety: this harness only creates and deletes zellij sessions with names
+that start with `wrangler-test-`. Cleanup uses the names that this run mentioned.
+`_guard_session_name` rejects every name outside the prefix, so the harness never
+reaches the sessions of the developer.
 """
 
 import argparse
@@ -37,7 +38,7 @@ from screen import Screen  # noqa: E402
 SESSION_PREFIX = "wrangler-test-"
 _SESSION_NAME = re.compile(r"wrangler-test-[A-Za-z0-9_.-]+")
 
-# Shell commands that would reach beyond the sessions this harness created.
+# Shell commands that can reach beyond the sessions that this harness created.
 _FORBIDDEN = ("kill-all-sessions", "delete-all-sessions")
 
 DEFAULT_ROWS = 24
@@ -60,7 +61,7 @@ class StepFailure(Exception):
 
 
 def unescape(literal):
-    """Turn a `keys:` argument into the bytes to write to the pty."""
+    """Turns a `keys:` argument into the bytes that go to the pty."""
 
     def control(match):
         return chr(ord(match.group(1).upper()) ^ 0x40)
@@ -69,8 +70,8 @@ def unescape(literal):
     out = []
     index = 0
     while index < len(text):
-        # `\\` is tried first, so a literal backslash cannot swallow the letter
-        # after it and turn into a different escape.
+        # The loop tries `\\` first, so a literal backslash cannot swallow the
+        # letter after it and become a different escape.
         for token, value in _ESCAPES:
             if text.startswith(token, index):
                 out.append(value)
@@ -91,7 +92,8 @@ def which(binary):
 
 
 def live_sessions():
-    """Names of zellij sessions currently known, or [] if zellij is absent."""
+    """The names of the known zellij sessions. If zellij is absent, the list is
+    empty."""
     if not which("zellij"):
         return []
     result = subprocess.run(
@@ -99,14 +101,14 @@ def live_sessions():
         capture_output=True,
         text=True,
     )
-    # A non-zero exit only means there were no sessions to list, and the
-    # explanation goes to stderr, so stdout is read either way rather than
-    # letting a leaked session survive cleanup.
+    # A non-zero exit only means that there were no sessions to list. The
+    # explanation goes to stderr. This code therefore reads stdout in both
+    # cases, and no leaked session survives cleanup.
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
 class Pty:
-    """A forked child on the far end of a pty, plus the screen it draws on."""
+    """A forked child on the far end of a pty, and the screen that it draws on."""
 
     def __init__(self, argv, rows=DEFAULT_ROWS, cols=DEFAULT_COLS, env=None):
         self.argv = argv
@@ -115,8 +117,9 @@ class Pty:
         self.exit_status = None
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            # In the child. Nothing here may return into the parent's control
-            # flow, so a failed exec ends the process rather than raising.
+            # This code runs in the child. Nothing here must return into the
+            # control flow of the parent. A failed exec therefore ends the
+            # process and raises no exception.
             try:
                 if env is not None:
                     os.execvpe(argv[0], argv, env)
@@ -143,7 +146,7 @@ class Pty:
         os.write(self.fd, data)
 
     def pump(self, timeout=0.1):
-        """Read whatever is available and replay it. True if bytes arrived."""
+        """Reads the available bytes and replays them. Returns true for new bytes."""
         got = False
         deadline = time.monotonic() + timeout
         while True:
@@ -159,7 +162,7 @@ class Pty:
             try:
                 chunk = os.read(self.fd, 65536)
             except OSError as exc:
-                # A pty reports the child's exit as EIO rather than as EOF.
+                # A pty reports the exit of the child as EIO and not as EOF.
                 if exc.errno in (errno.EIO, errno.EBADF):
                     break
                 raise
@@ -168,8 +171,8 @@ class Pty:
             self.raw += chunk
             self.screen.feed(chunk)
             got = True
-            # Queries such as "report the cursor position" are answered here.
-            # A program that blocks on the answer stalls if this is skipped.
+            # This code answers queries such as "report the cursor position".
+            # Without an answer, a program that waits for one stalls.
             reply = self.screen.take_replies()
             if reply:
                 try:
@@ -216,8 +219,8 @@ class Runner:
         self.pty = None
         self.sessions = []
         self.dumps = []
-        # Applied to every child spawned after the `env:` step that set them,
-        # which is how a script pins things like PS1 or TERM.
+        # These variables go to every child that starts after the `env:` step
+        # that set them. A script pins PS1 or TERM in this way.
         self.env = {}
 
     # -- lifecycle --------------------------------------------------------
@@ -237,10 +240,10 @@ class Runner:
         self.pty = Pty(argv, self.rows, self.cols, child_env)
 
     def _note_sessions(self, text):
-        """Record every `wrangler-test-` name a command mentions.
+        """Records every `wrangler-test-` name that a command mentions.
 
-        Cleanup works from this list, so a session is only ever deleted because
-        a command this run issued named it.
+        Cleanup works from this list. The harness deletes a session only because
+        a command from this run named it.
         """
         for name in _SESSION_NAME.findall(text):
             if name not in self.sessions:
@@ -294,12 +297,13 @@ class Runner:
         name, sep, value = argument.partition("=")
         if not sep:
             raise StepFailure("env step wants NAME=value, got %r" % argument)
-        # Variables are expanded so a step can name a path relative to where the
-        # run started. Some of what the harness drives resolves its own
-        # directories through the XDG rules, which ignore a value that is not an
-        # absolute path, and silently reading the developer's real configuration
-        # instead of the test's is the kind of failure that looks like a bug in
-        # what is being tested.
+        # This code expands variables, so a step can name a path relative to the
+        # start directory of the run. Some programs that the harness drives
+        # resolve their own directories through the XDG rules. Those rules ignore
+        # a value that is not an absolute path. Without a message, the program
+        # then reads the real configuration of the developer instead of the
+        # configuration of the test. That failure looks like a bug in the program
+        # under test.
         self.env[name.strip()] = os.path.expandvars(value)
 
     def _step_sh(self, argument, must_succeed=True):
@@ -326,8 +330,8 @@ class Runner:
     def _step_keys(self, argument):
         child = self._need_pty("keys")
         child.write(unescape(argument))
-        # Read back whatever the write provoked, so a following `wait:` starts
-        # from a screen that has already seen the reaction.
+        # This code reads back the reaction to the write. The next `wait:` step
+        # then starts from a screen that shows the reaction.
         child.pump(0.2)
 
     def _step_wait(self, argument):
@@ -367,15 +371,15 @@ class Runner:
         self.cols = int(cols)
         child.screen.rows = self.rows
         child.screen.cols = self.cols
-        # The grid is rebuilt at the new size, so everything drawn before the
-        # resize is gone and the child is expected to redraw.
+        # The reset builds the grid again at the new size. Everything from
+        # before the resize is gone, and the child must draw the screen again.
         child.screen.reset()
         child.set_winsize(self.rows, self.cols)
 
     # -- helpers ----------------------------------------------------------
 
     def _split_timeout(self, argument):
-        """Split a trailing `@ <seconds>` timeout off a wait step's argument."""
+        """Splits a trailing `@ <seconds>` timeout off the argument of a wait step."""
         if "@" in argument:
             needle, _, tail = argument.rpartition("@")
             try:
@@ -394,8 +398,8 @@ class Runner:
             if time.monotonic() >= deadline:
                 raise StepFailure("timed out after %.1fs %s" % (timeout, description))
             if not child.alive():
-                # A last drain: the child can draw the thing and exit within
-                # the same pump window.
+                # This is a last drain. The child can draw the text and exit
+                # inside the same pump window.
                 child.pump(0.2)
                 if predicate():
                     return
@@ -444,7 +448,7 @@ class Runner:
 
 
 def run_script(steps, rows=DEFAULT_ROWS, cols=DEFAULT_COLS, outdir=None, verbose=True):
-    """Run `steps` to completion and return a process exit code."""
+    """Runs `steps` to the end and returns a process exit code."""
     runner = Runner(rows=rows, cols=cols, outdir=outdir, verbose=verbose)
     try:
         runner.run(steps)
@@ -453,7 +457,7 @@ def run_script(steps, rows=DEFAULT_ROWS, cols=DEFAULT_COLS, outdir=None, verbose
         runner.cleanup()
         return 1
     except Exception as failure:
-        # An unexpected error still owes the reader the screen it happened on.
+        # An unexpected error still owes the reader the screen of the failure.
         runner.report_failure("%s: %s" % (type(failure).__name__, failure))
         runner.cleanup()
         raise

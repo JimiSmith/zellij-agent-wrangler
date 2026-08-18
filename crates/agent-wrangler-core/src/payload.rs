@@ -1,21 +1,21 @@
-//! Reading an agent's hook payload.
+//! This module reads an agent's hook payload.
 //!
-//! Two agents write the same fields under different spellings, so both are
-//! accepted, snake_case preferred. A body that is not a JSON object yields an
-//! empty payload rather than an error: an event that names no session is
-//! dropped, and that is the only field the caller needs to test.
+//! Two agents write the same fields under different spellings, so the reader
+//! accepts both and prefers snake_case. A body that is not a JSON object gives
+//! an empty payload rather than an error. An event that names no session is
+//! dropped, and the session is the only field that the caller must test.
 
 use serde_json::Value;
 
-/// The fields the sidebar takes from a hook body. `recoverable` is present only
-/// when the body carried a genuine JSON boolean, since an agent that says
-/// nothing about it is not saying `false`.
+/// The fields that the sidebar takes from a hook body. `recoverable` is present
+/// only when the body carried a real JSON boolean. An agent that says nothing
+/// about `recoverable` does not say `false`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Payload {
     pub session_id: String,
     pub cwd: String,
-    /// Where the agent is writing the conversation, which is the only place it
-    /// says what it has decided to call the session.
+    /// Where the agent writes the conversation. This file is the only place
+    /// where the agent says what it calls the session.
     pub transcript_path: String,
     pub recoverable: Option<bool>,
 }
@@ -39,8 +39,8 @@ impl Payload {
     }
 }
 
-/// The name of the directory an agent is working in, which is empty for a path
-/// with no final component: the root, or nothing at all.
+/// The name of the directory that an agent works in. The name is empty for a
+/// path with no final component: the root, or an empty path.
 pub fn dir(cwd: &str) -> String {
     std::path::Path::new(cwd)
         .file_name()

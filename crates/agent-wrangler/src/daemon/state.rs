@@ -1,8 +1,8 @@
 //! Everything the daemon knows, and what each event does to it.
 //!
-//! The reading and the clock are reached only through [`World`], so every rule
-//! here is exercised against a fake with no files, no processes and no waiting.
-//! What is left in the real implementation is the reading itself.
+//! The reading and the clock come only from [`World`]. Every rule here runs
+//! against a fake with no files, no processes and no waiting. Only the reading
+//! itself is left in the real implementation.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -17,17 +17,18 @@ use agent_wrangler_core::titles;
 
 use crate::proto::{Hook, Sink};
 
-/// Where a session's own account of itself is kept, so it can be read again
-/// without waiting for the agent to say something.
+/// Where a session's own account of itself is kept. The daemon can read it
+/// again without a new message from the agent.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Source {
-    /// Which agent this is, which decides how its files are read.
+    /// Which agent this is. The agent kind decides how the daemon reads its
+    /// files.
     pub agent: String,
     /// The file the agent writes the conversation to.
     pub transcript: String,
-    /// The modification time last read from it. A file that has not moved needs
-    /// no second look, which is what makes watching every session cost one stat
-    /// each rather than one scan each.
+    /// The modification time last read from it. If a file did not move, it
+    /// needs no second look. A look at every session then costs one stat for
+    /// each session rather than one scan for each session.
     pub mtime: Option<u64>,
 }
 
@@ -37,7 +38,7 @@ pub trait World {
     fn meta(&self, agent: &str, transcript: &str, session: &str) -> Meta;
     /// When a file last changed, or `None` for one that is not there.
     fn mtime(&self, path: &str) -> Option<u64>;
-    /// Whether a process is still running, and still the one that was meant.
+    /// Whether a process still runs, and is still the intended one.
     fn alive(&self, process: &Process) -> bool;
 }
 
@@ -73,15 +74,16 @@ impl World for Real {
 
 /// What an event says about whose turn it is.
 ///
-/// An error is the one event whose meaning depends on who raised it: Copilot
-/// says whether it can carry on, and one that can is still working rather than
-/// waiting. Every other agent's error is something the user has to look at.
-/// Anything unrecognised is a session announcing itself, which is also how a
-/// session already known re-states where it is.
+/// An error is the one event whose meaning depends on who raised it. Copilot
+/// says whether it can carry on. An error that Copilot can carry on from is
+/// still work, and not a call for the user. Every other agent's error is
+/// something that the user must look at. An unrecognized event is a session
+/// that announces itself. A session already known restates where it is the
+/// same way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
-    /// The session is starting, or restating itself. Whose turn it is is not
-    /// part of what it said.
+    /// The session starts, or restates itself. The event does not say whose
+    /// turn it is.
     Announce,
     /// The session is over.
     End,
@@ -99,13 +101,12 @@ pub fn event(agent: &str, name: &str, recoverable: Option<bool>) -> Event {
     }
 }
 
-/// One client: where to reach it, and what it would have a call for the user
-/// announced with.
+/// One client: where to reach it, and what it announces a call for the user
+/// with.
 ///
-/// A client says what to announce with rather than announcing anything itself.
-/// Every client is handed the same state, so a client that raised its own
-/// notifications would raise each call as many times as there are clients
-/// holding it.
+/// A client says what to announce with, and announces nothing itself. Every
+/// client gets the same state. A client that raises its own notifications
+/// raises each call once for every client that holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Client {
     pub sink: Sink,
@@ -116,44 +117,45 @@ pub struct Client {
 #[derive(Debug, Default)]
 pub struct State {
     registry: Registry,
-    /// One per session held, so a transcript can be read again between events.
+    /// One per session held, so the daemon can read a transcript again between
+    /// events.
     sources: BTreeMap<SessionId, Source>,
     /// Where to deliver, newest last. A client that registers twice is one
-    /// client, so the same sink is never held twice.
+    /// client, so this list never holds the same sink twice.
     clients: Vec<Client>,
-    /// How many deliveries in a row each client has refused.
+    /// How many deliveries in a row each client refused.
     misses: BTreeMap<Sink, u32>,
 }
 
 /// How many refusals in a row retire a client.
 ///
-/// One is not enough. A client registers once and has no way of knowing it has
-/// been dropped, so a single delivery that failed for a passing reason - the
-/// multiplexer busy, a program missing from the path this daemon happened to
-/// inherit - would leave that sidebar drawing whatever it last received for
-/// good, with nothing said about why.
+/// One is not enough. A client registers once, and it cannot know that the
+/// daemon dropped it. A single delivery can fail for a passing reason: the
+/// multiplexer is busy, or a program is not in the path that this daemon
+/// inherited. One refusal is then enough to leave that sidebar with whatever
+/// it last received, for good, and with no word about why.
 pub const REFUSALS: u32 = 3;
 
-/// What an agent's files said, read before anything is locked.
+/// What an agent's files said, read before the daemon takes the lock.
 ///
-/// Reading is separated from filing because a file can take arbitrarily long to
-/// open: a hung network mount, a dead sshfs, a named pipe with no writer. Doing
-/// it while holding the state would stop every other event on the machine being
-/// recorded, and the daemon answers its socket while frozen, so nothing could
-/// take over from it either.
+/// The reading is separate from the filing, because a file can take
+/// arbitrarily long to open. Examples are a hung network mount, a dead sshfs,
+/// and a named pipe with no writer. If the daemon holds the state during the
+/// read, no other event on the machine gets a record. The daemon answers its socket while it
+/// is frozen, so nothing can take over from it either.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Reading {
     meta: Meta,
     mtime: Option<u64>,
 }
 
-/// A call for the user, in the words an announcement is made of.
+/// A call for the user, in the words that make an announcement.
 ///
-/// It says which agent is asking and which of its sessions. Where that session
-/// is comes along unread: the daemon has no idea what any of the variables in
-/// an origin point at, and a call from an agent in no multiplexer at all
-/// carries an empty one and is still a call. The notifier is the thing that
-/// knows what they mean, and is the only reason they are here.
+/// It says which agent asks, and which of its sessions. Where that session is
+/// comes along unread. The daemon does not know what the variables in an
+/// origin point at. A call from an agent in no multiplexer at all carries an
+/// empty origin, and is still a call. The notifier knows what the variables
+/// mean, and is the only reason that they are here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Call {
     pub agent: String,
@@ -161,23 +163,23 @@ pub struct Call {
     pub origin: Origin,
 }
 
-/// What taking an event in came to.
+/// The result of an event that the daemon took in.
 ///
-/// A call is a change as well as an announcement, so the two cannot be reported
-/// separately without letting a call be announced that nothing was told about.
+/// A call is a change as well as an announcement, so one result covers both.
+/// Two separate results let a call go out while no client got the change.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Applied {
     /// The event said nothing that is not already held.
     Nothing,
-    /// What is held changed, so every client is owed the state.
+    /// What is held changed, so the daemon owes every client the state.
     Changed,
-    /// The change was an agent asking for the user, which is worth saying out
-    /// loud as well as drawing.
+    /// The change was an agent that asks for the user. The daemon draws this
+    /// change and also says it out loud.
     Called(Call),
 }
 
 impl Applied {
-    /// What a change is when nothing about it is worth announcing.
+    /// The result for a change with nothing to announce.
     fn told(changed: bool) -> Self {
         match changed {
             true => Applied::Changed,
@@ -185,7 +187,7 @@ impl Applied {
         }
     }
 
-    /// Whether a client would draw anything differently for this.
+    /// Whether a client draws anything differently for this.
     pub fn changed(&self) -> bool {
         !matches!(self, Applied::Nothing)
     }
@@ -200,12 +202,12 @@ impl Applied {
     }
 }
 
-/// What the next look should cover.
+/// What the next look must cover.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Plan {
     /// Session, agent kind, transcript path.
     pub watch: Vec<(SessionId, String, String)>,
-    /// Session and the process said to be running it.
+    /// Session, and the process that is said to run it.
     pub processes: Vec<(SessionId, Process)>,
 }
 
@@ -214,12 +216,12 @@ pub struct Plan {
 pub struct Look {
     /// Session, the transcript's new modification time, and what it now says.
     pub moved: Vec<(SessionId, u64, Meta)>,
-    /// Sessions whose process is no longer running.
+    /// Sessions whose process no longer runs.
     pub dead: Vec<SessionId>,
 }
 
-/// Carry out a plan. Touches the filesystem and the process table, and holds
-/// nothing, so it is safe to do this while every other event carries on.
+/// This function carries out a plan. It touches the filesystem and the process
+/// table, and holds nothing. Every other event can carry on while it runs.
 pub fn look(plan: &Plan, world: &dyn World, since: &BTreeMap<SessionId, Option<u64>>) -> Look {
     Look {
         dead: plan
@@ -246,7 +248,8 @@ pub fn look(plan: &Plan, world: &dyn World, since: &BTreeMap<SessionId, Option<u
     }
 }
 
-/// Read what a hook named. Touches the filesystem and nothing else.
+/// This function reads what a hook named. It touches the filesystem and
+/// nothing else.
 pub fn read_hook(hook: &Hook, world: &dyn World) -> Reading {
     Reading {
         meta: world.meta(&hook.agent, &hook.transcript, &hook.session_id),
@@ -255,7 +258,8 @@ pub fn read_hook(hook: &Hook, world: &dyn World) -> Reading {
 }
 
 impl State {
-    /// Take in what a hook reported, given what its files already said.
+    /// This method takes in what a hook reported, with what its files already
+    /// said.
     pub fn apply_hook(&mut self, hook: &Hook, reading: Reading) -> Applied {
         let Some(session) = SessionId::new(&hook.session_id) else {
             return Applied::Nothing;
@@ -274,9 +278,9 @@ impl State {
             Event::Turn(turn) => turn,
             _ => Turn::Idle,
         };
-        // Only a call for the user carries when it was raised. Giving every
-        // event a time would make two identical reports look different, and
-        // reorder the notification area for nothing.
+        // Only a call for the user carries the time that it was raised. A time
+        // on every event makes two identical reports look different, and
+        // reorders the notification area for nothing.
         let raised = match turn {
             Turn::Attention => hook.at,
             _ => 0,
@@ -308,12 +312,12 @@ impl State {
         };
 
         // A call is announced from what was filed rather than from what
-        // arrived, because a hook reports only what it could find: the title a
-        // session took two events ago is part of what it is called now.
+        // arrived, because a hook reports only what it can find. The title that
+        // a session took two events ago is part of what it is called now.
         //
-        // A hook that told nobody anything new is a call nobody has to hear
-        // about, which is what keeps an agent restating where it is from
-        // announcing itself over and over.
+        // A hook that told nobody anything new is a call that nobody has to
+        // hear about. An agent that restates where it is therefore does not
+        // announce itself over and over.
         match (changed, turn) {
             (true, Turn::Attention) => match self.registry.get(&session) {
                 Some(filed) => Applied::Called(Call {
@@ -327,18 +331,18 @@ impl State {
         }
     }
 
-    /// Read what the hook named and file it, in one step.
+    /// This method reads what the hook named and files it, in one step.
     ///
-    /// The daemon does the two halves separately so the reading happens with
-    /// nothing locked. This is the same two calls with nothing in between, for
-    /// tests that are about what a hook does rather than about when it is safe
-    /// to do it.
+    /// The daemon does the two halves separately, so the reading happens with
+    /// no lock held. This method makes the same two calls with nothing in
+    /// between. It is for tests about what a hook does, and not about the
+    /// order that is safe.
     #[cfg(test)]
     pub fn on_hook(&mut self, hook: &Hook, world: &dyn World) -> Applied {
         self.apply_hook(hook, read_hook(hook, world))
     }
 
-    /// The user reached a session that was calling for them.
+    /// The user reached a session that called for them.
     pub fn on_seen(&mut self, session: &str) -> bool {
         match SessionId::new(session) {
             Some(session) => self.registry.seen(&session),
@@ -346,8 +350,9 @@ impl State {
         }
     }
 
-    /// Deliver to this client from now on. A client that says so twice is still
-    /// one client, and says afresh what it would have a call announced with.
+    /// This method registers a client for delivery from now on. A client that
+    /// registers twice is still one client, and states afresh what it announces
+    /// a call with.
     pub fn register(&mut self, client: Client) {
         self.misses.remove(&client.sink);
         match self
@@ -360,8 +365,8 @@ impl State {
         }
     }
 
-    /// Note that a client could not be reached, and say whether it has now been
-    /// given up on.
+    /// This method records that a delivery to a client failed. If the daemon
+    /// gave up on that client, this method returns `true`.
     pub fn missed(&mut self, sink: &Sink) -> bool {
         let misses = self.misses.entry(sink.clone()).or_default();
         *misses += 1;
@@ -373,8 +378,8 @@ impl State {
         true
     }
 
-    /// Note that a client was reached, so the refusals before it do not count
-    /// towards giving up on it.
+    /// This method records that a delivery reached a client. The refusals
+    /// before it then do not count against the client.
     pub fn reached(&mut self, sink: &Sink) {
         self.misses.remove(sink);
     }
@@ -385,10 +390,10 @@ impl State {
 
     /// What a call for the user is announced with, once each.
     ///
-    /// A notifier is the user's rather than any one client's: two clients asking
-    /// for the same one describe one desktop to tell, and telling it twice is
-    /// the same notification twice. Two asking for different ones are two
-    /// places to tell, and each is told.
+    /// A notifier belongs to the user rather than to any one client. Two
+    /// clients that ask for the same notifier describe one desktop to tell, and
+    /// two messages to it are the same notification twice. Two clients that ask
+    /// for different notifiers are two places to tell, and each one is told.
     pub fn notifiers(&self) -> Vec<Notifier> {
         let mut notifiers: Vec<Notifier> = Vec::new();
         for notifier in self
@@ -406,22 +411,22 @@ impl State {
     /// What every client is sent: the whole state, every time, as a message
     /// that says so.
     ///
-    /// Holding no agents is sent exactly like holding some, because a client
-    /// that cannot tell an empty state from an empty message has no way to
-    /// ignore a message that was not this.
+    /// A state with no agents is sent exactly like a state with some. A client
+    /// that cannot tell an empty state from an empty message cannot ignore a
+    /// message that was not this one.
     pub fn payload(&self) -> String {
         agent::state(&self.registry.encode())
     }
 
-    /// Every session held, for saying what is there rather than for changing
-    /// it.
+    /// Every session held, for a report of what is there rather than for a
+    /// change to it.
     #[cfg(test)]
     pub fn registry(&self) -> &Registry {
         &self.registry
     }
 
-    /// What the next look should cover: the transcripts held, and the processes
-    /// to ask after. Reads nothing.
+    /// What the next look must cover: the transcripts held, and the processes
+    /// to ask after. This method reads nothing.
     pub fn plan(&self) -> Plan {
         Plan {
             watch: self
@@ -447,24 +452,24 @@ impl State {
         }
     }
 
-    /// Take in what the look found. `true` when this changed anything.
+    /// This method takes in what the look found. If the look changed anything,
+    /// this method returns `true`.
     ///
-    /// This is the whole reason for a daemon rather than a hook that reports and
-    /// exits. A session titles itself, or is given a color, without any hook
-    /// firing at all, and an agent that is killed fires no end event; neither is
-    /// visible to anything that only listens.
+    /// This is the whole reason for a daemon rather than a hook that reports
+    /// and exits. A session titles itself, or gets a color, with no hook at
+    /// all. An agent that is killed fires no end event. A program that only
+    /// listens sees neither of them.
     pub fn observe(&mut self, look: Look) -> bool {
         let mut changed = false;
 
-        // An agent whose process has gone is gone, whatever it last said.
+        // An agent whose process went away is gone, whatever it last said.
         for session in look.dead {
             self.sources.remove(&session);
             changed |= self.registry.end(&session);
         }
 
         for (session, mtime, found) in look.moved {
-            // A session that ended while the look was happening is not one to
-            // bring back.
+            // A session that ended during the look is not one to bring back.
             let Some(source) = self.sources.get_mut(&session) else {
                 continue;
             };
@@ -472,9 +477,8 @@ impl State {
             let Some(held) = self.registry.get(&session).cloned() else {
                 continue;
             };
-            // The directory is not in the transcript, so it is kept from what
-            // the last hook said rather than blanked by a scan that never looks
-            // for it.
+            // The directory is not in the transcript. The daemon keeps it from
+            // what the last hook said, because a scan never looks for it.
             let record = Agent {
                 meta: Meta {
                     dir: held.meta.dir.clone(),
@@ -488,8 +492,8 @@ impl State {
         changed
     }
 
-    /// Plan, look and take in, in one step. Separate in the daemon for the same
-    /// reason the hook path is.
+    /// This method plans, looks and takes in, in one step. The daemon does the
+    /// three parts separately, for the same reason as the hook path.
     #[cfg(test)]
     pub fn poll(&mut self, world: &dyn World) -> bool {
         let plan = self.plan();
@@ -497,8 +501,8 @@ impl State {
         self.observe(look)
     }
 
-    /// What each held transcript last read as, which is what tells a file that
-    /// has moved from one that has not.
+    /// What each held transcript last read as. This tells a file that moved
+    /// from a file that did not move.
     pub fn mtimes(&self) -> BTreeMap<SessionId, Option<u64>> {
         self.sources
             .iter()
@@ -506,8 +510,8 @@ impl State {
             .collect()
     }
 
-    /// The state as it is kept between runs: every session, with the file its
-    /// account of itself is read from.
+    /// The state as it is kept between runs: every session, with the file that
+    /// the daemon reads its account of itself from.
     pub fn snapshot(&self) -> Vec<(String, Source)> {
         self.registry
             .iter()
@@ -522,12 +526,13 @@ impl State {
             .collect()
     }
 
-    /// Take back a snapshot, dropping every session that cannot be vouched for.
+    /// This method takes back a snapshot. It drops every session that nothing
+    /// can vouch for.
     ///
-    /// A daemon that has restarted has no idea which of these are still running.
-    /// A record naming a live process is kept; every other one is dropped,
-    /// because a live agent says so again on its very next event of any kind,
-    /// while a dead one would otherwise be drawn for good.
+    /// A daemon that restarted does not know which of these sessions still run.
+    /// A record that names a live process is kept. Every other record is
+    /// dropped, because a live agent says so again on its very next event of
+    /// any kind. A dead record that is kept is drawn for good.
     pub fn restore(&mut self, saved: Vec<(String, Source)>, world: &dyn World) {
         for (line, source) in saved {
             let agent_wrangler_core::agent::Record::Known(agent) = Agent::decode(&line) else {
@@ -550,11 +555,12 @@ mod tests {
 
     use agent_wrangler_core::agent::Started;
 
-    /// A world with no files and no processes: what a transcript would say, when
-    /// it last changed, and what is running under each pid, all said outright.
+    /// A world with no files and no processes. A test states three things
+    /// outright: what a transcript says, the time it last changed, and what
+    /// runs under each pid.
     ///
-    /// A pid maps to the process currently holding it, so handing one number to
-    /// another process is something the tests can say happened.
+    /// A pid maps to the process that holds it now. A test can therefore state
+    /// that one number went to another process.
     #[derive(Default)]
     struct Fake {
         meta: RefCell<BTreeMap<String, Meta>>,
@@ -597,7 +603,7 @@ mod tests {
         }
     }
 
-    /// The process the hooks in these tests report themselves as.
+    /// The process that the hooks in these tests report themselves as.
     const AGENT: Process = Process {
         pid: 4242,
         started: Some(Started(918_273)),
@@ -735,8 +741,8 @@ mod tests {
             state.registry().get(&session("one")).unwrap().turn,
             Turn::Idle
         );
-        // Saying it again is not a change, and a session nobody knows is not one
-        // to answer.
+        // A second report of the same thing is not a change. A session that
+        // nobody knows is not one to answer.
         assert!(!state.on_seen("one"));
         assert!(!state.on_seen("nobody"));
     }
@@ -752,8 +758,8 @@ mod tests {
 
     #[test]
     fn a_client_registering_again_says_afresh_what_to_announce_with() {
-        // A sidebar that was reloaded with the option turned off is the same
-        // client saying something different, not a second one.
+        // A sidebar that was reloaded with the option off is the same client
+        // with something different to say. It is not a second client.
         let mut state = State::default();
         state.register(client("proto", notifier("notify-send")));
         assert_eq!(state.notifiers(), vec![notifier("notify-send").unwrap()]);
@@ -763,7 +769,7 @@ mod tests {
 
     #[test]
     fn a_call_is_announced_once_however_many_clients_ask_for_the_same_thing() {
-        // The reason a client is not left to raise its own: every one of them
+        // The reason that a client does not raise its own: every one of them
         // holds the same call, and the user has one desktop.
         let mut state = State::default();
         state.register(client("one", notifier("notify-send")));
@@ -819,8 +825,8 @@ mod tests {
             state.missed(&one.sink);
         }
         state.reached(&one.sink);
-        // The count starts again, so a client that answers now and then is
-        // never retired by refusals spread over hours.
+        // The count starts again, so refusals spread over hours never retire a
+        // client that answers now and then.
         for _ in 1..REFUSALS {
             assert!(!state.missed(&one.sink));
         }
@@ -857,10 +863,10 @@ mod tests {
 
     #[test]
     fn a_call_carries_where_the_agent_said_it_was() {
-        // The daemon reads none of it. It is carried so that a notifier which
-        // does know what a session name is can be told which one to speak to,
-        // rather than being left with whatever environment the daemon was
-        // spawned into and has held ever since.
+        // The daemon reads none of it. The origin is carried so that a notifier
+        // that knows what a session name is can be told which one to speak to.
+        // The alternative is whatever environment the daemon was spawned into,
+        // which it holds from then on.
         let world = Fake::default();
         let mut state = State::default();
         let called = state.on_hook(&hook("needsAttention"), &world);
@@ -871,8 +877,8 @@ mod tests {
 
     #[test]
     fn a_call_is_announced_by_what_the_session_is_called_now() {
-        // A hook carries what it could find at the time, and a title found two
-        // events ago is still what the session is called.
+        // A hook carries what it can find at the time. A title found two events
+        // ago is still what the session is called.
         let world = Fake::default();
         world.says("/t/one.jsonl", titled("the port"), 1);
         let mut state = State::default();
@@ -907,8 +913,8 @@ mod tests {
 
     #[test]
     fn a_hook_that_says_nothing_new_announces_nothing() {
-        // An agent restating a call it is already making is the same call, and
-        // hearing about it twice is being told twice.
+        // An agent that restates a call it already makes reports the same call.
+        // Two reports of it are the same notification twice.
         let world = Fake::default();
         let mut state = State::default();
         assert!(state
@@ -933,8 +939,8 @@ mod tests {
 
     #[test]
     fn a_transcript_that_has_moved_is_read_again() {
-        // The whole point of watching: a session takes a title, or is given a
-        // color, without any hook firing at all.
+        // The whole point of the watch: a session takes a title, or gets a
+        // color, with no hook at all.
         let world = Fake::default();
         world.says("/t/one.jsonl", Meta::default(), 1);
         world.running(AGENT);
@@ -951,7 +957,7 @@ mod tests {
             state.registry().get(&session("one")).unwrap().meta.title,
             "named at last"
         );
-        // A file that has not moved since is not read again.
+        // A file that did not move since then is not read again.
         assert!(!state.poll(&world));
     }
 
@@ -987,8 +993,8 @@ mod tests {
     #[test]
     fn a_number_handed_on_to_another_process_does_not_vouch_for_the_agent() {
         // A pid outlives nothing: the system gives the same number to whatever
-        // starts next, and a record that asked only after the number would be
-        // told a stranger was its agent.
+        // starts next. A record that asks only after the number is told that a
+        // stranger is its agent.
         let world = Fake::default();
         world.says("/t/one.jsonl", titled("the port"), 1);
         world.running(AGENT);
@@ -1006,8 +1012,8 @@ mod tests {
 
     #[test]
     fn an_agent_that_could_not_say_what_process_it_is_is_left_alone() {
-        // Nothing can vouch for it, so nothing can condemn it either; it goes
-        // when its own end event says so.
+        // Nothing can vouch for it, so nothing can condemn it either. It goes
+        // on its own end event and on nothing else.
         let world = Fake::default();
         world.says("/t/one.jsonl", titled("the port"), 1);
         let mut state = State::default();
@@ -1038,8 +1044,8 @@ mod tests {
         let mut after = State::default();
         after.restore(saved, &world);
         assert!(after.registry().get(&session("one")).is_some());
-        // Pid 99 was never running, so the record naming it cannot be vouched
-        // for and is not brought back.
+        // Pid 99 never ran, so nothing can vouch for the record that names it.
+        // The daemon does not bring it back.
         assert!(after.registry().get(&session("two")).is_none());
     }
 

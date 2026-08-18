@@ -1,13 +1,13 @@
 //! A finished buffer, as the bytes that draw it on a terminal.
 //!
-//! For the client that cannot reach a terminal itself. A zellij plugin is given
-//! a pane and a print, and nothing else: it reprints the whole pane every time,
-//! so there is no cursor to move and no previous frame to diff against. What it
-//! prints is this.
+//! This module is for the client that cannot reach a terminal itself. A zellij
+//! plugin gets a pane and a print, and nothing else. The plugin reprints the
+//! whole pane every time, so there is no cursor to move and no previous frame to
+//! diff against. What the plugin prints is this.
 //!
-//! Cells drawn the same way are run together into one escape sequence rather
-//! than opened and closed one at a time, which is the difference between a
-//! thirty column line costing thirty sequences and costing two.
+//! Cells drawn the same way run together into one escape sequence. The sequence
+//! does not open and close once per cell. A row of thirty columns therefore
+//! costs two sequences rather than thirty.
 
 use ratatui_core::buffer::{Buffer, Cell};
 use ratatui_core::style::{Color, Modifier};
@@ -19,19 +19,20 @@ use crate::render::Sidebar;
 
 /// Back to the terminal's own defaults.
 ///
-/// SGR parameters accumulate, so every change of style is opened by dropping
-/// what was standing rather than by naming the difference.
+/// SGR parameters accumulate. Every change of style therefore starts with a drop
+/// of the attributes already in effect rather than with the difference alone.
 const RESET: &str = "\u{1b}[0m";
 
 /// The first parameter of the eight-color table, foreground and background. The
-/// bright forms sit sixty higher and the extended forms eight, in both.
+/// bright forms sit sixty higher, and the extended forms sit eight higher, in
+/// both tables.
 const FOREGROUND: u8 = 30;
 const BACKGROUND: u8 = 40;
 
 /// How one cell is drawn.
 ///
-/// A cell carries these as three fields rather than as a style, and it is these
-/// three that a run of equally drawn cells is gathered on.
+/// A cell carries these as three fields rather than as a style. A run of cells
+/// drawn the same way is gathered on these three fields.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Attrs {
     fg: Color,
@@ -39,8 +40,8 @@ struct Attrs {
     modifier: Modifier,
 }
 
-/// The terminal's own defaults, which is what a reset leaves standing and so
-/// what needs no sequence to ask for.
+/// The terminal's own defaults, which is what a reset leaves in effect.
+/// These defaults need no sequence.
 const PLAIN: Attrs = Attrs {
     fg: Color::Reset,
     bg: Color::Reset,
@@ -70,10 +71,11 @@ const MODIFIERS: [(Modifier, &str); 9] = [
     (Modifier::CROSSED_OUT, "9"),
 ];
 
-/// The parameter one color takes, given the base its channel counts from.
+/// The parameter one color takes, with `base` as the value its channel counts
+/// from.
 ///
-/// Exhaustive on purpose: a color this cannot name is one that would otherwise
-/// be dropped silently, and the compiler is the only thing that would notice.
+/// The match is exhaustive on purpose. A color with no arm here is a color that
+/// drops out silently, and the compiler is the only thing that can catch it.
 fn color(color: Color, base: u8) -> Option<String> {
     let named = |offset: u8| Some((base + offset).to_string());
     match color {
@@ -99,7 +101,8 @@ fn color(color: Color, base: u8) -> Option<String> {
     }
 }
 
-/// The sequence opening these attributes, empty when they are the defaults.
+/// The sequence that opens these attributes. If the attributes are the
+/// defaults, the sequence is empty.
 fn open(attrs: Attrs) -> String {
     let mut params: Vec<String> = MODIFIERS
         .iter()
@@ -115,11 +118,12 @@ fn open(attrs: Attrs) -> String {
     }
 }
 
-/// What to print to draw this buffer: its rows, one to a line, with the carriage
-/// return a pane needs to start the next one at its own left edge.
+/// What to print to draw this buffer. The output holds the rows, one to a line.
+/// Each row ends with the carriage return that a pane needs to start the next
+/// row at its own left edge.
 ///
-/// No trailing line break: the pane is exactly as tall as the buffer, and one
-/// more line would scroll the first one off.
+/// There is no trailing line break. The pane is exactly as tall as the buffer,
+/// and one more line scrolls the first row off.
 pub fn draw(buffer: &Buffer) -> String {
     let area = buffer.area();
     let mut out = String::new();
@@ -130,8 +134,8 @@ pub fn draw(buffer: &Buffer) -> String {
         let mut standing = PLAIN;
         for x in area.left()..area.right() {
             let cell = &buffer[(x, y)];
-            // The cells after the first of a wide glyph hold nothing, and
-            // printing them would push the rest of the line right.
+            // The cells after the first of a wide glyph hold nothing. A print
+            // of those cells pushes the rest of the row right.
             if cell.symbol().is_empty() {
                 continue;
             }
@@ -154,8 +158,9 @@ pub fn draw(buffer: &Buffer) -> String {
 
 /// One frame, as the bytes that put it on screen.
 ///
-/// A buffer of its own every time, because a client that can only print has no
-/// previous frame to diff against: it reprints the pane entire or not at all.
+/// The function makes a buffer of its own every time, because a client that can
+/// only print has no previous frame to diff against. Such a client reprints the
+/// whole pane or nothing at all.
 pub fn pane(frame: &Frame, selected: Option<&RowKey>) -> String {
     let area = frame.area();
     let mut buffer = Buffer::empty(area);
@@ -203,8 +208,8 @@ mod tests {
 
     #[test]
     fn a_change_of_style_drops_what_was_standing_first() {
-        // The parameters accumulate, so a bold run followed by a dim one that
-        // did not reset would be drawn bold and dim.
+        // The parameters accumulate. A dim run after a bold run with no reset
+        // between them draws bold and dim.
         let mut buf = buffer(4, 1);
         buf.set_string(0, 0, "ab", Style::new().add_modifier(Modifier::BOLD));
         buf.set_string(2, 0, "cd", Style::new().add_modifier(Modifier::DIM));
@@ -221,7 +226,8 @@ mod tests {
 
     #[test]
     fn every_color_a_row_can_carry_takes_its_own_parameter() {
-        // The palette a session's color is drawn from, as the terminal names it.
+        // The palette the color of a session is drawn from, as the terminal
+        // names it.
         for (color, param) in [
             (Color::Red, "31"),
             (Color::Green, "32"),

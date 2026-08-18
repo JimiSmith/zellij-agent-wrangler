@@ -1,12 +1,12 @@
-# Starts a real zellij with no custom layout, waits for its own status bar,
-# dumps the screen and reaps the session.
+# This test starts a real zellij with no custom layout. The test waits for the
+# status bar of zellij, dumps the screen and reaps the session.
 #
-# ZELLIJ_CONFIG_DIR points at the checked-in tests/zellij-config so the run
-# gets stock keybindings and a known theme rather than whatever the developer
-# has configured, and so no first run wizard appears.
+# ZELLIJ_CONFIG_DIR points at tests/zellij-config, which is in the repository.
+# The run therefore gets stock keybindings and a known theme, and not the
+# configuration of the developer. No first run wizard appears.
 #
 # `wrangler-test-smoke` is the only session name here, and it carries the
-# prefix cleanup is allowed to match.
+# prefix that cleanup can match.
 
 env: ZELLIJ_CONFIG_DIR=tests/zellij-config
 env: TERM=xterm-256color
@@ -19,7 +19,7 @@ waitgone: First Run Setup Wizard @ 2
 
 dump: zellij_smoke
 
-# Ctrl-q is the stock quit binding. Cleanup would reap the session anyway, but
-# quitting first leaves nothing to force.
+# Ctrl-q is the stock quit binding. Cleanup can reap the session in any case,
+# but a quit first leaves nothing to force.
 keys: <C-q>
 sleep: 1

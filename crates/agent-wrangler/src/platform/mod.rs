@@ -1,19 +1,19 @@
 //! The process primitives this needs, chosen at compile time.
 //!
-//! Each supported system provides the same five functions, and the rest of the
+//! Each supported system provides the same five functions. The rest of the
 //! crate calls the re-exported ones with no `cfg` of its own. A build for a
-//! system with no module here fails to find them, which is the intended answer:
-//! a missing port should not silently become a daemon that cannot tell a live
+//! system with no module here fails to find them, which is the intended
+//! answer. A missing port must not become a daemon that cannot tell a live
 //! agent from a dead one.
 //!
-//! Starting a program is one of the five for the same reason: what it takes to
-//! start one without disturbing the user is the system's own business, and a
-//! caller that built its own would be a caller that had to know.
+//! The start of a program is one of the five for the same reason. What it takes
+//! to start one without disturbance to the user is the business of the system.
+//! A caller that built its own start is a caller that must know that business.
 //!
-//! What is derived from those four, climbing the process table to find the
-//! agent a hook belongs to and dating what it finds, and waiting for a program
-//! for no longer than it is worth waiting, is written once here for all of
-//! them.
+//! Three things derive from those four. The first is the climb up the process
+//! table to the agent that a hook belongs to. The second is the start time of
+//! what the climb finds. The third is a wait for a program that lasts no longer
+//! than it is worth. All three are written once here for every system.
 
 use std::collections::HashMap;
 use std::process::{Child, Command};
@@ -32,54 +32,55 @@ mod windows;
 #[cfg(windows)]
 pub use windows::{command, pid_alive, processes, spawn_detached, started};
 
-/// One row of the process table: who started this process, and what it is
-/// running.
+/// One row of the process table: the process that started this process, and the
+/// image that this process runs.
 ///
-/// The name is whatever the system calls the running image, which is a bare name
-/// on some and a path on others. Nothing here normalizes it, because what counts
-/// as a match is the caller's question.
+/// The name is whatever the system calls the image. The name is a bare name on
+/// some systems and a path on others. Nothing here makes the name uniform,
+/// because the caller decides what counts as a match.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Row {
     pub ppid: u32,
     pub name: String,
 }
 
-/// What became of a program that was run and waited for.
+/// The result of a program that this ran and waited for.
 ///
-/// A program still running when the wait ran out is an answer of its own rather
-/// than a failure. What it was asked to do it may well have done, and only the
-/// exiting is missing; what that is worth is the caller's to say.
+/// If a program still runs when the wait ends, that result is an answer of its
+/// own and not a failure. The program can already do the work that it was asked
+/// for, and only the exit is absent. The caller decides what that is worth.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ran {
-    /// It finished and said it worked.
+    /// The program ended and reported success.
     Worked,
-    /// It finished and said it did not, or could not be started at all.
+    /// The program ended and reported failure, or it did not start at all.
     Failed,
-    /// It was still running when the wait ran out, so it was killed and reaped.
+    /// The program still ran when the wait ended, so this killed and reaped it.
     Abandoned,
 }
 
-/// How often a running program is asked whether it has finished.
+/// The interval between two questions to a live program about its end.
 ///
-/// The programs this runs are back in tens of milliseconds when all is well, so
-/// asking this often adds nothing to one that anybody could see, while a wait
-/// that has to run to its end is a hundred wakeups a second rather than a
-/// thread spinning on a core.
+/// When all is well, the programs that this runs return in tens of
+/// milliseconds. A question at this interval therefore adds no delay that
+/// anybody can see. A wait that runs to its end costs a hundred wakeups a
+/// second, and not a thread that spins on a core.
 const ASKED_AGAIN: Duration = Duration::from_millis(10);
 
-/// Run a program, wait for it, and give up on it after `patience`.
+/// Runs a program, waits for it, and gives up on it after `patience`.
 ///
-/// Side effect: spawns a process, and kills it if it outstays the wait.
+/// Side effect: spawns a process. If the process outstays the wait, this kills
+/// it.
 ///
-/// The wait is what makes this worth having. A child that never exits is a
-/// caller that never returns, and `zellij pipe` does exactly that now and then,
-/// having already handed its payload over: one of them wedged the whole of a
-/// daemon's delivering for the best part of an hour, and every sidebar with it.
+/// The wait is the reason for this function. A child that never exits makes a
+/// caller that never returns. `zellij pipe` does exactly that now and then,
+/// after it hands its payload over. One such call blocked every delivery of a
+/// daemon for the best part of an hour, and every sidebar with it.
 ///
-/// A child given up on is waited for as well as killed. A process that is
-/// signalled and not reaped stays in the table as a zombie, and a daemon runs
-/// for as long as the user is logged in, so one left behind per delivery is a
-/// table full of them by the evening.
+/// This waits for a child that it gives up on, and does not only kill it. A
+/// process that receives a signal and is not reaped stays in the table as a
+/// zombie. A daemon runs for as long as the user stays logged in. One zombie
+/// per delivery makes a table full of them by the evening.
 pub fn ran(program: &mut Command, patience: Duration) -> Ran {
     let Ok(mut child) = program.spawn() else {
         return Ran::Failed;
@@ -94,24 +95,25 @@ pub fn ran(program: &mut Command, patience: Duration) -> Ran {
                 }
             }
             Ok(None) if Instant::now() >= until => return abandon(&mut child),
-            // A child that could not be asked about once cannot be asked again,
-            // so it is given up on like one that outstayed the wait: either way
-            // this process is the only one that can reap it.
+            // A child that answers no question once will answer no later
+            // question. This gives up on it as it does on a child that
+            // outstayed the wait. In both cases this process is the only one
+            // that can reap it.
             Err(_) => return abandon(&mut child),
             Ok(None) => thread::sleep(ASKED_AGAIN),
         }
     }
 }
 
-/// Kill a child and wait for it, so that nothing is left of it.
+/// Kills a child and waits for it, so that nothing of it remains.
 fn abandon(child: &mut Child) -> Ran {
     let _ = child.kill();
     let _ = child.wait();
     Ran::Abandoned
 }
 
-/// The shells an agent is commonly invoked through, and which invoke a hook in
-/// turn. None of them is ever the agent itself.
+/// The shells that commonly start an agent, and that start a hook in turn. None
+/// of these shells is ever the agent itself.
 const SHELLS: &[&str] = &[
     "sh",
     "bash",
@@ -126,15 +128,15 @@ const SHELLS: &[&str] = &[
     "pwsh",
 ];
 
-/// The process of the agent that invoked a hook, found by climbing from the
-/// hook towards the root.
+/// The process of the agent that started a hook. The climb runs from the hook
+/// towards the root.
 ///
-/// The nearest ancestor named for the agent wins. Failing that, the nearest one
-/// that is not a shell does: an agent is not always named for itself, and one
-/// installed through npm reports as `node`, which is nothing this could have a
-/// list of. What both rules have in common is that they do not count steps,
-/// because how many shells sit between a hook and its agent varies with how the
-/// hook was invoked.
+/// The nearest ancestor named for the agent wins. If no ancestor carries that
+/// name, the nearest ancestor that is not a shell wins. An agent is not always
+/// named for itself. An agent installed through npm reports as `node`, and no
+/// list here can hold every such name. Neither rule counts steps, because the
+/// number of shells between a hook and its agent depends on how the hook
+/// started.
 pub fn agent_process(pid: u32, agent: &str, table: &HashMap<u32, Row>, hops: u32) -> Option<u32> {
     let line = ancestors(pid, table, hops);
     let named = |ancestor: &&u32| {
@@ -156,13 +158,13 @@ pub fn agent_process(pid: u32, agent: &str, table: &HashMap<u32, Row>, hops: u32
         .copied()
 }
 
-/// The process of the agent that invoked a hook, dated at the moment it is
-/// found.
+/// The process of the agent that started a hook, with its start time.
 ///
-/// Side effect: asks the system when that process started, which is a second
-/// reading and so a second moment. A process that ends between the two is named
-/// undated rather than not named at all: knowing which process an agent was is
-/// worth having even where nothing can later tell it from its successor.
+/// Side effect: asks the system for the start time of that process. That
+/// question is a second reading, and so a second moment. If the process ends
+/// between the two readings, the result names the process with no start time,
+/// and does not drop the name. The identity of the agent process is worth a
+/// record, even when nothing can later tell that process from its successor.
 pub fn agent_running(
     pid: u32,
     agent: &str,
@@ -176,17 +178,18 @@ pub fn agent_running(
     })
 }
 
-/// Whether the process a record names is still the process it named.
+/// Whether the process that a record names is still the process that it named.
 ///
-/// Two questions rather than one. Whether anything is running under that number
-/// at all, and whether what is running under it began when this did: a number is
-/// handed out again once its process has gone, so asking only the first question
-/// eventually asks a stranger, and a stranger that is running answers that the
-/// agent is.
+/// This asks two questions and not one. The first question is whether any
+/// process runs under that number. The second question is whether the process
+/// under that number started when this record started. The system hands a
+/// number out again after its process ends. The first question alone therefore
+/// reaches a stranger in the end, and a live stranger answers that the agent is
+/// live.
 ///
-/// Where either end could not be dated the number stands on its own, which is
-/// the error worth making: an agent counted live too long is a row that goes
-/// stale, an agent counted dead while it works is a row that vanishes under
+/// If either reading carries no start time, the number alone answers the
+/// question. That is the error to accept. An agent counted live too long leaves
+/// a stale row. An agent counted dead while it works makes a row vanish under
 /// someone.
 pub fn running(process: &Process) -> bool {
     if !pid_alive(process.pid) {
@@ -198,35 +201,37 @@ pub fn running(process: &Process) -> bool {
     }
 }
 
-/// Whether an image name is that program: the last path component, with any
-/// extension taken off, compared without regard to case.
+/// Whether an image name is that program. The comparison uses the last path
+/// component, without the extension, and ignores case.
 fn runs(image: &str, program: &str) -> bool {
     stem(image).eq_ignore_ascii_case(program)
 }
 
-/// Whether an image is one of the shells a hook is run through.
+/// Whether an image is one of the shells that start a hook.
 fn is_shell(image: &str) -> bool {
     let stem = stem(image);
     SHELLS.iter().any(|shell| stem.eq_ignore_ascii_case(shell))
 }
 
-/// The bare name of an image: the last path component, with any extension and
-/// any trailing detail taken off.
+/// The bare name of an image: the last path component, without the extension
+/// and without any detail that follows the name.
 ///
-/// A process name is a path on some systems, a bare name with an extension on
-/// others, and a name with a thread appended on others again (`node-MainThread`),
-/// so all three are cut back to the same thing.
+/// A process name is a path on some systems. On other systems it is a bare name
+/// with an extension. On other systems again it is a name with a thread name
+/// appended, such as `node-MainThread`. This cuts all three forms back to the
+/// same name.
 fn stem(image: &str) -> &str {
     let file = image.rsplit(['/', '\\']).next().unwrap_or(image);
     let file = file.split('.').next().unwrap_or(file);
     file.split('-').next().unwrap_or(file)
 }
 
-/// Climb from `pid` towards the root, yielding each ancestor in turn.
+/// Climbs from `pid` towards the root and returns each ancestor in turn.
 ///
-/// Stops at the root, at a pid with no known parent, and after `hops` steps, so
-/// a cycle in a truncated or racing snapshot cannot spin. The starting pid is
-/// not yielded.
+/// The climb stops at the root, at a pid with no known parent, and after `hops`
+/// steps. A cycle in a snapshot that is truncated, or that was taken during a
+/// change, therefore cannot spin. The result does not hold the pid that the
+/// climb started from.
 pub fn ancestors(pid: u32, table: &HashMap<u32, Row>, hops: u32) -> Vec<u32> {
     let mut seen = Vec::new();
     let mut current = pid;
@@ -280,8 +285,8 @@ mod tests {
 
     #[test]
     fn a_cycle_cannot_spin() {
-        // A snapshot taken while processes were being reaped can name a parent
-        // that has since become a child.
+        // A snapshot taken during the reap of processes can name a parent that
+        // later became a child.
         let table = tree(&[(10, 9, "a"), (9, 10, "b")]);
         assert_eq!(ancestors(10, &table, 64), vec![9, 10]);
     }
@@ -294,8 +299,8 @@ mod tests {
 
     #[test]
     fn the_agent_is_the_nearest_ancestor_running_it() {
-        // A hook is a descendant of the agent with a shell or two in between,
-        // and how many varies with how the hook was invoked.
+        // A hook is a descendant of the agent, with one or two shells in
+        // between. The number of shells depends on how the hook started.
         let table = tree(&[
             (10, 9, "agent-wrangler"),
             (9, 8, "sh"),
@@ -308,8 +313,8 @@ mod tests {
 
     #[test]
     fn an_agent_not_named_for_itself_is_the_nearest_thing_that_is_not_a_shell() {
-        // An agent installed through npm reports as its runtime, which is not a
-        // name this could have a list of.
+        // An agent installed through npm reports as its runtime. No list here
+        // can hold that name.
         let table = tree(&[
             (10, 9, "agent-wrangler"),
             (9, 8, "bash"),
@@ -322,8 +327,8 @@ mod tests {
 
     #[test]
     fn the_nearer_of_two_running_it_wins() {
-        // An agent that started another agent: the hook belongs to the one it
-        // is closest to.
+        // One agent started another agent. The hook belongs to the nearer of
+        // the two.
         let table = tree(&[
             (10, 9, "agent-wrangler"),
             (9, 8, "claude"),
@@ -336,7 +341,7 @@ mod tests {
     #[test]
     fn a_name_beats_a_position() {
         // A wrapper that is not a shell sits between the hook and the agent.
-        // The one actually named for the agent is the one wanted.
+        // The process named for the agent is the process that this wants.
         let table = tree(&[
             (10, 9, "agent-wrangler"),
             (9, 8, "npx"),
@@ -375,15 +380,15 @@ mod tests {
     #[test]
     fn this_process_is_alive_and_something_absurd_is_not() {
         assert!(pid_alive(std::process::id()));
-        // Pid 0 is the scheduler on unix and the idle process on Windows;
-        // neither is a process a hook could have descended from.
+        // Pid 0 is the scheduler on unix and the idle process on Windows. A
+        // hook descends from neither of them.
         assert!(!pid_alive(0));
     }
 
     #[test]
     fn a_process_is_itself_and_not_whatever_held_its_number_before() {
-        // The whole point of dating a process: the number alone would answer
-        // this the same way for a stranger that inherited it.
+        // This is the reason for the start time on a process. The number alone
+        // gives the same answer for a stranger that inherited it.
         let mine = Process {
             pid: std::process::id(),
             started: started(std::process::id()),
@@ -410,8 +415,9 @@ mod tests {
 
     #[test]
     fn the_agent_a_hook_belongs_to_comes_back_dated() {
-        // The pid is this process's own ancestry rather than a real agent's,
-        // which is enough to say that what is found is dated as it is found.
+        // The climb walks the ancestry of this process and not the ancestry of
+        // a real agent. That is enough to show that the result carries a start
+        // time.
         let table = processes();
         let me = std::process::id();
         if let Some(process) = agent_running(me, "nothing-runs-under-this-name", &table, 8) {
@@ -419,17 +425,17 @@ mod tests {
         }
     }
 
-    // A program that never exits is what the wait is for, and there is no
-    // spelling of one that both systems share. The failure is not unix-only;
-    // the sleeper is.
+    // A program that never exits is the reason for the wait. The two systems
+    // share no spelling of such a program. The failure is not unix-only. The
+    // sleeper is unix-only.
     #[cfg(unix)]
     const LONGER_THAN_ANY_TEST: &str = "3600";
 
-    /// How many children of this process are running `sleep`.
+    /// The number of children of this process that run `sleep`.
     ///
-    /// A child that was killed and not waited for is still one of these: the
-    /// process table holds it until somebody reaps it, which is the whole of
-    /// what killing without waiting leaves behind.
+    /// A child that this killed and did not wait for is still one of these. The
+    /// process table holds that child until somebody reaps it. A kill without a
+    /// wait leaves nothing else behind.
     #[cfg(unix)]
     fn sleepers() -> usize {
         let me = std::process::id();
@@ -451,8 +457,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_program_that_refused_says_so_without_being_waited_out() {
-        // The answer a client that has gone gives, and it is the fast one: a
-        // wait spent on it would be a wait spent on every delivery.
+        // A client that went away gives this answer, and the answer is fast. A
+        // wait on it is a wait on every delivery.
         let began = Instant::now();
         assert_eq!(
             ran(&mut command("false"), Duration::from_secs(30)),
@@ -475,8 +481,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_program_that_never_ends_is_given_up_on_and_leaves_nothing_behind() {
-        // The failure the wait exists for. Without it this call is the end of
-        // the thread that made it.
+        // This is the failure that the wait exists for. Without the wait, this
+        // call is the end of the thread that made it.
         let mut sleeper = command("sleep");
         sleeper.arg(LONGER_THAN_ANY_TEST);
         let began = Instant::now();
