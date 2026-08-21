@@ -17,7 +17,7 @@
 # A piped script takes no arguments. To pass an argument, run the script as a
 # script block:
 #
-#   & ([scriptblock]::Create((irm <url>))) -Version v0.1.13 -AddToPath
+#   & ([scriptblock]::Create((irm <url>))) -Version v0.1.14 -AddToPath
 [CmdletBinding()]
 param(
     # The release to install. Without this parameter, the script takes the

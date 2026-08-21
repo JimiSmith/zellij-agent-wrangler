@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.13"
+version = "0.1.14"
 edition = "2021"
 
 # Optimized for how long the plugin takes to draw rather than for how small it
