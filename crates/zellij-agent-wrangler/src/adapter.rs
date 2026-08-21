@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use agent_wrangler_core::agent::{self, Agent, Record};
 use agent_wrangler_core::registry::Registry;
 use agent_wrangler_sidebar::{
-    AgentSnapshot, Broadcast, Focus, FocusTarget, PaneId, PaneReport, SessionLayout,
-    SidebarPaneReport, TabId, TabLayout, TabReport,
+    AgentSnapshot, Broadcast, Focus, FocusTarget, PaneId, PaneReport, PaneVisibility,
+    SessionLayout, SidebarPaneReport, TabId, TabLayout, TabReport,
 };
 use agent_wrangler_ui::model::{RowKey, TabPosition};
 use zellij_tile::prelude::{PaneId as ZellijPaneId, PaneInfo, PaneManifest, TabInfo};
@@ -53,15 +53,32 @@ pub fn layout(manifest: PaneManifest, plugin_id: u32) -> SessionLayout {
 fn listed(panes: Vec<PaneInfo>) -> Vec<PaneReport> {
     let mut panes: Vec<PaneInfo> = panes
         .into_iter()
-        .filter(|pane| !pane.is_plugin && pane.is_selectable && !pane.is_suppressed)
+        .filter(|pane| !pane.is_plugin && pane.is_selectable)
         .collect();
-    panes.sort_by_key(|pane| (pane.is_floating, pane.pane_y, pane.pane_x));
+    // A parked pane carries the geometry of the pane on screen in front of it,
+    // and zellij lists the parked panes of a tab in the order of a hash map.
+    // The last two keys hold a parked pane behind that pane, and in the same
+    // place in every frame.
+    panes.sort_by_key(|pane| {
+        (
+            pane.is_floating,
+            pane.pane_y,
+            pane.pane_x,
+            pane.is_suppressed,
+            pane.id,
+        )
+    });
     panes
         .into_iter()
         .map(|pane| PaneReport {
             id: PaneId::new(pane.id.to_string()),
             title: pane.title,
             focused: pane.is_focused,
+            visibility: if pane.is_suppressed {
+                PaneVisibility::Parked
+            } else {
+                PaneVisibility::OnScreen
+            },
         })
         .collect()
 }
@@ -225,6 +242,42 @@ mod tests {
             .map(|pane| pane.id.as_str())
             .collect();
         assert_eq!(ids, ["1", "2", "3"]);
+    }
+
+    #[test]
+    fn a_parked_pane_is_listed_behind_the_pane_that_stands_in_for_it() {
+        let parked = |id: u32, title: &str| PaneInfo {
+            is_suppressed: true,
+            ..pane(id, title, 0, 0)
+        };
+        // Zellij gives a parked pane the geometry of the pane on screen, and
+        // lists the parked panes of a tab in the order of a hash map.
+        let manifest = PaneManifest {
+            panes: HashMap::from([(
+                0,
+                vec![
+                    parked(3, "second of the stack"),
+                    pane(4, "below", 10, 0),
+                    parked(2, "first of the stack"),
+                    pane(1, "on screen", 0, 0),
+                ],
+            )]),
+        };
+        let normalized = layout(manifest, 7);
+        let listed: Vec<(&str, PaneVisibility)> = normalized.tabs[0]
+            .content_panes
+            .iter()
+            .map(|pane| (pane.id.as_str(), pane.visibility))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("1", PaneVisibility::OnScreen),
+                ("2", PaneVisibility::Parked),
+                ("3", PaneVisibility::Parked),
+                ("4", PaneVisibility::OnScreen),
+            ]
+        );
     }
 
     #[test]

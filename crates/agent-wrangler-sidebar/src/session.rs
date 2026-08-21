@@ -1,10 +1,14 @@
 //! Reconciliation of multiplexer reports into the session vocabulary of the
 //! tree.
 
+use std::collections::BTreeSet;
+
 use agent_wrangler_ui::model::{PaneId, TabPosition};
 use agent_wrangler_ui::tree::{Pane, Tab};
 
-use crate::model::{Focus, FocusTarget, SessionLayout, TabId, TabReport};
+use crate::model::{
+    Focus, FocusTarget, PaneReport, PaneVisibility, SessionLayout, TabId, TabReport,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReconciledFocus {
@@ -19,6 +23,10 @@ pub struct ReconciledSession {
     pub focus: ReconciledFocus,
 }
 
+/// The tab that holds a pane, parked panes included.
+///
+/// A parked pane is a place that the sidebar can send the user to. The host
+/// brings the pane back on screen as it takes the focus.
 pub fn tab_of_pane(layout: &SessionLayout, pane: &PaneId) -> Option<TabPosition> {
     layout.tabs.iter().find_map(|tab| {
         tab.content_panes
@@ -28,14 +36,29 @@ pub fn tab_of_pane(layout: &SessionLayout, pane: &PaneId) -> Option<TabPosition>
     })
 }
 
+/// The pane that a tab sends the user to when no row names one.
+///
+/// A parked pane is never that pane. It answers for an agent that the user
+/// asked for by name, and not for a tab that the user asked to enter. Focus on
+/// a parked pane also takes the pane in front of it off the screen.
 pub fn first_pane(layout: &SessionLayout, tab: TabPosition) -> Option<PaneId> {
     layout
         .tabs
         .iter()
         .find(|candidate| candidate.position == tab)?
         .content_panes
-        .first()
+        .iter()
+        .find(|pane| pane.visibility == PaneVisibility::OnScreen)
         .map(|pane| pane.id.clone())
+}
+
+/// Whether a pane is due a row of its own.
+///
+/// A pane on screen always is. A parked pane is due one only while it hosts an
+/// agent: the agent is what the sidebar exists to show, and it keeps running
+/// while the host holds its pane off screen.
+fn drawn(pane: &PaneReport, agent_panes: &BTreeSet<PaneId>) -> bool {
+    pane.visibility == PaneVisibility::OnScreen || agent_panes.contains(&pane.id)
 }
 
 pub fn position_of(tabs: &[TabReport], id: &TabId) -> Option<TabPosition> {
@@ -113,7 +136,7 @@ pub fn stand_down_to(
             source
                 .content_panes
                 .iter()
-                .any(|pane| &pane.id == *remembered)
+                .any(|pane| &pane.id == *remembered && pane.visibility == PaneVisibility::OnScreen)
         })
         .cloned()
         .or_else(|| first_pane(layout, source.position))
@@ -124,6 +147,7 @@ pub fn reconcile(
     layout: &SessionLayout,
     visible: bool,
     observed_focus: Option<&Focus>,
+    agent_panes: &BTreeSet<PaneId>,
 ) -> ReconciledSession {
     let focus = reconcile_focus(reports, layout, visible, observed_focus);
     let confirmed = match &focus {
@@ -148,6 +172,7 @@ pub fn reconcile(
                 .map(|tab| {
                     tab.content_panes
                         .iter()
+                        .filter(|pane| drawn(pane, agent_panes))
                         .map(|pane| {
                             Pane::new(pane.id.clone(), &pane.title, active && on == Some(&pane.id))
                         })
@@ -200,7 +225,7 @@ fn reconcile_focus(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{PaneReport, SessionLayout, SidebarPaneReport, TabLayout};
+    use crate::model::{SessionLayout, SidebarPaneReport, TabLayout};
 
     fn tab(id: &str, position: usize) -> TabReport {
         TabReport {
@@ -217,29 +242,37 @@ mod tests {
                 TabLayout {
                     position: TabPosition::at(0),
                     other_focused: false,
-                    content_panes: vec![PaneReport {
-                        id: PaneId::new("%1"),
-                        title: "one".to_string(),
-                        focused: false,
-                    }],
+                    content_panes: vec![on_screen("%1", "one")],
                     sidebar_pane: Some(SidebarPaneReport { focused: false }),
                 },
                 TabLayout {
                     position: TabPosition::at(1),
                     other_focused: false,
-                    content_panes: vec![PaneReport {
-                        id: PaneId::new("%2"),
-                        title: "two".to_string(),
-                        focused: false,
-                    }],
+                    content_panes: vec![on_screen("%2", "two")],
                     sidebar_pane: None,
                 },
             ],
         }
     }
 
+    fn on_screen(id: &str, title: &str) -> PaneReport {
+        PaneReport {
+            id: PaneId::new(id),
+            title: title.to_string(),
+            focused: false,
+            visibility: PaneVisibility::OnScreen,
+        }
+    }
+
+    fn parked(id: &str, title: &str) -> PaneReport {
+        PaneReport {
+            visibility: PaneVisibility::Parked,
+            ..on_screen(id, title)
+        }
+    }
+
     fn observed(reports: &[TabReport], layout: &SessionLayout, focus: &Focus) -> ReconciledSession {
-        reconcile(reports, layout, true, Some(focus))
+        reconcile(reports, layout, true, Some(focus), &BTreeSet::new())
     }
 
     #[test]
@@ -267,11 +300,11 @@ mod tests {
             target: FocusTarget::Sidebar,
         };
         assert_eq!(
-            reconcile(&reports, &layout(), false, Some(&focus)).focus,
+            reconcile(&reports, &layout(), false, Some(&focus), &BTreeSet::new()).focus,
             ReconciledFocus::Unknown
         );
         assert_eq!(
-            reconcile(&reports, &layout(), true, None).focus,
+            reconcile(&reports, &layout(), true, None, &BTreeSet::new()).focus,
             ReconciledFocus::Unknown
         );
     }
@@ -346,6 +379,64 @@ mod tests {
         }
     }
 
+    fn with_a_parked_pane() -> SessionLayout {
+        let mut layout = layout();
+        layout.tabs[1].content_panes = vec![parked("%2", "two"), on_screen("%3", "three")];
+        layout
+    }
+
+    #[test]
+    fn a_parked_pane_has_a_row_only_while_an_agent_answers_for_it() {
+        let reports = vec![tab("0", 0), tab("1", 1)];
+        let layout = with_a_parked_pane();
+
+        let alone = reconcile(&reports, &layout, false, None, &BTreeSet::new());
+        let ids: Vec<&str> = alone.tabs[1]
+            .panes
+            .iter()
+            .map(|pane| pane.id.as_str())
+            .collect();
+        assert_eq!(ids, ["%3"]);
+
+        let hosting = BTreeSet::from([PaneId::new("%2")]);
+        let hosted = reconcile(&reports, &layout, false, None, &hosting);
+        let ids: Vec<&str> = hosted.tabs[1]
+            .panes
+            .iter()
+            .map(|pane| pane.id.as_str())
+            .collect();
+        assert_eq!(ids, ["%2", "%3"]);
+    }
+
+    #[test]
+    fn a_parked_pane_is_a_place_to_go_but_never_the_place_a_tab_goes() {
+        let layout = with_a_parked_pane();
+        let parked = PaneId::new("%2");
+        // An agent row names its pane, and the host takes the pane back on
+        // screen as it takes the focus.
+        assert_eq!(tab_of_pane(&layout, &parked), Some(TabPosition::at(1)));
+        // A tab row names no pane, so it goes to one the user can already see.
+        assert_eq!(
+            first_pane(&layout, TabPosition::at(1)),
+            Some(PaneId::new("%3"))
+        );
+    }
+
+    #[test]
+    fn stand_down_falls_back_when_the_remembered_pane_is_parked() {
+        let mut layout = with_a_parked_pane();
+        layout.tabs[1].sidebar_pane = Some(SidebarPaneReport { focused: false });
+        assert_eq!(
+            stand_down_to(
+                &layout,
+                Some(&PaneId::new("%2")),
+                TabPosition::at(1),
+                TabPosition::at(0),
+            ),
+            Some(PaneId::new("%3"))
+        );
+    }
+
     #[test]
     fn pane_ids_are_opaque_when_finding_and_leaving_tabs() {
         let layout = layout();
@@ -409,6 +500,7 @@ mod tests {
             &SessionLayout::default(),
             false,
             None,
+            &BTreeSet::new(),
         )
         .tabs;
         let names: Vec<&str> = resolved.iter().map(|tab| tab.name.as_str()).collect();
@@ -423,7 +515,7 @@ mod tests {
         reports[1].active = true;
         let mut layout = layout();
         layout.tabs[1].content_panes[0].focused = true;
-        let resolved = reconcile(&reports, &layout, true, None);
+        let resolved = reconcile(&reports, &layout, true, None, &BTreeSet::new());
         assert_eq!(resolved.focus, ReconciledFocus::Unknown);
         assert!(resolved.tabs.iter().all(|tab| !tab.active));
         assert!(resolved

@@ -41,6 +41,7 @@ placeholder.
 - [x] Agent label from the working-directory basename
 - [x] Agent label from the session title, when it has one
 - [x] Teammates labelled `@name - title`
+- [x] An agent keeps its row while a stack or a scrollback editor hides its pane
 
 A session's title is in neither agent's hook body, so it is read off disk:
 Claude's from the transcript the hook names, Copilot's from the workspace file

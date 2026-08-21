@@ -14,11 +14,25 @@ pub struct TabReport {
     pub active: bool,
 }
 
+/// Whether the host draws a pane, or holds it off screen.
+///
+/// A host parks a pane that it keeps but does not draw. Zellij parks every
+/// member of a stacked list except the one on screen, and it parks the pane
+/// that a scrollback editor stands in for. A parked pane keeps its process, its
+/// id and its title, and the host brings it back the moment that something
+/// focuses it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneVisibility {
+    OnScreen,
+    Parked,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneReport {
     pub id: PaneId,
     pub title: String,
     pub focused: bool,
+    pub visibility: PaneVisibility,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

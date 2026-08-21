@@ -16,8 +16,8 @@ use agent_wrangler_core::agent::{self, Agent, Meta, Record, SessionId, Turn};
 use agent_wrangler_core::origin::Origin;
 use agent_wrangler_core::registry::Registry;
 use agent_wrangler_sidebar::{
-    AgentSnapshot, Application, Focus, FocusTarget, Input, Options, PaneId, PaneReport, Permission,
-    SessionLayout, SidebarPaneReport, TabId, TabLayout, TabReport,
+    AgentSnapshot, Application, Focus, FocusTarget, Input, Options, PaneId, PaneReport,
+    PaneVisibility, Permission, SessionLayout, SidebarPaneReport, TabId, TabLayout, TabReport,
 };
 use agent_wrangler_ui::model::TabPosition;
 use agent_wrangler_ui::{ansi, Rect};
@@ -106,6 +106,7 @@ fn layout(step: usize) -> SessionLayout {
                         // Each title is a new string for the sidebar.
                         title: format!("~/work/repo-{tab}-{pane} $ step {step}"),
                         focused: tab == step % TABS && pane == step % PANES_PER_TAB,
+                        visibility: PaneVisibility::OnScreen,
                     })
                     .collect(),
                 sidebar_pane: Some(SidebarPaneReport { focused: false }),

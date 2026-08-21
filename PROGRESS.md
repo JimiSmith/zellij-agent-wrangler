@@ -93,6 +93,22 @@ the same number the plugin reads as `PaneInfo.id` for a non-plugin pane
 (`pane_info_for_pane` in `tab/mod.rs`). Every process started in the pane
 inherits it, which is how an agent's hook says where it is running.
 
+**A stacked pane leaves the manifest in zellij 0.45.** The release turns a stack
+of panes into a *stack list*. `Tab::select_stack_list_member` keeps one member
+in `tiled_panes` and parks every other member in `suppressed_panes`.
+`pane_infos` then reports a parked pane with `is_suppressed` set, and the mode
+is on by default (`stacked_pane_list.unwrap_or(true)`). A parked pane carries
+the geometry of the pane on screen in front of it, and no field of `PaneInfo`
+says that a pane belongs to a stack. Version 0.44 has no stack lists: every
+member of a stack was a pane of its own.
+
+So the sidebar lists a parked pane only while an agent answers for it
+(`session::drawn`). `Enter` on that row works, because zellij takes a parked
+member back on screen as it takes the focus (`focus_hidden_stack_list_member`).
+A parked pane is never where a tab row sends the user, and never where the
+sidebar stands down. A scrollback editor parks a pane in the same way, so an
+agent keeps its row while the user reads the output of that pane.
+
 **A plugin's `/tmp` is the host's `$TMPDIR/zellij-<uid>`,** readable and
 writable both ways; `/host`, `/data` and `/cache` are mounted too. The
 documentation says `/data` is "shared with all loaded instances of the plugin",

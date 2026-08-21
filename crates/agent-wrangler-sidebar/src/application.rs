@@ -287,11 +287,13 @@ impl Application {
 
     /// The session, as the reports and the focus in hand describe it.
     fn reconciled_session(&self) -> session::ReconciledSession {
+        let agent_panes: BTreeSet<PaneId> = self.agent_panes.values().cloned().collect();
         let mut resolved = session::reconcile(
             &self.tabs,
             &self.layout,
             self.visible,
             self.observed_focus.as_ref(),
+            &agent_panes,
         );
         for tab in &mut resolved.tabs {
             for pane in &mut tab.panes {
@@ -629,7 +631,7 @@ fn said(stderr: &[u8]) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{PaneReport, SidebarPaneReport, TabId, TabLayout};
+    use crate::model::{PaneReport, PaneVisibility, SidebarPaneReport, TabId, TabLayout};
     use agent_wrangler_core::agent::Meta;
     use agent_wrangler_core::origin::Origin;
     use agent_wrangler_ui::ansi;
@@ -656,6 +658,7 @@ mod tests {
                             id: PaneId::new(*id),
                             title: format!("pane {id}"),
                             focused: false,
+                            visibility: PaneVisibility::OnScreen,
                         })
                         .collect(),
                     sidebar_pane: (*position == sidebar)
@@ -1578,6 +1581,36 @@ mod tests {
             title: None,
         });
         assert_eq!(decision, Decision::default());
+    }
+
+    #[test]
+    fn an_agent_in_a_parked_pane_keeps_its_row_and_the_way_back_to_it() {
+        let mut app = app();
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        let mut reported = layout(0, &[(0, &["%1", "%parked"])]);
+        reported.tabs[0].content_panes[1].visibility = PaneVisibility::Parked;
+        app.reduce(Input::LayoutReported(reported));
+        app.reduce(focus("10", FocusTarget::Sidebar));
+
+        let keys = |app: &mut Application| -> Vec<Option<RowKey>> {
+            app.render(Rect::new(0, 0, 30, 10))
+                .interactions
+                .iter()
+                .map(|item| item.as_ref().map(|item| item.key.clone()))
+                .collect()
+        };
+        assert!(!keys(&mut app).contains(&Some(RowKey::Pane(PaneId::new("%parked")))));
+
+        app.reduce(Input::Agents(agents(&[("hidden", "%parked", Turn::Idle)])));
+        let session = SessionId::new("hidden").unwrap();
+        assert!(keys(&mut app).contains(&Some(RowKey::Agent(session.clone()))));
+
+        app.reduce(Input::Message(Broadcast::Selection(RowKey::Agent(session))));
+        app.render(Rect::new(0, 0, 30, 10));
+        let decision = app.reduce(Input::User(UserAction::Activate));
+        assert!(decision
+            .effects
+            .contains(&Effect::FocusPane(PaneId::new("%parked"))));
     }
 
     #[test]
