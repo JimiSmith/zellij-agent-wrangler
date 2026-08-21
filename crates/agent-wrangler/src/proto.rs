@@ -94,12 +94,28 @@ pub enum Inbound {
     Monitor { format: u32 },
 }
 
+/// What a client says on the transport that already carries its state.
+///
+/// This is deliberately narrower than [`Inbound`]. The lines arrive on a pipe
+/// that a plugin writes to. A plugin must not report an agent or register a
+/// client. A line that says one of those things does not decode here at all,
+/// so no arm has to turn it down.
+///
+/// Every variant is also an [`Inbound`] variant, written the same way. A test
+/// below fails if the two ever drift apart.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Told {
+    /// The user reached a session that called for them.
+    Seen { session: String },
+}
+
 /// One message that the daemon received or sent, and the time of it.
 ///
 /// These records answer one question. The state reaches a sidebar, the sidebar
-/// runs the client to answer, and the answer arrives back here as another
-/// message. A run of these records says how fast that circle turns, what starts
-/// it again, and how long each leg took.
+/// answers on the same transport, and that answer arrives back here as another
+/// message. A run of these records says how fast that circle turns, and what
+/// starts it again.
 ///
 /// These records hold messages only. What the daemon decided, polled or noticed
 /// in between is its own business and is not a record here. A watcher of that
@@ -136,31 +152,16 @@ pub enum What {
     Asked,
     /// Out: the state goes to this client, with this many agents in it.
     ///
-    /// This record is separate from [`What::Delivered`] rather than part of it.
-    /// The reason is that a delivery for a zellij client is a whole process run
-    /// and can fail to end. One of these records without one of those is a
-    /// delivery that never came back.
+    /// One of these is written for each state that goes out. A delivery is a
+    /// write and not a process run. There is nothing to say afterwards about a
+    /// delivery that landed, and no time to measure.
     Delivering { sink: Sink, agents: usize },
-    /// Out: that delivery landed, or found the client gone. `took` is in
-    /// milliseconds, and for a zellij client it covers a whole process run.
+    /// Out: a delivery to this client failed, so the client refused it.
     ///
-    /// `abandoned` marks a delivery that the daemon gave up on and killed. Such
-    /// a delivery reads as sent as well, and both facts are true of it. The
-    /// client has the state, and only the program that handed it over failed to
-    /// end. The field says where the time went. A delivery like that takes the
-    /// whole of the wait, and every client after it waits its turn.
-    ///
-    /// There are two fields rather than the outcome itself, because a watcher
-    /// can be of another build. A watcher that knows nothing of `abandoned`
-    /// still finds a delivery that landed, and that is what an abandoned
-    /// delivery is.
-    Delivered {
-        sink: Sink,
-        sent: bool,
-        #[serde(default)]
-        abandoned: bool,
-        took: u64,
-    },
+    /// Only a failure is worth a second record. The daemon learns of it after
+    /// the state went out, because nothing waits on a write. Enough of these in
+    /// a row retires the client.
+    Failed { sink: Sink },
     /// Records that the daemon cannot hand over fast enough. A watcher that
     /// falls behind loses records and does not hold the daemon up. The daemon
     /// tells the watcher how many records it lost, so the watcher does not
@@ -305,40 +306,71 @@ mod tests {
     }
 
     #[test]
-    fn a_delivery_says_how_it_ended() {
+    fn a_delivery_that_failed_says_which_client_refused_it() {
         round_trip(Watched {
             at: 1_700_000_000_000,
-            what: What::Delivered {
+            what: What::Failed {
                 sink: Sink::Zellij {
                     session: "proto".to_string(),
                 },
-                sent: true,
-                abandoned: true,
-                took: 2000,
             },
         });
     }
 
     #[test]
-    fn a_delivery_written_by_a_build_that_only_knew_two_endings_still_reads() {
-        // A watcher reads what the daemon says, and the two are not always the
-        // same build. A record from a build with nothing to give up on is a
-        // delivery that the daemon did not give up on.
-        let line = r#"{"at":1,"kind":"delivered","sink":{"kind":"pipe","path":"/tmp/w"},"sent":true,"took":40}"#;
-        let mut reader = line.as_bytes();
+    fn what_a_client_says_on_its_own_transport_is_what_the_daemon_receives() {
+        // Both readers must accept the same line. A client writes that line
+        // with no JSON writer at all, so nothing but this test keeps the two
+        // ends in step.
+        let line = agent_wrangler_core::told::Told::Seen(
+            agent_wrangler_core::agent::SessionId::new("9f3c-1a").unwrap(),
+        )
+        .encode();
+        let session = "9f3c-1a".to_string();
         assert_eq!(
-            read_message::<_, Watched>(&mut reader).unwrap(),
-            Some(Watched {
-                at: 1,
-                what: What::Delivered {
-                    sink: Sink::Pipe {
-                        path: "/tmp/w".to_string()
-                    },
-                    sent: true,
-                    abandoned: false,
-                    took: 40,
-                },
+            read_message::<_, Told>(&mut line.as_bytes()).unwrap(),
+            Some(Told::Seen {
+                session: session.clone()
             })
+        );
+        assert_eq!(
+            read_message::<_, Inbound>(&mut line.as_bytes()).unwrap(),
+            Some(Inbound::Seen { session })
+        );
+    }
+
+    #[test]
+    fn nothing_but_a_client_message_decodes_on_a_client_transport() {
+        // A plugin writes on this pipe. A plugin that reported an agent, or
+        // registered a client, is believed. Nothing turns those down at run
+        // time, because they do not decode at all.
+        let mut written = Vec::new();
+        write_message(&mut written, &Inbound::Snapshot).unwrap();
+        write_message(
+            &mut written,
+            &Inbound::Register {
+                format: 3,
+                sink: Sink::Zellij {
+                    session: "proto".to_string(),
+                },
+                notify: Vec::new(),
+            },
+        )
+        .unwrap();
+        write_message(
+            &mut written,
+            &Inbound::Seen {
+                session: "one".to_string(),
+            },
+        )
+        .unwrap();
+        let mut reader = written.as_slice();
+        assert_eq!(
+            read_message::<_, Told>(&mut reader).unwrap(),
+            Some(Told::Seen {
+                session: "one".to_string()
+            }),
+            "the two before it were passed over"
         );
     }
 

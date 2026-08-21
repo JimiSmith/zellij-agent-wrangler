@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use agent_wrangler_core::agent::SessionId;
 use agent_wrangler_core::registry::Registry;
+pub use agent_wrangler_core::told::Told;
 use agent_wrangler_ui::frame::Frame;
 pub use agent_wrangler_ui::model::{PaneId, TabId};
 use agent_wrangler_ui::model::{RowKey, TabPosition};
@@ -163,6 +164,14 @@ pub enum Effect {
     RefreshFocus,
     RefreshPaneTitle(PaneId),
     Run(Command),
+    /// Says one thing to the daemon, on the transport that the daemon already
+    /// holds open to reach this client.
+    ///
+    /// This effect costs no process, so a sidebar can speak as often as it
+    /// needs to. [`Effect::Run`] keeps the two things that no such
+    /// transport can carry: the registration that opens it, and the hooks that
+    /// are files on disk.
+    Tell(Told),
     Broadcast(Broadcast),
     FocusPane(PaneId),
     SwitchTab(TabId),

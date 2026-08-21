@@ -151,8 +151,15 @@ pub fn encode_message(message: Broadcast) -> (&'static str, Option<String>) {
     }
 }
 
+/// The state that one message carried, as the sidebar's own vocabulary.
+///
+/// The payload arrives on a transport that frames its messages by the line. The
+/// record breaks therefore travel as [`agent::BREAK`], and the newline that
+/// framed the message is still on the end. Both are undone here, before
+/// anything reads the header, because the header is split on a real newline.
 pub fn agents(payload: &str, session: &str) -> Option<AgentSnapshot> {
-    let (format, records) = agent::read_state(payload)?;
+    let payload = agent::unflatten(payload);
+    let (format, records) = agent::read_state(&payload)?;
     if format != agent::FORMAT {
         return Some(AgentSnapshot::Incompatible);
     }
@@ -403,12 +410,18 @@ mod tests {
         )
     }
 
+    /// One payload as the transport hands it over: every record break carried
+    /// by `BREAK`, and the newline that framed the message still on the end.
+    fn delivered(payload: &str) -> String {
+        format!("{}\n", agent::flatten(payload))
+    }
+
     #[test]
     fn agent_reports_are_scoped_and_placed_at_the_adapter_boundary() {
         let mut registry = Registry::default();
         registry.report(reported("mine", "work", "11"));
         registry.report(reported("theirs", "other", "12"));
-        let payload = agent::state(&registry.encode());
+        let payload = delivered(&agent::state(&registry.encode()));
         let Some(AgentSnapshot::Compatible { registry, panes }) = agents(&payload, "work") else {
             panic!("compatible state");
         };
@@ -441,8 +454,28 @@ mod tests {
     fn malformed_agent_messages_are_ignored_and_other_formats_are_reported() {
         assert_eq!(agents("", "work"), None);
         assert_eq!(
-            agents("wrangler 999\n", "work"),
+            agents(&delivered("wrangler 999\n"), "work"),
             Some(AgentSnapshot::Incompatible)
         );
+    }
+
+    #[test]
+    fn a_run_of_records_arrives_as_one_line_and_is_read_whole() {
+        // Every payload holds record breaks. The transport frames by the line,
+        // so a reader that does not restore them sees one record and no header.
+        let mut registry = Registry::default();
+        registry.report(reported("first", "work", "11"));
+        registry.report(reported("second", "work", "12"));
+        let line = delivered(&agent::state(&registry.encode()));
+        assert!(
+            !line.trim_end_matches('\n').contains('\n'),
+            "one line, whatever it carries"
+        );
+
+        let Some(AgentSnapshot::Compatible { registry, .. }) = agents(&line, "work") else {
+            panic!("compatible state");
+        };
+        assert!(registry.get(&SessionId::new("first").unwrap()).is_some());
+        assert!(registry.get(&SessionId::new("second").unwrap()).is_some());
     }
 }

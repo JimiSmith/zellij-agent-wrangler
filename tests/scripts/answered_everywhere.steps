@@ -1,0 +1,66 @@
+# After a call is answered in one tab, no tab draws it.
+#
+# The sidebar of the tab that the user is in clears the call from its own
+# records the moment it answers. Every other sidebar is frozen for zellij
+# events, so nothing local clears it there. What clears it there is the state
+# that the daemon sends after it takes the answer. This run is the assertion
+# that the state comes back.
+#
+# The layout gives both tabs a sidebar. The call is raised while the user is in
+# the other tab, so nothing answers it on arrival. That is what makes this
+# different from `agent_row.steps`, where the user is already in the pane.
+
+env: ZELLIJ_CONFIG_DIR=$PWD/tests/zellij-config
+env: TERM=xterm-256color
+env: XDG_STATE_HOME=$PWD/tests/out/state
+env: XDG_CACHE_HOME=$PWD/tests/out/cache
+env: USER=wrangler-test
+
+sh?: tests/scripts/reset.sh wrangler-test-answered
+
+sh: cargo build --target wasm32-wasip1 -p zellij-agent-wrangler
+sh: cargo build -p agent-wrangler
+sh: tests/scripts/make-layout.sh tests/out/answered.kdl
+
+spawn: zellij --session wrangler-test-answered --new-session-with-layout tests/out/answered.kdl
+
+wait: notes @ 25
+
+# The agent reports from the pane of the first tab. The pane says its own id,
+# so that a call can be raised for that pane from outside the session.
+keys: printf '%s' '{"session_id":"answered-one","cwd":"/home/u/quarry","transcript_path":"'"$PWD"'/tests/out/e2e-transcript.jsonl"}' | "$PWD/target/debug/agent-wrangler" hook claude start\r
+keys: echo "$ZELLIJ_PANE_ID" > tests/out/answered-pane.txt\r
+wait: QUARRYMARK @ 20
+
+# The user leaves for the second tab, so the call arrives where nobody is.
+keys: <C-t>
+keys: 2
+sleep: 2
+
+sh: tests/scripts/raise-call.sh answered-one wrangler-test-answered "$(cat tests/out/answered-pane.txt)" needsAttention
+sleep: 2
+
+# The sidebar of the second tab draws the call, although the agent is not here.
+wait: ● @ 20
+dump: answered_raised
+
+# The user goes to the tab that raised it. The focus lands back on the pane of
+# the agent, so the sidebar of that tab answers.
+keys: <C-t>
+keys: 1
+sleep: 3
+
+sh: tests/scripts/expect-turn.sh answered-one idle
+dump: answered_here
+waitgone: ● @ 20
+
+# The other tab, whose sidebar never saw the answer happen. Only the state that
+# the daemon sent clears this.
+keys: <C-t>
+keys: 2
+sleep: 3
+dump: answered_elsewhere
+waitgone: ● @ 20
+
+keys: <C-q>
+sleep: 1

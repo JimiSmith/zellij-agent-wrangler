@@ -34,6 +34,17 @@ struct Plugin {
     application: Application,
     plugin_id: u32,
     schedule: adapter::RenderSchedule,
+    /// The CLI pipe that the daemon holds open to this session. The id comes
+    /// from the last message that arrived on that pipe.
+    ///
+    /// The id is how this plugin answers on that pipe, and it arrives only on a
+    /// message. Nothing this plugin says to the daemon can therefore be said
+    /// before the daemon has said something first.
+    ///
+    /// Each pipe process carries an id of its own. When the daemon replaces a
+    /// pipe that died, this holds the old id until a message on the new one
+    /// arrives.
+    pipe_id: Option<String>,
 }
 
 register_plugin!(Plugin);
@@ -96,6 +107,25 @@ impl Plugin {
                     PathBuf::from(RUN_FROM),
                     BTreeMap::from([(CALL.to_string(), command.call)]),
                 );
+                None
+            }
+            Effect::Tell(told) => {
+                // When this arrives, and what it can still drop. This call
+                // reaches the pipe only while this plugin handles a message
+                // from it. A focus change usually raises an effect of this
+                // kind, and a focus change is not a message. Zellij therefore
+                // holds the line and hands it over on the next message. The
+                // daemon writes down every held pipe on a beat for exactly that
+                // reason, and quickens that beat while an agent waits for the
+                // user.
+                //
+                // The line is still lost if it names a pipe that the daemon
+                // replaced. The id of the new pipe arrives only on the next
+                // message. The other sidebars then draw a call as unanswered
+                // until the agent reports again.
+                if let Some(id) = &self.pipe_id {
+                    cli_pipe_output(id, &format!("{}\n", told.encode()));
+                }
                 None
             }
             Effect::Broadcast(message) => {
@@ -181,6 +211,9 @@ impl ZellijPlugin for Plugin {
             PermissionType::ChangeApplicationState,
             PermissionType::MessageAndLaunchOtherPlugins,
             PermissionType::RunCommands,
+            // What `cli_pipe_output` needs. Without it the call is dropped in
+            // silence: no error, no log, and nothing on the pane.
+            PermissionType::ReadCliPipes,
         ]);
         subscribe(&[
             EventType::Key,
@@ -216,6 +249,12 @@ impl ZellijPlugin for Plugin {
     }
 
     fn pipe(&mut self, message: PipeMessage) -> bool {
+        // The id is taken before anything else acts on the message, so an
+        // effect that this message raises finds the pipe already open. A fresh
+        // pipe process carries a fresh id, so the newest one wins.
+        if let PipeSource::Cli(id) = &message.source {
+            self.pipe_id = Some(id.clone());
+        }
         if message.source == PipeSource::Plugin(self.plugin_id) {
             return false;
         }

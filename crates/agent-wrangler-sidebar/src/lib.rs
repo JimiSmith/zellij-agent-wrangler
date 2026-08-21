@@ -15,7 +15,7 @@ pub use application::Application;
 pub use model::{
     AgentSnapshot, Broadcast, Command, Decision, Effect, Focus, FocusTarget, Input,
     InteractionItem, PaneId, PaneReport, PaneVisibility, Permission, RenderedView, SessionLayout,
-    SidebarPaneReport, TabId, TabLayout, TabReport, UserAction, ViewAction,
+    SidebarPaneReport, TabId, TabLayout, TabReport, Told, UserAction, ViewAction,
 };
 pub use options::Options;
 pub use session::{ReconciledFocus, ReconciledSession};

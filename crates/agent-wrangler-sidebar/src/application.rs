@@ -11,7 +11,7 @@ use crate::calls::Answered;
 use crate::client::Client;
 use crate::model::{
     AgentSnapshot, Broadcast, Command, Decision, Effect, Focus, FocusTarget, Input,
-    InteractionItem, Permission, RenderedView, SessionLayout, TabId, TabReport, UserAction,
+    InteractionItem, Permission, RenderedView, SessionLayout, TabId, TabReport, Told, UserAction,
     ViewAction,
 };
 use crate::options::Options;
@@ -271,7 +271,9 @@ impl Application {
         }
         if self.allowed() {
             for agent in &calling {
-                self.run("seen", &["seen", agent.session.as_str()], decision);
+                decision
+                    .effects
+                    .push(Effect::Tell(Told::Seen(agent.session.clone())));
             }
         }
         changed
@@ -1042,7 +1044,7 @@ mod tests {
 
         assert!(decision.effects.iter().any(|effect| matches!(
             effect,
-            Effect::Run(Command { call, args, .. }) if call == "seen" && args == &["seen", "call"]
+            Effect::Tell(Told::Seen(session)) if session.as_str() == "call"
         )));
         assert_eq!(app.registry.get(&session).unwrap().turn, Turn::Idle);
     }
@@ -1058,26 +1060,23 @@ mod tests {
         let session = SessionId::new("call").unwrap();
 
         let pending = app.reduce(Input::Agents(agents(&[("call", "7", Turn::Attention)])));
-        assert!(!pending.effects.iter().any(|effect| matches!(
-            effect,
-            Effect::Run(Command { call, .. }) if call == "seen"
-        )));
+        assert!(!pending
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Tell(Told::Seen(_)))));
         assert_eq!(app.registry.get(&session).unwrap().turn, Turn::Attention);
 
         let confirmed = app.reduce(focus("10", FocusTarget::Content(PaneId::new("7"))));
         assert!(confirmed.effects.iter().any(|effect| matches!(
             effect,
-            Effect::Run(Command { call, args, .. }) if call == "seen" && args == &["seen", "call"]
+            Effect::Tell(Told::Seen(session)) if session.as_str() == "call"
         )));
         assert_eq!(app.registry.get(&session).unwrap().turn, Turn::Idle);
         assert!(!app
             .reduce(focus("10", FocusTarget::Content(PaneId::new("7"))))
             .effects
             .iter()
-            .any(|effect| matches!(
-                effect,
-                Effect::Run(Command { call, .. }) if call == "seen"
-            )));
+            .any(|effect| matches!(effect, Effect::Tell(Told::Seen(_)))));
     }
 
     #[test]
@@ -1091,10 +1090,10 @@ mod tests {
         let session = SessionId::new("call").unwrap();
 
         let decision = app.reduce(Input::Agents(agents(&[("call", "7", Turn::Attention)])));
-        assert!(!decision.effects.iter().any(|effect| matches!(
-            effect,
-            Effect::Run(Command { call, .. }) if call == "seen"
-        )));
+        assert!(!decision
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Tell(Told::Seen(_)))));
         assert_eq!(app.registry.get(&session).unwrap().turn, Turn::Attention);
         assert!(app.answered.settled(&app.registry).is_empty());
     }
@@ -1351,7 +1350,7 @@ mod tests {
         assert!(repaints(&app.reduce(Input::CommandFinished {
             exit: None,
             stderr: b"busy\nmore detail".to_vec(),
-            call: "seen".to_string(),
+            call: "install-hooks".to_string(),
         })));
         assert_eq!(app.client.why(), None, "one transient failure is tolerated");
     }

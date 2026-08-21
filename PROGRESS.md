@@ -60,6 +60,19 @@ replay it into a character grid. That harness is now in `tests/`: `screen.py` is
 the grid, `drive.py` runs a script of steps against a pty, and
 `tests/scripts/agent_row.steps` drives the whole path end to end, from a hook
 typed into a real pane to the row it draws and the call it answers.
+`tests/scripts/two_sidebars.steps` does the same with two sidebars on one held
+pipe, which is the case where two writers share one stream.
+`tests/scripts/held_pipe.steps` counts the pipes alive between two publishes,
+kills the one it finds, and asserts that the next publish opens another.
+`tests/scripts/answered_everywhere.steps` answers a call in one tab and asserts
+that the call stops being drawn in the other one, which only the state coming
+back can do.
+
+The harness names its own user. The daemon's socket is named for the user and
+for nothing else, so a developer with the real client installed had every run
+reporting to that daemon and asserting on it. The build under test was never
+exercised at all, and the first thing to notice was a change that the old daemon
+could not carry.
 
 Three traps in that harness, each of which produced a false result before it was
 noticed. A shell redirection written to discard a stream can fail to:
@@ -86,6 +99,56 @@ this trap takes when the stale thing is the focus rather than the panes.
 so a sidebar in a tab nobody is looking at still hears one. This is what lets a
 state message reach every sidebar of a session at once, whichever tab is in
 front.
+
+**A CLI pipe can be held open, and it carries messages both ways.** `zellij
+pipe` given no payload argument reads its stdin and stays alive, and one process
+then serves any number of messages. Stdin is framed by the line: one newline
+ends one message, and that newline stays in the payload, so a payload must carry
+no raw newline of its own. A line of 100,000 bytes arrives whole. The plugin
+learns the pipe's id from `PipeSource::Cli`, a fresh UUID per pipe process, and
+answers on the same pipe with `cli_pipe_output`. Two instances of one plugin on
+one unaddressed pipe both receive every message and both answer on it; answers
+of 70,000 bytes never spliced and not one byte was lost. None of this is
+documented behaviour. It was measured on zellij 0.45.0 with a throwaway plugin
+and five drivers, and it is worth measuring again when zellij moves on.
+
+**`cli_pipe_output` needs `PermissionType::ReadCliPipes`.** Without it the call
+is dropped in silence: no error, no log, and nothing on the pane. With it, 40
+messages produced 41 answers in order. Receiving on a pipe needs no permission
+at all, which is why this was never noticed before something had to answer.
+
+**A plugin can only write on a pipe while it is handling a message from that
+pipe.** `cli_pipe_output` called from `update`, which is where a focus change
+lands, produces nothing on the pipe. It is not lost: zellij holds it, and the
+next message on that pipe hands over everything held, in order and ahead of the
+answer to that message. Calling it from `pipe` for a message that came from
+another plugin does not open the channel either, so it is the source of the
+message and not the callback that decides. Measured on zellij 0.45.0. This is
+the one thing the first six probes did not test, because every one of them
+answered the message it was handling.
+
+**Every message on a CLI pipe logs `Action CliPipe did not complete within 1s
+timeout`.** It is neither a timeout nor an error. `route.rs:1663` drops the
+action's completion channel on purpose, so that a held pipe is not sent an
+`Exit`, and `route.rs:75` matches a dropped sender and an elapsed timeout in one
+arm, so a deliberate, instant drop prints the timeout text. The drop happens
+before the message reaches the plugin thread, so nothing is lost, delayed or
+corrupted, and no thread waits. Nothing avoids it: the drop is the first
+statement in the arm, before any branch, so no flag, no `--plugin` and no
+plugin-side call reaches it. Upstream issue #5261 describes it and PR #5264
+fixes it, both open, with no release carrying the fix. The one real cost is that
+zellij's log rolls at 16 MiB, so a fast beat pushes out the records a person
+came to read.
+
+**The pipe process does not exit when its session is killed.** It was still
+alive thirty seconds later, with no exit code and an empty stderr. A daemon that
+only forgets the client therefore leaves the process behind for as long as the
+user stays logged in. A pipe into a session that was never there is the opposite
+and exits 1 within milliseconds.
+
+**`block_cli_pipe_input` covers the pipe and not the plugin that called it.** In
+the test, one plugin blocked and a second plugin that never blocked received
+nothing until the first released. Nothing here calls it.
 
 **A terminal pane's id is `$ZELLIJ_PANE_ID`.** Zellij sets it to the pane's
 `terminal_id` when it spawns the process (`os_input_output_unix.rs`), and that is
@@ -310,6 +373,59 @@ what happened next, so the one sidebar that could not see the answer was always
 the one that caused it. And every sidebar left behind still believed it was the
 one in the tab you are in, which is the rule that decides who acts: three tabs
 raised three desktop notifications for one call.
+
+**The daemon holds one pipe per session rather than running one per delivery.**
+A wasm plugin cannot hold a connection, so the daemon must reach out to it, and
+for a long time that meant a process per publish and a process for every word a
+sidebar had to say back. A held pipe removes both. The state goes out as one
+line on a stdin that stays open, and an answer comes back on the same process's
+stdout, so a sidebar answering a call costs nothing at all. `Effect::Run` keeps
+only the two things no such pipe can carry: the registration that opens it, and
+the hooks, which are files on disk.
+
+**The daemon writes an empty line down each held pipe, at two rates.** It is
+what gives a sidebar its turn to speak. Without it the answer to a call sits in
+zellij's buffer for ever: the daemon writes only when something changed, and the
+answer is the change. The symptom was exact and narrow. The tab you are in
+cleared the call from its own records, and every other tab drew it until the
+agent reported again.
+
+A second while an agent waits for the user, and thirty seconds the rest of the
+time. One rate was tried first and was wrong in a way that only showed up in the
+multiplexer's log: every message on a CLI pipe writes a line there, so a beat of
+one second wrote nine kilobytes a minute into a log that rolls at 16 MiB, and a
+day and a half of history became all that fit. Two rates spend that budget where
+it buys something. Idle costs two lines a minute, and the fast beat runs only
+between a call arriving and it being answered.
+
+The daemon does not work out which session holds the call. It knows that
+somebody is calling, and a machine has few sessions and short calls, so the
+saving is not worth teaching the daemon where an agent is shown.
+
+A nudge never stands in front of a payload that has not been written yet,
+because that payload is a state a client has not seen.
+
+**Each held pipe has a writer of its own, and a slot that holds one payload.**
+The publish path fills the slot and returns, so it never waits on a client. One
+slot rather than a queue, because every delivery carries the whole state: a
+payload that a newer one replaced is a payload nobody needs, and a client that
+reads slowly gets the newest state rather than the oldest. One writer per child
+rather than one for all of them, because a session whose pipe buffer filled
+would otherwise hold up every other session, which is the failure the held pipe
+was meant to remove.
+
+**A held child is asked whether it is alive before it is written to.** The
+writer learns that its child died only from the write that failed, which is one
+publish after the write. Left at that, a sidebar missed every state until the
+publish after that one, and `held_pipe.steps` is what found it: the pipe was
+killed, the next agent reported, and its name never reached the screen. One call
+that does not wait, on the publish thread, turns two lost publishes into none.
+
+**The delivery outcome arrives a publish late, and that is the right trade.**
+Nothing waits on a write, so a client that refused is retired on the publish
+after the one it refused. It is retired either way, and no delivery waits for
+that to settle. A pipe into a session that has gone exits at once, so the count
+still reaches its limit in the time it takes to publish three times.
 
 **One sidebar acts for all of them: the one in the tab you are in.** Every
 sidebar hears every pipe, so anything that must happen once needs a rule they

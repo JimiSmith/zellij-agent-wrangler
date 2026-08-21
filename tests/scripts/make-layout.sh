@@ -39,5 +39,6 @@ cat >"$root/tests/out/cache/zellij/permissions.kdl" <<KDL
     ChangeApplicationState
     MessageAndLaunchOtherPlugins
     RunCommands
+    ReadCliPipes
 }
 KDL

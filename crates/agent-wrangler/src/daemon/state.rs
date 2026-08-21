@@ -388,6 +388,16 @@ impl State {
         self.clients.clone()
     }
 
+    /// Whether any agent waits for the user.
+    ///
+    /// A client has something to say back only while this is true, because the
+    /// one thing it says is that a call was answered. The daemon writes down
+    /// its transports more often while this is true, so that a client gets the
+    /// chance to say it.
+    pub fn anyone_calling(&self) -> bool {
+        !self.registry.calling().is_empty()
+    }
+
     /// What a call for the user is announced with, once each.
     ///
     /// A notifier belongs to the user rather than to any one client. Two

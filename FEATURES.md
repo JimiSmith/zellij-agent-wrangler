@@ -136,11 +136,13 @@ That number is the same one the plugin sees as a terminal pane's `id`, so the
 two ends agree on a pane without anything in between, and nothing between them
 has to know what it means.
 
-The daemon reaches the sidebars through `zellij pipe`, addressed to the session
-by name and to no plugin, so every sidebar of that session hears it whatever tab
-it is in. The state carries every agent on the machine and each sidebar keeps
-the ones raised in its own session. A record whose pane is not on screen is held
-but drawn nowhere, so an agent in a pane that has gone leaves no row behind.
+The daemon reaches the sidebars through one `zellij pipe` per session that it
+holds open, addressed to the session by name and to no plugin, so every sidebar
+of that session hears it whatever tab it is in. The pipe carries messages both
+ways, so a sidebar answers on it rather than running the client. The state
+carries every agent on the machine and each sidebar keeps the ones raised in its
+own session. A record whose pane is not on screen is held but drawn nowhere, so
+an agent in a pane that has gone leaves no row behind.
 
 ## Turn state
 

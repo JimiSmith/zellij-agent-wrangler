@@ -1,0 +1,72 @@
+# Two sidebars in one session share one pipe. The daemon holds one child per
+# session, and the message it writes names no plugin, so every sidebar of the
+# session receives it. Each of them answers on that same pipe.
+#
+# This test is the regression for that shared pipe. A held pipe carries the
+# state out and the answers back on one pair of streams. If two writers on one
+# stream spliced an answer, or if only the first sidebar received the state,
+# this run is where it shows.
+#
+# The agent reports from the pane of a tab that the run opens. The sidebar of
+# that tab and the sidebar of the first tab both draw the whole session, so both
+# of them draw the agent.
+
+env: ZELLIJ_CONFIG_DIR=$PWD/tests/zellij-config
+env: TERM=xterm-256color
+env: XDG_STATE_HOME=$PWD/tests/out/state
+env: XDG_CACHE_HOME=$PWD/tests/out/cache
+# The daemon socket is named for the user. Without a name of its own, a run
+# reports to the daemon of the client that the developer installed.
+env: USER=wrangler-test
+
+sh?: tests/scripts/reset.sh wrangler-test-two
+
+sh: cargo build --target wasm32-wasip1 -p zellij-agent-wrangler
+sh: cargo build -p agent-wrangler
+sh: tests/scripts/make-layout.sh tests/out/two.kdl
+
+spawn: zellij --session wrangler-test-two --new-session-with-layout tests/out/two.kdl
+
+wait: notes @ 25
+
+# A third tab, from the same template, with a sidebar of its own. Ctrl-t is the
+# stock tab mode, and n opens a tab.
+keys: <C-t>
+keys: n
+sleep: 2
+
+# The hook is typed into the pane of the new tab, because the pane is what
+# supplies ZELLIJ_PANE_ID.
+keys: printf '%s' '{"session_id":"two-one","cwd":"/home/u/quarry","transcript_path":"'"$PWD"'/tests/out/e2e-transcript.jsonl"}' | "$PWD/target/debug/agent-wrangler" hook claude start\r
+
+# The sidebar of the new tab received the state.
+wait: QUARRYMARK @ 20
+dump: two_sidebars_opened
+
+# The first tab, whose sidebar registered long before the second one existed.
+keys: <C-t>
+keys: 1
+sleep: 1
+
+# The screen now shows the first tab. Its terminal never ran the hook. When the
+# words of that command leave the screen, the switch happened.
+waitgone: hook claude start @ 20
+
+# The sidebar of the first tab received the same state.
+wait: QUARRYMARK @ 20
+dump: two_sidebars_first_tab
+
+# Back to the pane that the agent reported from. The user is therefore already
+# where the call is raised, and a sidebar answers it at once.
+keys: <C-t>
+keys: 3
+sleep: 1
+keys: printf '%s' '{"session_id":"two-one","cwd":"/home/u/quarry","transcript_path":"'"$PWD"'/tests/out/e2e-transcript.jsonl"}' | "$PWD/target/debug/agent-wrangler" hook claude needsAttention\r
+sleep: 3
+
+# The answer travelled back on the shared pipe and reached the daemon.
+sh: tests/scripts/expect-turn.sh two-one idle
+dump: two_sidebars_answered
+
+keys: <C-q>
+sleep: 1

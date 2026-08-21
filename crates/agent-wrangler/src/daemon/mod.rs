@@ -12,8 +12,8 @@
 //! Every client is sent the whole state rather than what changed. A thread that
 //! applied something says that the clients are [`Owed`] one, and then carries
 //! on. One thread makes every delivery. Any number of changes during one
-//! delivery is one delivery after it. The number of programs run is therefore
-//! a function of the delivery, and not of the burst of events from a busy
+//! delivery is one delivery after it. The number of writes is therefore a
+//! function of the delivery, and not of the burst of events from a busy
 //! agent.
 
 pub mod notify;
@@ -22,9 +22,11 @@ pub mod sink;
 pub mod state;
 pub mod watch;
 
+use std::collections::BTreeSet;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::channel;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -36,11 +38,11 @@ use agent_wrangler_core::agent::FORMAT;
 use agent_wrangler_core::notify::Notifier;
 
 use crate::daemon::notify::Announced;
-use crate::daemon::sink::Delivery;
+use crate::daemon::sink::{Delivery, Pipes};
 use crate::daemon::state::{look, read_hook, Call, Client, Real, State};
 use crate::daemon::watch::Watchers;
 use crate::paths;
-use crate::proto::{read_message, write_message, Inbound, Outbound, Sink, What};
+use crate::proto::{read_message, write_message, Inbound, Outbound, Sink, Told, What};
 
 /// How often the daemon looks at every held transcript again, and at every
 /// held pid.
@@ -48,6 +50,23 @@ use crate::proto::{read_message, write_message, Inbound, Outbound, Sink, What};
 /// A second is what the eye reads as immediate for something that is not a
 /// keystroke. One stat per session at that rate costs nothing measurable.
 const POLL: Duration = Duration::from_secs(1);
+
+/// How often the daemon writes down a held pipe while a call waits for the
+/// user.
+///
+/// A client speaks only while it handles a message, so this is how often it
+/// gets the chance. After the user answers a call, no other sidebar draws that
+/// call for longer than this.
+const SPEAK_WHILE_CALLING: Duration = Duration::from_secs(1);
+
+/// How often the daemon writes down a held pipe when no call waits.
+///
+/// A client rarely has anything to say at these moments, so the beat is slow.
+/// It does not stop altogether, because the daemon cannot know what a client
+/// holds. Each write costs a line in the log of the multiplexer. That log rolls
+/// at a fixed size, so a fast beat for no reason pushes out the records that a
+/// person came to read.
+const SPEAK_WHEN_QUIET: Duration = Duration::from_secs(30);
 
 /// How long to wait after a failure, before the daemon accepts again.
 ///
@@ -98,17 +117,28 @@ impl Owed {
         self.told.notify_one();
     }
 
-    /// This method waits until something is owed, and takes it. The delivery
-    /// that follows covers every change made up to that moment.
-    fn take(&self) {
+    /// This method waits until something is owed, or until `patience` runs out,
+    /// and takes whatever it finds. It returns whether anything was owed.
+    ///
+    /// The wait ends either way, because the thread that delivers also writes
+    /// the beat that lets a client speak. A quiet machine needs that beat as
+    /// much as a busy one does.
+    fn take(&self, patience: Duration) -> bool {
         let mut owed = self.owed.lock().unwrap_or_else(|e| e.into_inner());
+        let until = Instant::now() + patience;
         while !*owed {
-            owed = self
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            let (waited, _) = self
                 .told
-                .wait(owed)
+                .wait_timeout(owed, left)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            owed = waited;
         }
         *owed = false;
+        true
     }
 }
 
@@ -144,61 +174,89 @@ fn bind() -> std::io::Result<Bound> {
 /// This function writes the state out and tells every client. It drops the
 /// clients that went away.
 ///
-/// Side effect: it writes a file and runs a program for each zellij client. The
-/// caller holds no lock. This function takes the lock only to read what to
+/// Side effect: it writes a file, and queues one write for each client. Nothing
+/// here waits for a client to take its payload, so a publish costs the same
+/// whatever the clients do.
+///
+/// The outcomes are those of the deliveries before this one, because a write
+/// runs on a thread of its own. A client that went away is therefore retired a
+/// publish later than it refused. It is retired either way, and no delivery
+/// waits for that to be settled.
+///
+/// The caller holds no lock. This function takes the lock only to read what to
 /// send, and to note the clients that it did not reach.
-fn publish(shared: &Arc<Mutex<State>>, dir: &Path, watchers: &Watchers) {
+fn publish(shared: &Arc<Mutex<State>>, dir: &Path, watchers: &Watchers, pipes: &mut Pipes) {
     let (payload, clients, saved) = {
         let state = held(shared);
         (state.payload(), state.clients(), state.snapshot())
     };
     let agents = saved.len();
     persist::save(dir, &saved, &clients);
-    let answers: Vec<(Sink, Delivery)> = clients
-        .into_iter()
-        .map(|client| {
-            watchers.saw(|| What::Delivering {
-                sink: client.sink.clone(),
-                agents,
-            });
-            let began = Instant::now();
-            let delivery = sink::deliver(&client.sink, &payload);
-            let took = began.elapsed().as_millis() as u64;
-            let (sent, abandoned) = match delivery {
-                Delivery::Sent => (true, false),
-                Delivery::Failed => (false, false),
-                Delivery::Abandoned => (true, true),
-            };
-            watchers.saw(|| What::Delivered {
-                sink: client.sink.clone(),
-                sent,
-                abandoned,
-                took,
-            });
-            (client.sink, delivery)
-        })
-        .collect();
-    let mut state = held(shared);
-    for (sink, delivery) in answers {
-        answered(&mut state, &sink, delivery);
+    for client in &clients {
+        watchers.saw(|| What::Delivering {
+            sink: client.sink.clone(),
+            agents,
+        });
+        sink::deliver(pipes, &client.sink, &payload);
     }
+    let outcomes = pipes.outcomes();
+    for (sink, delivery) in &outcomes {
+        if *delivery == Delivery::Failed {
+            watchers.saw(|| What::Failed { sink: sink.clone() });
+        }
+    }
+    let live = {
+        let mut state = held(shared);
+        for (sink, delivery) in outcomes {
+            answered(&mut state, &sink, delivery);
+        }
+        listening(&state)
+    };
+    // The pipe process does not exit when its session dies. A client that this
+    // daemon just retired therefore leaves a process behind, unless this kills
+    // it.
+    pipes.retain(&live);
+}
+
+/// Every zellij session that the daemon still delivers to.
+fn listening(state: &State) -> BTreeSet<String> {
+    state
+        .clients()
+        .into_iter()
+        .filter_map(|client| match client.sink {
+            Sink::Zellij { session } => Some(session),
+            Sink::Pipe { .. } => None,
+        })
+        .collect()
 }
 
 /// What one delivery says about the client it was for.
 ///
 /// Only a refusal counts against a client. A refusal is the answer that a
-/// client that went away gives. A pipe into a session that is not there comes
-/// back in milliseconds and says so. A delivery that was given up on says
-/// nothing about whether the client is there. It says a great deal about the
-/// state of the multiplexer. A count of those deliveries retires a live sidebar
-/// for the fault of the multiplexer, and a sidebar that was dropped never asks
-/// again.
+/// client that went away gives. A pipe into a session that is not there exits
+/// within milliseconds and says so.
 fn answered(state: &mut State, sink: &Sink, delivery: Delivery) {
     match delivery {
-        Delivery::Sent | Delivery::Abandoned => state.reached(sink),
+        Delivery::Sent => state.reached(sink),
         Delivery::Failed => {
             state.missed(sink);
         }
+    }
+}
+
+/// This function records that the user reached a session that called for them.
+///
+/// A client says this on the socket, or on the transport that the daemon
+/// already holds open to it. Both arrive here, so there is one account of what
+/// the message means.
+fn seen(shared: &Arc<Mutex<State>>, owed: &Owed, watchers: &Watchers, session: &str) {
+    let told = held(shared).on_seen(session);
+    watchers.saw(|| What::Seen {
+        session: session.to_string(),
+        told,
+    });
+    if told {
+        owed.owe();
     }
 }
 
@@ -313,16 +371,7 @@ fn serve(
                 owed.owe();
                 record(shared, dir);
             }
-            Inbound::Seen { session } => {
-                let told = held(shared).on_seen(&session);
-                watchers.saw(|| What::Seen {
-                    session: session.clone(),
-                    told,
-                });
-                if told {
-                    owed.owe();
-                }
-            }
+            Inbound::Seen { session } => seen(shared, owed, watchers, &session),
             Inbound::Snapshot => {
                 watchers.saw(|| What::Asked);
                 let payload = held(shared).payload();
@@ -407,16 +456,49 @@ pub fn run() -> std::io::Result<()> {
         });
     }
 
+    // What the clients say back, on the transports that the daemon holds open
+    // to them. Every held transport reads on a thread of its own. Each one
+    // hands what it read to this thread, so what a message means is written
+    // once.
+    let (told, heard) = channel();
+    {
+        let shared = Arc::clone(&shared);
+        let owed = Arc::clone(&owed);
+        let watchers = Arc::clone(&watchers);
+        thread::spawn(move || {
+            while let Ok(Told::Seen { session }) = heard.recv() {
+                seen(&shared, &owed, &watchers, &session);
+            }
+        });
+    }
+
     // One thread makes every delivery. However many events arrive during one
     // delivery, they are one delivery afterwards rather than one delivery each.
+    // This thread owns the held transports. Nothing else in the daemon
+    // touches them.
     {
         let shared = Arc::clone(&shared);
         let owed = Arc::clone(&owed);
         let watchers = Arc::clone(&watchers);
         let dir = dir.clone();
-        thread::spawn(move || loop {
-            owed.take();
-            publish(&shared, &dir, &watchers);
+        thread::spawn(move || {
+            let mut pipes = Pipes::new(told);
+            let mut spoke = Instant::now();
+            loop {
+                if owed.take(SPEAK_WHILE_CALLING) {
+                    publish(&shared, &dir, &watchers, &mut pipes);
+                    spoke = Instant::now();
+                    continue;
+                }
+                // Nothing changed, so nothing was written. A client speaks
+                // only while it handles a message. The one thing it says is
+                // that a call was answered. The beat is therefore fast while a
+                // call waits, and slow the rest of the time.
+                if held(&shared).anyone_calling() || spoke.elapsed() >= SPEAK_WHEN_QUIET {
+                    pipes.nudge();
+                    spoke = Instant::now();
+                }
+            }
         });
     }
 
@@ -464,6 +546,24 @@ mod tests {
     }
 
     #[test]
+    fn a_call_is_listened_for_closely_and_silence_is_not() {
+        // Both ends of the choice. The fast beat is what a person reads as
+        // immediate when they answer a call. The slow beat is paid for in the
+        // log of the multiplexer. That log rolls at a fixed size, so a fast
+        // beat for no reason pushes out what somebody came to read.
+        assert!(SPEAK_WHILE_CALLING <= Duration::from_secs(1));
+        assert!(SPEAK_WHEN_QUIET >= SPEAK_WHILE_CALLING * 10);
+    }
+
+    #[test]
+    fn nothing_is_owed_a_word_until_an_agent_wants_the_user() {
+        let mut state = State::default();
+        assert!(!state.anyone_calling());
+        state.register(sidebar());
+        assert!(!state.anyone_calling(), "a client is not a call");
+    }
+
+    #[test]
     fn a_refused_connection_is_not_retried_at_once() {
         // The whole point of the pause: whatever refused it is still there. An
         // immediate retry saturates a core and recovers nothing.
@@ -479,12 +579,12 @@ mod tests {
         for _ in 0..3 {
             owed.owe();
         }
-        owed.take();
+        assert!(owed.take(Duration::from_secs(5)));
 
         let waiting = Arc::clone(&owed);
         let (delivered, heard) = std::sync::mpsc::channel();
         thread::spawn(move || {
-            waiting.take();
+            while !waiting.take(Duration::from_millis(20)) {}
             let _ = delivered.send(());
         });
         assert!(
@@ -509,22 +609,6 @@ mod tests {
     }
 
     #[test]
-    fn a_delivery_given_up_on_never_retires_the_client_it_was_for() {
-        // This rule exists for one failure. A sidebar is alive, and the
-        // daemon draws to it. The multiplexer will not let go of the program
-        // that draws to it. A count of those deliveries drops the client after three
-        // of them, and nothing registers it again. The sidebar then shows
-        // whatever it last received for as long as the session lasts.
-        let mut state = State::default();
-        let client = sidebar();
-        state.register(client.clone());
-        for _ in 0..100 {
-            answered(&mut state, &client.sink, Delivery::Abandoned);
-        }
-        assert_eq!(state.clients(), vec![client]);
-    }
-
-    #[test]
     fn a_client_that_keeps_refusing_is_still_given_up_on() {
         // The other half of it: a session that went away answers at once and
         // says so. That is the answer that a client is retired for.
@@ -538,22 +622,55 @@ mod tests {
     }
 
     #[test]
-    fn a_delivery_given_up_on_forgives_the_refusals_before_it() {
-        // It is a client that took the state, so the count towards its
-        // retirement starts again, like any delivery that landed. Each run is
-        // one short of the count that retires the client. If the run in between
-        // forgave what came before it, the two runs stay two apart.
+    fn a_delivery_that_landed_forgives_the_refusals_before_it() {
+        // Each run is one short of the count that retires the client. If the
+        // delivery in between forgave what came before it, the two runs stay
+        // two apart.
         let mut state = State::default();
         let client = sidebar();
         state.register(client.clone());
         for _ in 1..REFUSALS {
             answered(&mut state, &client.sink, Delivery::Failed);
         }
-        answered(&mut state, &client.sink, Delivery::Abandoned);
+        answered(&mut state, &client.sink, Delivery::Sent);
         for _ in 1..REFUSALS {
             answered(&mut state, &client.sink, Delivery::Failed);
         }
         assert_eq!(state.clients(), vec![client]);
+    }
+
+    #[test]
+    fn only_a_zellij_client_holds_a_pipe_that_must_be_shut() {
+        // What decides which held children survive a publish. A named pipe is
+        // a file and has no process behind it, so it must not be looked for
+        // among the children.
+        let mut state = State::default();
+        state.register(sidebar());
+        state.register(Client {
+            sink: Sink::Pipe {
+                path: "/tmp/w.pipe".to_string(),
+            },
+            notify: None,
+        });
+        assert_eq!(listening(&state), BTreeSet::from(["proto".to_string()]));
+    }
+
+    #[test]
+    fn a_retired_client_leaves_no_pipe_behind() {
+        // The pipe process does not exit when its session dies. A daemon that
+        // only forgets the client leaves that process for as long as the user
+        // stays logged in.
+        let mut state = State::default();
+        let client = sidebar();
+        state.register(client.clone());
+        assert!(!listening(&state).is_empty());
+        for _ in 0..REFUSALS {
+            answered(&mut state, &client.sink, Delivery::Failed);
+        }
+        assert!(
+            listening(&state).is_empty(),
+            "nothing keeps this session's pipe open"
+        );
     }
 
     #[test]

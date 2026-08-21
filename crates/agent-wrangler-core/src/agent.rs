@@ -21,6 +21,38 @@ pub(crate) const RECORD: char = '\n';
 /// Without the shape, the reader makes nothing of the records and says nothing.
 pub const FORMAT: u32 = 4;
 
+/// The character that stands in for a record break on a transport that frames
+/// its messages by the line.
+///
+/// A held `zellij pipe` and a named pipe both take one message per newline, and
+/// every payload holds newlines, because [`RECORD`] is one. The ASCII record
+/// separator carries that break instead. [`Origin`] uses the unit separator for
+/// the fields inside one record, so the two agree rather than compete.
+pub const BREAK: char = '\u{1e}';
+
+/// One payload as one line, with every record break carried by [`BREAK`].
+pub fn flatten(payload: &str) -> String {
+    payload
+        .chars()
+        .map(|c| if c == RECORD { BREAK } else { c })
+        .collect()
+}
+
+/// The reverse of [`flatten`], for a reader that took one line off a
+/// line-framed transport.
+///
+/// The line arrives with the newline that framed it still on the end. Zellij
+/// keeps that newline in the payload, so this drops one of them before it
+/// restores the record breaks. Without that, every payload ends in an empty
+/// record.
+pub fn unflatten(line: &str) -> String {
+    line.strip_suffix(RECORD)
+        .unwrap_or(line)
+        .chars()
+        .map(|c| if c == BREAK { RECORD } else { c })
+        .collect()
+}
+
 /// The message that every record travels in.
 ///
 /// One message carries the whole set rather than the news of one session. A
@@ -550,5 +582,30 @@ pub(crate) mod tests {
     fn a_color_survives_the_round_trip() {
         let record = colored("one", "purple");
         assert_eq!(Agent::decode(&record.encode()), Record::Known(record));
+    }
+
+    #[test]
+    fn a_run_of_records_makes_one_line_and_comes_back_whole() {
+        // Every payload holds record breaks, so this is the ordinary case and
+        // not the awkward one.
+        let payload = state("3\tone\tclaude\n3\ttwo\tcopilot");
+        let line = flatten(&payload);
+        assert!(!line.contains(RECORD), "one line, whatever it carries");
+        assert_eq!(unflatten(&line), payload);
+    }
+
+    #[test]
+    fn the_newline_that_framed_a_line_is_not_part_of_the_payload() {
+        // A line-framed transport keeps the newline that ended the message. A
+        // reader that leaves it there reads one empty record at the end.
+        let payload = state("3\tone\tclaude");
+        let framed = format!("{}\n", flatten(&payload));
+        assert_eq!(unflatten(&framed), payload);
+    }
+
+    #[test]
+    fn a_payload_with_no_record_break_is_carried_unchanged() {
+        assert_eq!(flatten("wrangler 4"), "wrangler 4");
+        assert_eq!(unflatten("wrangler 4"), "wrangler 4");
     }
 }

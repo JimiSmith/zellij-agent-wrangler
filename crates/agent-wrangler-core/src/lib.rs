@@ -11,6 +11,7 @@ pub mod label;
 pub mod notify;
 pub mod origin;
 pub mod registry;
+pub mod told;
 
 /// What a session calls itself comes from the agent's own files. The modules
 /// that read those files are behind the feature that turns file reading on.

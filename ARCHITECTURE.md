@@ -323,10 +323,39 @@ hook that flashes a window still reports what the agent did.
 
 The daemon has the same problem to hand on. It is started detached and so has no
 console of its own, which makes every program it runs one of those given a fresh
-one: the zellij it pipes a delivery through, and the notifier it announces a call
-with. Both are started through the platform module rather than built where they
-are run, so what it takes to start a program without disturbing the user is
+one: the zellij pipe it holds open to a session, and the notifier it announces a
+call with. Both are started through the platform module rather than built where
+they are run, so what it takes to start a program without disturbing the user is
 answered once for each system and cannot be forgotten at a call site.
+
+A zellij client is reached through one `zellij pipe` that stays open, and not
+through one process per delivery. A pipe given no payload argument reads its
+stdin, and one line on that stdin is one message; a plugin answers on the same
+pipe, and that answer arrives on the same process's stdout. So one child carries
+the state out and the messages back, and a sidebar that answers a call costs no
+process at all. Each held child has a writer thread of its own and a slot that
+holds one payload, so filling the slot returns at once and a session whose pipe
+buffer is full delays that session and no other. The record breaks inside a
+payload travel as `\u{1e}`, because the transport frames by the line. The pipe
+process does not exit when its session dies, so the daemon kills the child when
+it retires the client.
+
+A plugin can only write on a pipe while it is handling a message from that pipe.
+Zellij holds anything written at any other moment and hands it over on the next
+message, in order and losing nothing. A sidebar answers a call when the focus
+moves, which is not a message, so its answer waits for the daemon to write
+again — and the daemon writes only when something changed, which the answer is.
+The delivery thread therefore wakes whether or not anything is owed, and writes
+one empty line down each held pipe. That line is a message to zellij and nothing
+to a sidebar, which reads no state in it and draws nothing again. A publish
+serves the same purpose when there is one to make.
+
+The beat has two rates, because each write costs a line in zellij's log. While
+an agent waits for the user it is a second, which is what makes an answered call
+stop being drawn in the other tabs at once. The rest of the time it is thirty
+seconds, which keeps the transport warm and costs two lines a minute. The
+daemon does not ask which session holds the call: it knows that somebody is
+calling, and a machine has few sessions and short calls.
 
 Records survive the daemon being restarted, but only those naming a process
 still running: a live agent says so again on its next event of any kind, where a
@@ -341,12 +370,12 @@ in a new tab asks the others for what they have. Nothing survives every sidebar
 being closed at once.
 
 `agent-wrangler monitor` writes one line of JSON per message and nothing while
-nothing is arriving. Each says which way the message went, and two fields say
-why it is worth reading: `told`, whether an arriving message changed anything,
-since that and not the arrival is what owes the clients a delivery; and `took`,
-how long reaching a client cost, which for a Zellij client is a whole process
-run. A delivery is said twice, going and gone, so one that never comes back can
-be told from one that never started.
+nothing is arriving. Each says which way the message went, and `told` says why
+an arriving message is worth reading: whether it changed anything, since that
+and not the arrival is what owes the clients a delivery. One record is written
+for each state that goes out. A delivery is a write and not a process run, so
+there is nothing to say afterwards about one that landed; only a failure is
+worth a second record, and enough of those in a row retires the client.
 
 ## Testing
 

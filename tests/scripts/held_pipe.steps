@@ -1,0 +1,49 @@
+# The daemon holds one `zellij pipe` per session, and opens another when that
+# one dies.
+#
+# The run asserts the count while the session is idle, between two publishes. A
+# daemon that ran a pipe per delivery has none alive at that moment. The run
+# then kills the pipe and reports a second agent. The name that agent gives
+# itself can only reach the screen through a pipe that the daemon opened again.
+
+env: ZELLIJ_CONFIG_DIR=$PWD/tests/zellij-config
+env: TERM=xterm-256color
+env: XDG_STATE_HOME=$PWD/tests/out/state
+env: XDG_CACHE_HOME=$PWD/tests/out/cache
+# The daemon socket is named for the user. Without a name of its own, a run
+# reports to the daemon of the client that the developer installed.
+env: USER=wrangler-test
+
+sh?: tests/scripts/reset.sh wrangler-test-held
+
+sh: cargo build --target wasm32-wasip1 -p zellij-agent-wrangler
+sh: cargo build -p agent-wrangler
+sh: tests/scripts/make-layout.sh tests/out/held.kdl
+
+# The second agent names itself in a file of its own, so the two names on the
+# screen cannot be confused.
+sh: printf '%s\n' '{"type":"custom-title","customTitle":"SECONDMARK"}' > tests/out/held-transcript.jsonl
+
+spawn: zellij --session wrangler-test-held --new-session-with-layout tests/out/held.kdl
+
+wait: notes @ 25
+
+keys: printf '%s' '{"session_id":"held-one","cwd":"/home/u/quarry","transcript_path":"'"$PWD"'/tests/out/e2e-transcript.jsonl"}' | "$PWD/target/debug/agent-wrangler" hook claude start\r
+
+wait: QUARRYMARK @ 20
+dump: held_pipe_opened
+
+# Nothing changed for a second or more, so the daemon publishes nothing. Exactly
+# one pipe is alive all the same, and this kills it.
+sleep: 2
+sh: tests/scripts/kill-pipe.sh wrangler-test-held
+
+# A second agent, and therefore a publish that has no pipe to write to.
+keys: printf '%s' '{"session_id":"held-two","cwd":"/home/u/quarry","transcript_path":"'"$PWD"'/tests/out/held-transcript.jsonl"}' | "$PWD/target/debug/agent-wrangler" hook claude start\r
+
+# This name reached the screen, so the daemon opened a pipe again.
+wait: SECONDMARK @ 25
+dump: held_pipe_reopened
+
+keys: <C-q>
+sleep: 1
