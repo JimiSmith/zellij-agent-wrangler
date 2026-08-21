@@ -42,6 +42,22 @@ else. `zellij kill-all-sessions` and `zellij delete-all-sessions` are refused
 outright as `sh:` steps. A developer's own sessions are never in reach of a test
 run.
 
+## Which daemon a run reaches
+
+The daemon's socket is named for the user and for nothing else. A developer of
+this project has the real client installed, and its daemon holds that name. A
+run that does not say otherwise therefore reports to that daemon and asserts on
+it. The build under test is never exercised at all. Nothing fails, so this
+is silent until a change arrives that the installed daemon cannot carry.
+
+Every script that starts a daemon must give the run a user of its own:
+
+    env: USER=wrangler-test
+
+An `env:` step reaches the children that the harness spawns, and not a `sh:`
+step, which runs on the host. Any host script that runs the client must set the
+same name itself. `expect-turn.sh` and `raise-call.sh` are the examples.
+
 ## Steps
 
 A script is one step per line, `name: argument`. Blank lines and lines starting

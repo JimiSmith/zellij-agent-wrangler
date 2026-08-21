@@ -9,6 +9,9 @@ env: ZELLIJ_CONFIG_DIR=$PWD/tests/zellij-config
 env: TERM=xterm-256color
 env: XDG_STATE_HOME=$PWD/tests/out/state
 env: XDG_CACHE_HOME=$PWD/tests/out/cache
+# The daemon socket is named for the user. Without a name of its own, a run
+# reports to the daemon of the client that the developer installed.
+env: USER=wrangler-test
 
 sh?: tests/scripts/reset.sh wrangler-test-pipe
 sh: cargo build --target wasm32-wasip1 -p zellij-agent-wrangler

@@ -10,6 +10,9 @@ env: ZELLIJ_CONFIG_DIR=$PWD/tests/zellij-config
 env: TERM=xterm-256color
 env: XDG_STATE_HOME=$PWD/tests/out/state
 env: XDG_CACHE_HOME=$PWD/tests/out/cache
+# The daemon socket is named for the user. Without a name of its own, a run
+# reports to the daemon of the client that the developer installed.
+env: USER=wrangler-test
 
 # If an interrupted run leaves a session behind, this run fails to start rather
 # than fails an assertion. A daemon left over from another run holds records

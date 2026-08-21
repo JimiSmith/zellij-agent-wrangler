@@ -8,6 +8,12 @@
 # from nowhere and the daemon drops it.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
+# The socket of the daemon is named for the user and for nothing else. A
+# developer of this project has the real client installed, and its daemon holds
+# that name. Without a name of its own, a run reports to that daemon and asserts
+# on it. The build under test is never exercised at all.
+USER=wrangler-test
+export USER
 session=$1
 zellij_session=$2
 pane=$3
