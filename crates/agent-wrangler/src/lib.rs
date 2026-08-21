@@ -94,13 +94,19 @@ fn hook(agent: &str, event: &str) {
 }
 
 /// The sink that a client names for itself on the command line.
+///
+/// A name with nothing in it is refused here, so it never reaches the wire. The
+/// daemon cannot bind such a name, and the person who typed it is at this end.
 fn sink(kind: &str, id: &str) -> Option<Sink> {
+    if id.is_empty() {
+        return None;
+    }
     match kind {
         "zellij" => Some(Sink::Zellij {
             session: id.to_string(),
         }),
-        "pipe" => Some(Sink::Pipe {
-            path: id.to_string(),
+        "socket" => Some(Sink::Socket {
+            name: id.to_string(),
         }),
         _ => None,
     }
@@ -122,7 +128,7 @@ fn notify(args: &[String]) -> Vec<String> {
 
 const USAGE: &str = "usage: agent-wrangler hook <agent> <start|end|working|needsAttention|error>
        agent-wrangler daemon
-       agent-wrangler register <zellij|pipe> <session|path> [--notify <command> [argument...]]
+       agent-wrangler register <zellij|socket> <session|name> [--notify <command> [argument...]]
        agent-wrangler seen <session>
        agent-wrangler agents
        agent-wrangler monitor
@@ -241,9 +247,9 @@ mod tests {
             })
         );
         assert_eq!(
-            sink("pipe", "/tmp/w"),
-            Some(Sink::Pipe {
-                path: "/tmp/w".to_string()
+            sink("socket", "wrangler-tmux-work"),
+            Some(Sink::Socket {
+                name: "wrangler-tmux-work".to_string()
             })
         );
     }
@@ -252,6 +258,14 @@ mod tests {
     fn a_kind_of_client_this_cannot_reach_is_not_registered() {
         assert_eq!(sink("carrier-pigeon", "coop"), None);
         assert_eq!(sink("", ""), None);
+    }
+
+    #[test]
+    fn a_sink_with_no_name_is_refused_at_the_command_line() {
+        // The daemon cannot bind such a name, and the person who typed it is at
+        // this end. A refusal here is a message, and a refusal there is silence.
+        assert_eq!(sink("socket", ""), None);
+        assert_eq!(sink("zellij", ""), None);
     }
 
     fn words(args: &[&str]) -> Vec<String> {

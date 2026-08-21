@@ -54,8 +54,13 @@ pub struct Hook {
 pub enum Sink {
     /// A zellij session. The daemon reaches it with a pipe to its name.
     Zellij { session: String },
-    /// A named pipe. The daemon writes one line at a time.
-    Pipe { path: String },
+    /// A local socket that the daemon binds and listens on. A client that can
+    /// hold a connection reads it, and any number of them read one name.
+    ///
+    /// The field is a name rather than a path. On Windows the socket is a named
+    /// pipe reached through a namespace, and the same name serves on both
+    /// systems.
+    Socket { name: String },
 }
 
 /// What the daemon receives.
@@ -162,6 +167,13 @@ pub enum What {
     /// the state went out, because nothing waits on a write. Enough of these in
     /// a row retires the client.
     Failed { sink: Sink },
+    /// Out: the daemon gave up on this client and delivers to it no more.
+    ///
+    /// A client leaves for one of two reasons, and this record covers both. A
+    /// zellij client refused enough deliveries in a row. A socket sink had no
+    /// peer for long enough. Without this record, a feed that stopped has no
+    /// explanation anywhere.
+    Retired { sink: Sink },
     /// Records that the daemon cannot hand over fast enough. A watcher that
     /// falls behind loses records and does not hold the daemon up. The daemon
     /// tells the watcher how many records it lost, so the watcher does not
@@ -265,8 +277,8 @@ mod tests {
         });
         round_trip(Inbound::Register {
             format: 3,
-            sink: Sink::Pipe {
-                path: "/tmp/w.pipe".to_string(),
+            sink: Sink::Socket {
+                name: "agent-wrangler-tmux-work.sock".to_string(),
             },
             notify: Vec::new(),
         });
@@ -303,6 +315,18 @@ mod tests {
             })
         );
         assert_eq!(read_message::<_, Inbound>(&mut reader).unwrap(), None);
+    }
+
+    #[test]
+    fn a_client_the_daemon_gave_up_on_says_so() {
+        round_trip(Watched {
+            at: 1_700_000_000_000,
+            what: What::Retired {
+                sink: Sink::Socket {
+                    name: "agent-wrangler-tmux-work.sock".to_string(),
+                },
+            },
+        });
     }
 
     #[test]

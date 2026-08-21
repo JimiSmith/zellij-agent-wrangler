@@ -38,7 +38,7 @@ use agent_wrangler_core::agent::FORMAT;
 use agent_wrangler_core::notify::Notifier;
 
 use crate::daemon::notify::Announced;
-use crate::daemon::sink::{Delivery, Pipes};
+use crate::daemon::sink::{Delivery, Transports};
 use crate::daemon::state::{look, read_hook, Call, Client, Real, State};
 use crate::daemon::watch::Watchers;
 use crate::paths;
@@ -142,33 +142,28 @@ impl Owed {
     }
 }
 
-/// What the daemon does with the socket name.
-enum Bound {
-    /// This process is the daemon.
-    Ours(Listener),
-    /// Another process already is, so there is nothing to do.
-    Taken,
-}
-
-/// This function claims the socket name, or finds that someone else holds it.
+/// This function claims one name, or finds that someone else holds it. `None`
+/// says that something answered the name, so it is not this process's to take.
 ///
-/// A connection attempt first tells a live daemon from a name that a dead one
+/// A connection attempt first tells a live listener from a name that a dead one
 /// left behind. To take the name over is then safe *because* of that. Nothing
 /// answered the name, so nothing listens on it. Without this attempt, a daemon
 /// that was killed outright leaves a name that nothing can bind again. This is
 /// true on every system where the name is a file rather than a name that the
 /// kernel drops with the process.
-fn bind() -> std::io::Result<Bound> {
-    let name = paths::socket_name();
+///
+/// The daemon's own socket and every socket sink are claimed here, so there is
+/// one account of what a name that is already answered means.
+pub(crate) fn claim(name: &str) -> std::io::Result<Option<Listener>> {
     let ns = name.to_ns_name::<GenericNamespaced>()?;
     if Stream::connect(ns.clone()).is_ok() {
-        return Ok(Bound::Taken);
+        return Ok(None);
     }
     ListenerOptions::new()
         .name(ns)
         .try_overwrite(true)
         .create_sync()
-        .map(Bound::Ours)
+        .map(Some)
 }
 
 /// This function writes the state out and tells every client. It drops the
@@ -185,7 +180,12 @@ fn bind() -> std::io::Result<Bound> {
 ///
 /// The caller holds no lock. This function takes the lock only to read what to
 /// send, and to note the clients that it did not reach.
-fn publish(shared: &Arc<Mutex<State>>, dir: &Path, watchers: &Watchers, pipes: &mut Pipes) {
+fn publish(
+    shared: &Arc<Mutex<State>>,
+    dir: &Path,
+    watchers: &Watchers,
+    transports: &mut Transports,
+) {
     let (payload, clients, saved) = {
         let state = held(shared);
         (state.payload(), state.clients(), state.snapshot())
@@ -197,50 +197,95 @@ fn publish(shared: &Arc<Mutex<State>>, dir: &Path, watchers: &Watchers, pipes: &
             sink: client.sink.clone(),
             agents,
         });
-        sink::deliver(pipes, &client.sink, &payload);
+        sink::deliver(transports, &client.sink, &payload);
     }
-    let outcomes = pipes.outcomes();
+    let outcomes = transports.outcomes();
     for (sink, delivery) in &outcomes {
         if *delivery == Delivery::Failed {
             watchers.saw(|| What::Failed { sink: sink.clone() });
         }
     }
-    let live = {
+    let (retired, live) = {
         let mut state = held(shared);
-        for (sink, delivery) in outcomes {
-            answered(&mut state, &sink, delivery);
-        }
-        listening(&state)
+        let retired: Vec<Sink> = outcomes
+            .into_iter()
+            .filter(|(sink, delivery)| answered(&mut state, sink, *delivery))
+            .map(|(sink, _)| sink)
+            .collect();
+        (retired, live(&state))
     };
-    // The pipe process does not exit when its session dies. A client that this
-    // daemon just retired therefore leaves a process behind, unless this kills
-    // it.
-    pipes.retain(&live);
+    for sink in retired {
+        watchers.saw(|| What::Retired { sink: sink.clone() });
+    }
+    // The pipe process does not exit when its session dies, and a socket name
+    // that nothing releases is a name that a later client cannot bind. A client
+    // that this daemon just retired leaves both behind, unless this closes them.
+    transports.retain(&live);
 }
 
-/// Every zellij session that the daemon still delivers to.
-fn listening(state: &State) -> BTreeSet<String> {
+/// Every client that the daemon still delivers to.
+fn live(state: &State) -> BTreeSet<Sink> {
     state
         .clients()
         .into_iter()
-        .filter_map(|client| match client.sink {
-            Sink::Zellij { session } => Some(session),
-            Sink::Pipe { .. } => None,
-        })
+        .map(|client| client.sink)
         .collect()
 }
 
-/// What one delivery says about the client it was for.
+/// This function gives up on every socket sink that has had no peer for long
+/// enough, and tells the watchers.
 ///
-/// Only a refusal counts against a client. A refusal is the answer that a
+/// The daemon reads its own listener, so this question costs nothing. It is
+/// asked on every turn of the delivery loop, which is at most a second apart. A
+/// turn with nothing to retire takes no lock at all.
+///
+/// Side effect: this function writes the state file, and releases a socket name.
+fn retire_idle(
+    shared: &Arc<Mutex<State>>,
+    dir: &Path,
+    watchers: &Watchers,
+    transports: &mut Transports,
+    now: Instant,
+) {
+    let stale = transports.stale(now);
+    if stale.is_empty() {
+        return;
+    }
+    let live = {
+        let mut state = held(shared);
+        for sink in &stale {
+            if state.retire(sink) {
+                watchers.saw(|| What::Retired { sink: sink.clone() });
+            }
+        }
+        live(&state)
+    };
+    record(shared, dir);
+    transports.retain(&live);
+}
+
+/// What one delivery says about the client it was for. This function returns
+/// whether the daemon gave the client up.
+///
+/// Only a refusal counts against a zellij client. A refusal is the answer that a
 /// client that went away gives. A pipe into a session that is not there exits
 /// within milliseconds and says so.
-fn answered(state: &mut State, sink: &Sink, delivery: Delivery) {
+///
+/// Nothing counts against a socket sink. The exit status of a process was always
+/// a poor measure of liveness: it reads a busy multiplexer as a refusal, and it
+/// never finds a session that lives on with no sidebar in it. A socket answers
+/// the question directly instead. The daemon reads its own listener, and a sink
+/// with no peer for long enough is one to give up on.
+fn answered(state: &mut State, sink: &Sink, delivery: Delivery) -> bool {
+    if matches!(sink, Sink::Socket { .. }) {
+        return false;
+    }
     match delivery {
-        Delivery::Sent => state.reached(sink),
-        Delivery::Failed => {
-            state.missed(sink);
+        Delivery::Sent => {
+            state.reached(sink);
+            false
         }
+        Delivery::Failed => state.missed(sink),
     }
 }
 
@@ -423,9 +468,8 @@ fn sweep(shared: &Arc<Mutex<State>>, owed: &Owed) {
 /// A hook that starts a daemon without need therefore costs one process that
 /// exits, rather than a second daemon.
 pub fn run() -> std::io::Result<()> {
-    let listener = match bind()? {
-        Bound::Taken => return Ok(()),
-        Bound::Ours(listener) => listener,
+    let Some(listener) = claim(&paths::socket_name())? else {
+        return Ok(());
     };
 
     let dir = paths::state_dir();
@@ -438,6 +482,11 @@ pub fn run() -> std::io::Result<()> {
     let shared = Arc::new(Mutex::new(initial));
     let stop = Arc::new(AtomicBool::new(false));
     let owed = Arc::new(Owed::default());
+    // The restored clients are owed the state before anything changes. A socket
+    // sink is bound by the delivery that goes to it, so without this a restored
+    // one stays unbound until the next event, and its client finds nothing to
+    // connect to.
+    owed.owe();
     let watchers = Arc::new(Watchers::default());
     // One per daemon rather than one per connection. A hook gets a thread of
     // its own. A quiet period per connection is therefore no quiet period at
@@ -482,22 +531,21 @@ pub fn run() -> std::io::Result<()> {
         let watchers = Arc::clone(&watchers);
         let dir = dir.clone();
         thread::spawn(move || {
-            let mut pipes = Pipes::new(told);
+            let mut transports = Transports::new(told);
             let mut spoke = Instant::now();
             loop {
                 if owed.take(SPEAK_WHILE_CALLING) {
-                    publish(&shared, &dir, &watchers, &mut pipes);
+                    publish(&shared, &dir, &watchers, &mut transports);
                     spoke = Instant::now();
-                    continue;
-                }
-                // Nothing changed, so nothing was written. A client speaks
-                // only while it handles a message. The one thing it says is
-                // that a call was answered. The beat is therefore fast while a
-                // call waits, and slow the rest of the time.
-                if held(&shared).anyone_calling() || spoke.elapsed() >= SPEAK_WHEN_QUIET {
-                    pipes.nudge();
+                } else if held(&shared).anyone_calling() || spoke.elapsed() >= SPEAK_WHEN_QUIET {
+                    // Nothing changed, so nothing was written. A client speaks
+                    // only while it handles a message. The one thing it says is
+                    // that a call was answered. The beat is therefore fast while
+                    // a call waits, and slow the rest of the time.
+                    transports.nudge();
                     spoke = Instant::now();
                 }
+                retire_idle(&shared, &dir, &watchers, &mut transports, Instant::now());
             }
         });
     }
@@ -615,9 +663,10 @@ mod tests {
         let mut state = State::default();
         let client = sidebar();
         state.register(client.clone());
-        for _ in 0..REFUSALS {
-            answered(&mut state, &client.sink, Delivery::Failed);
+        for _ in 1..REFUSALS {
+            assert!(!answered(&mut state, &client.sink, Delivery::Failed));
         }
+        assert!(answered(&mut state, &client.sink, Delivery::Failed));
         assert!(state.clients().is_empty());
     }
 
@@ -639,38 +688,124 @@ mod tests {
         assert_eq!(state.clients(), vec![client]);
     }
 
-    #[test]
-    fn only_a_zellij_client_holds_a_pipe_that_must_be_shut() {
-        // What decides which held children survive a publish. A named pipe is
-        // a file and has no process behind it, so it must not be looked for
-        // among the children.
-        let mut state = State::default();
-        state.register(sidebar());
-        state.register(Client {
-            sink: Sink::Pipe {
-                path: "/tmp/w.pipe".to_string(),
+    fn native() -> Client {
+        Client {
+            sink: Sink::Socket {
+                name: "wrangler-tmux-work.sock".to_string(),
             },
             notify: None,
-        });
-        assert_eq!(listening(&state), BTreeSet::from(["proto".to_string()]));
+        }
     }
 
     #[test]
-    fn a_retired_client_leaves_no_pipe_behind() {
+    fn every_kind_of_client_holds_a_transport_that_must_be_closed() {
+        // What decides which transports survive a publish. A socket name that
+        // nothing releases is a name that a later client cannot bind, exactly
+        // as a pipe process that nothing kills outlives its session.
+        let mut state = State::default();
+        state.register(sidebar());
+        state.register(native());
+        assert_eq!(
+            live(&state),
+            BTreeSet::from([sidebar().sink, native().sink])
+        );
+    }
+
+    #[test]
+    fn a_retired_client_leaves_no_transport_behind() {
         // The pipe process does not exit when its session dies. A daemon that
         // only forgets the client leaves that process for as long as the user
         // stays logged in.
         let mut state = State::default();
         let client = sidebar();
         state.register(client.clone());
-        assert!(!listening(&state).is_empty());
+        assert!(!live(&state).is_empty());
         for _ in 0..REFUSALS {
             answered(&mut state, &client.sink, Delivery::Failed);
         }
         assert!(
-            listening(&state).is_empty(),
+            live(&state).is_empty(),
             "nothing keeps this session's pipe open"
         );
+    }
+
+    #[test]
+    fn no_delivery_outcome_ever_retires_a_socket_sink() {
+        // A socket sink is given up on for having no peer, and for nothing
+        // else. A name that could not be bound is reported so that a watcher
+        // sees it, and the next publish tries the name again.
+        let mut state = State::default();
+        let client = native();
+        state.register(client.clone());
+        for _ in 0..REFUSALS * 3 {
+            assert!(!answered(&mut state, &client.sink, Delivery::Failed));
+        }
+        assert_eq!(state.clients(), vec![client]);
+    }
+
+    #[test]
+    fn a_socket_sink_with_no_peer_is_given_up_on() {
+        let mut state = State::default();
+        let client = native();
+        state.register(client.clone());
+        assert!(state.retire(&client.sink));
+        assert!(state.clients().is_empty());
+        assert!(!state.retire(&client.sink), "there is nothing left to drop");
+    }
+
+    #[test]
+    fn a_socket_sink_that_never_had_a_peer_is_retired_and_gives_up_its_name() {
+        // The whole rule, from the bound name to the client that goes. A
+        // sidebar that the user turned off leaves the session alive and the
+        // socket empty, and the daemon must stop writing to it.
+        let dir =
+            std::env::temp_dir().join(format!("agent-wrangler-retire-{}", std::process::id()));
+        let name = format!("agent-wrangler-retire-test-{}.sock", std::process::id());
+        let shared = Arc::new(Mutex::new(State::default()));
+        let watchers = Watchers::default();
+        let (told, _heard) = channel();
+        let mut transports = Transports::new(told);
+        let client = Client {
+            sink: Sink::Socket { name: name.clone() },
+            notify: None,
+        };
+        held(&shared).register(client.clone());
+        publish(&shared, &dir, &watchers, &mut transports);
+
+        let now = Instant::now();
+        retire_idle(&shared, &dir, &watchers, &mut transports, now);
+        assert_eq!(
+            held(&shared).clients(),
+            vec![client],
+            "it was only just bound"
+        );
+
+        retire_idle(
+            &shared,
+            &dir,
+            &watchers,
+            &mut transports,
+            now + sink::NO_PEER,
+        );
+        assert!(held(&shared).clients().is_empty());
+        // The name is released, so a later client can bind it.
+        let (told, _heard) = channel();
+        let mut after = Transports::new(told);
+        let until = Instant::now() + Duration::from_secs(5);
+        while after.stale(Instant::now() + sink::NO_PEER).is_empty() && Instant::now() < until {
+            sink::deliver(
+                &mut after,
+                &Sink::Socket { name: name.clone() },
+                "wrangler 3",
+            );
+        }
+        assert_eq!(
+            after.stale(Instant::now() + sink::NO_PEER),
+            vec![Sink::Socket { name }],
+            "the name was free to bind again"
+        );
+        after.retain(&BTreeSet::new());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -187,8 +187,8 @@ mod tests {
                 notify: Notifier::new(vec!["notify-send".to_string(), "-u".to_string()]),
             },
             Client {
-                sink: Sink::Pipe {
-                    path: "/tmp/w.pipe".to_string(),
+                sink: Sink::Socket {
+                    name: "wrangler-tmux-work.sock".to_string(),
                 },
                 notify: None,
             },

@@ -328,17 +328,39 @@ call with. Both are started through the platform module rather than built where
 they are run, so what it takes to start a program without disturbing the user is
 answered once for each system and cannot be forgotten at a call site.
 
+There are two transports, and they have one shape. Each one holds a writer of
+its own and a slot that holds one payload, so filling the slot returns at once
+and a client whose buffer is full delays that client and no other. The record
+breaks inside a payload travel as `\u{1e}`, because both transports frame by the
+line. They differ in the pipe under them and in nothing else.
+
 A zellij client is reached through one `zellij pipe` that stays open, and not
-through one process per delivery. A pipe given no payload argument reads its
-stdin, and one line on that stdin is one message; a plugin answers on the same
-pipe, and that answer arrives on the same process's stdout. So one child carries
-the state out and the messages back, and a sidebar that answers a call costs no
-process at all. Each held child has a writer thread of its own and a slot that
-holds one payload, so filling the slot returns at once and a session whose pipe
-buffer is full delays that session and no other. The record breaks inside a
-payload travel as `\u{1e}`, because the transport frames by the line. The pipe
-process does not exit when its session dies, so the daemon kills the child when
-it retires the client.
+through one process per delivery. A wasm plugin cannot hold a connection, so the
+daemon reaches out to it. A pipe given no payload argument reads its stdin, and
+one line on that stdin is one message; a plugin answers on the same pipe, and
+that answer arrives on the same process's stdout. So one child carries the state
+out and the messages back, and a sidebar that answers a call costs no process at
+all. The pipe process does not exit when its session dies, so the daemon kills
+the child when it retires the client.
+
+A native client holds a connection itself, so it needs no such command, and tmux
+has none to offer. The client names a socket when it registers, and the daemon
+binds that name and listens on it. One socket serves one session, so every
+sidebar of that session reads the same one and none of them has to be elected.
+The daemon holds the newest payload for each name, because a client is owed the
+state the moment it registers and that is before any peer of it connects. A peer
+is written the held payload as soon as it arrives. A name that a dead daemon left
+behind is taken over only when nothing answers it, which is the rule that the
+daemon's own socket already follows.
+
+Liveness is answered differently on the two. A zellij client is given up on after
+three refused deliveries, because the exit status of the pipe process is the only
+signal there is. A socket sink is given up on when it has had no peer for thirty
+seconds. The daemon reads its own listener, so that question costs nothing, and
+it is the better measure: the exit status reads a busy multiplexer as a refusal,
+and it never finds a session that lives on with no sidebar in it. A peer that
+disconnects is not a client that has gone, because the sidebars of a session come
+and go while the session stays.
 
 A plugin can only write on a pipe while it is handling a message from that pipe.
 Zellij holds anything written at any other moment and hands it over on the next
@@ -375,7 +397,9 @@ an arriving message is worth reading: whether it changed anything, since that
 and not the arrival is what owes the clients a delivery. One record is written
 for each state that goes out. A delivery is a write and not a process run, so
 there is nothing to say afterwards about one that landed; only a failure is
-worth a second record, and enough of those in a row retires the client.
+worth a second record, and enough of those in a row retires a zellij client. A
+record is also written for every client that the daemon gives up on, whichever
+of the two rules ended it, so a feed that stopped has an explanation.
 
 ## Testing
 

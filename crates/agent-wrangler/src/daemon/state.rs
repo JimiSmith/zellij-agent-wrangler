@@ -378,6 +378,19 @@ impl State {
         true
     }
 
+    /// This method gives up on one client, whatever the daemon knew about it.
+    /// It returns whether there was one to give up on.
+    ///
+    /// This is how a socket sink leaves. No count of refusals decides it. The
+    /// daemon reads its own listener, and a sink with no peer for long enough is
+    /// a client that nobody wants the state for.
+    pub fn retire(&mut self, sink: &Sink) -> bool {
+        self.misses.remove(sink);
+        let held = self.clients.iter().any(|held| &held.sink == sink);
+        self.clients.retain(|held| &held.sink != sink);
+        held
+    }
+
     /// This method records that a delivery reached a client. The refusals
     /// before it then do not count against the client.
     pub fn reached(&mut self, sink: &Sink) {
