@@ -35,14 +35,14 @@ impl Answered {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_wrangler_core::agent::{Meta, Turn};
+    use agent_wrangler_core::agent::{LabelFacts, Turn};
     use agent_wrangler_core::origin::Origin;
 
     fn calling(id: &str, raised: u64) -> Agent {
         let mut agent = Agent::new(
             SessionId::new(id).unwrap(),
             "claude",
-            Meta::default(),
+            LabelFacts::default(),
             Origin::default(),
         );
         agent.turn = Turn::Attention;

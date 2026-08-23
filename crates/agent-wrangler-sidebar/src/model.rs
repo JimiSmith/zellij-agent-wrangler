@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use agent_wrangler_core::agent::SessionId;
+pub use agent_wrangler_core::client_message::ClientMessage;
 use agent_wrangler_core::registry::Registry;
-pub use agent_wrangler_core::told::Told;
 use agent_wrangler_ui::frame::Frame;
 pub use agent_wrangler_ui::model::{PaneId, TabId};
 use agent_wrangler_ui::model::{RowKey, TabPosition};
@@ -171,7 +171,7 @@ pub enum Effect {
     /// needs to. [`Effect::Run`] keeps the two things that no such
     /// transport can carry: the registration that opens it, and the hooks that
     /// are files on disk.
-    Tell(Told),
+    Tell(ClientMessage),
     Broadcast(Broadcast),
     FocusPane(PaneId),
     SwitchTab(TabId),

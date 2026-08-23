@@ -80,7 +80,7 @@ impl Announced {
 /// about. That rule is the whole point. The notifier reads an undecided
 /// variable off the environment of this process.
 fn where_it_is(call: &Call) -> Vec<(&'static str, Option<&str>)> {
-    let named = call.origin.named();
+    let named = call.origin.values_by_variable_name();
     LOCATION_VARS
         .iter()
         .map(|name| (*name, named.get(name).copied()))
@@ -105,7 +105,7 @@ fn where_it_is(call: &Call) -> Vec<(&'static str, Option<&str>)> {
 /// variables of that agent.
 pub fn raise(notifier: &Notifier, call: &Call) -> bool {
     let mut announce = command(notifier.program());
-    announce.args(notifier.arguments(&call.agent, &call.label));
+    announce.args(notifier.arguments_for_notification(&call.agent, &call.label));
     for (name, value) in where_it_is(call) {
         match value {
             Some(value) => announce.env(name, value),
@@ -133,7 +133,7 @@ mod tests {
         Call {
             agent: "claude".to_string(),
             label: "the port".to_string(),
-            origin: Origin::from(|name| match name {
+            origin: Origin::from_lookup(|name| match name {
                 "ZELLIJ_SESSION_NAME" => Some("wrangler-proto".to_string()),
                 _ => None,
             }),

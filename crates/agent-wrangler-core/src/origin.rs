@@ -50,7 +50,7 @@ fn clean(text: &str) -> String {
 
 impl Default for Origin {
     fn default() -> Self {
-        Origin::from(|_| None)
+        Origin::from_lookup(|_| None)
     }
 }
 
@@ -61,11 +61,11 @@ impl Origin {
     /// descendant of the pane that it belongs to, so these variables are that
     /// pane's variables.
     pub fn capture() -> Self {
-        Origin::from(|name| std::env::var(name).ok())
+        Origin::from_lookup(|name| std::env::var(name).ok())
     }
 
     /// The same, from anything that can answer for a variable.
-    pub fn from(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
+    pub fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
         Origin {
             values: LOCATION_VARS
                 .iter()
@@ -92,7 +92,7 @@ impl Origin {
 
     /// Every captured variable by name. This is a report of what was seen, not
     /// a basis for a decision.
-    pub fn named(&self) -> BTreeMap<&str, &str> {
+    pub fn values_by_variable_name(&self) -> BTreeMap<&str, &str> {
         LOCATION_VARS
             .iter()
             .filter_map(|name| self.get(name).map(|value| (*name, value)))
@@ -124,7 +124,7 @@ mod tests {
     use super::*;
 
     fn origin(pairs: &[(&str, &str)]) -> Origin {
-        Origin::from(|name| {
+        Origin::from_lookup(|name| {
             pairs
                 .iter()
                 .find(|(key, _)| *key == name)
@@ -205,7 +205,7 @@ mod tests {
     fn every_captured_variable_is_listed_by_name() {
         let origin = origin(&[("ZELLIJ", "0"), ("ZELLIJ_PANE_ID", "7")]);
         assert_eq!(
-            origin.named(),
+            origin.values_by_variable_name(),
             BTreeMap::from([("ZELLIJ", "0"), ("ZELLIJ_PANE_ID", "7")])
         );
     }

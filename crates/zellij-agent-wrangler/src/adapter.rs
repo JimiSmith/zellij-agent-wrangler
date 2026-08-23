@@ -154,12 +154,13 @@ pub fn encode_message(message: Broadcast) -> (&'static str, Option<String>) {
 /// The state that one message carried, as the sidebar's own vocabulary.
 ///
 /// The payload arrives on a transport that frames its messages by the line. The
-/// record breaks therefore travel as [`agent::BREAK`], and the newline that
-/// framed the message is still on the end. Both are undone here, before
-/// anything reads the header, because the header is split on a real newline.
+/// record breaks therefore travel as [`agent::ESCAPED_RECORD_BREAK`], and the
+/// newline that framed the message is still on the end. Both are undone here,
+/// before anything reads the header, because the header is split on a real
+/// newline.
 pub fn agents(payload: &str, session: &str) -> Option<AgentSnapshot> {
-    let payload = agent::unflatten(payload);
-    let (format, records) = agent::read_state(&payload)?;
+    let payload = agent::restore_record_breaks(payload);
+    let (format, records) = agent::read_state_message(&payload)?;
     if format != agent::FORMAT {
         return Some(AgentSnapshot::Incompatible);
     }
@@ -183,7 +184,7 @@ pub fn agents(payload: &str, session: &str) -> Option<AgentSnapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_wrangler_core::agent::{Meta, SessionId};
+    use agent_wrangler_core::agent::{LabelFacts, SessionId};
     use agent_wrangler_core::origin::Origin;
     use std::collections::HashMap;
 
@@ -401,8 +402,8 @@ mod tests {
         Agent::new(
             SessionId::new(id).unwrap(),
             "claude",
-            Meta::default(),
-            Origin::from(|name| match name {
+            LabelFacts::default(),
+            Origin::from_lookup(|name| match name {
                 SESSION_VAR => Some(session.to_string()),
                 PANE_VAR => Some(pane.to_string()),
                 _ => None,
@@ -411,9 +412,10 @@ mod tests {
     }
 
     /// One payload as the transport hands it over: every record break carried
-    /// by `BREAK`, and the newline that framed the message still on the end.
+    /// by `ESCAPED_RECORD_BREAK`, and the newline that framed the message still
+    /// on the end.
     fn delivered(payload: &str) -> String {
-        format!("{}\n", agent::flatten(payload))
+        format!("{}\n", agent::escape_record_breaks(payload))
     }
 
     #[test]
@@ -421,7 +423,7 @@ mod tests {
         let mut registry = Registry::default();
         registry.report(reported("mine", "work", "11"));
         registry.report(reported("theirs", "other", "12"));
-        let payload = delivered(&agent::state(&registry.encode()));
+        let payload = delivered(&agent::build_state_message(&registry.encode()));
         let Some(AgentSnapshot::Compatible { registry, panes }) = agents(&payload, "work") else {
             panic!("compatible state");
         };
@@ -466,7 +468,7 @@ mod tests {
         let mut registry = Registry::default();
         registry.report(reported("first", "work", "11"));
         registry.report(reported("second", "work", "12"));
-        let line = delivered(&agent::state(&registry.encode()));
+        let line = delivered(&agent::build_state_message(&registry.encode()));
         assert!(
             !line.trim_end_matches('\n').contains('\n'),
             "one line, whatever it carries"

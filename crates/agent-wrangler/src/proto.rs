@@ -261,7 +261,7 @@ mod tests {
             origin: "0\u{1f}proto\u{1f}7\u{1f}\u{1f}".to_string(),
             process: Some(Process {
                 pid: 4242,
-                started: Some(agent_wrangler_core::agent::Started(918_273)),
+                started: Some(agent_wrangler_core::agent::ProcessStartStamp(918_273)),
             }),
             at: 1_700_000_000_000,
         }
@@ -360,7 +360,7 @@ mod tests {
         // Both readers must accept the same line. A client writes that line
         // with no JSON writer at all, so nothing but this test keeps the two
         // ends in step.
-        let line = agent_wrangler_core::told::Told::Seen(
+        let line = agent_wrangler_core::client_message::ClientMessage::Seen(
             agent_wrangler_core::agent::SessionId::new("9f3c-1a").unwrap(),
         )
         .encode();
@@ -383,7 +383,7 @@ mod tests {
         // socket is a transport to no client. A beat written there costs the
         // line and not the connection, because a line that does not decode is
         // passed over.
-        let line = agent_wrangler_core::told::Told::Beat.encode();
+        let line = agent_wrangler_core::client_message::ClientMessage::Beat.encode();
         assert_eq!(
             read_message::<_, Told>(&mut line.as_bytes()).unwrap(),
             Some(Told::Beat)

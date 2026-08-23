@@ -362,9 +362,9 @@ Liveness is one question on both: can this client still send a message? That
 covers being connected, and it covers working as well. A client answers by
 speaking, and the daemon gives up on a client that said nothing for ninety
 seconds. Any line counts, so a client with something to report sends no separate
-beat. A client with nothing to report sends `Told::Beat` every thirty seconds,
-on the transport that already carries its state, so a beat costs no process on
-either side.
+beat. A client with nothing to report sends `ClientMessage::Beat` every thirty
+seconds, on the transport that already carries its state, so a beat costs no
+process on either side.
 
 Two weaker measures came before it, and each one had a client it could not see.
 The exit status of the pipe process reads a busy multiplexer as a refusal, and

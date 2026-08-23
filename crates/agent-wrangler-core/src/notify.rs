@@ -35,7 +35,7 @@ impl Notifier {
     }
 
     /// The words that built it, to pass on unchanged.
-    pub fn words(&self) -> Vec<String> {
+    pub fn program_and_arguments(&self) -> Vec<String> {
         let mut words = vec![self.program.clone()];
         words.extend(self.arguments.iter().cloned());
         words
@@ -48,7 +48,7 @@ impl Notifier {
 
     /// Everything to run it with for one notification: the arguments it was
     /// given, then the title and the body.
-    pub fn arguments(&self, title: &str, body: &str) -> Vec<String> {
+    pub fn arguments_for_notification(&self, title: &str, body: &str) -> Vec<String> {
         let mut arguments = self.arguments.clone();
         arguments.push(title.to_string());
         arguments.push(body.to_string());
@@ -69,7 +69,7 @@ mod tests {
         let notifier = notifier(&["notify-send", "--urgency", "low"]).unwrap();
         assert_eq!(notifier.program(), "notify-send");
         assert_eq!(
-            notifier.arguments("claude", "the port"),
+            notifier.arguments_for_notification("claude", "the port"),
             ["--urgency", "low", "claude", "the port"]
         );
     }
@@ -78,7 +78,7 @@ mod tests {
     fn a_notifier_of_its_own_still_takes_them_last() {
         let notifier = notifier(&["/opt/my notifier"]).unwrap();
         assert_eq!(
-            notifier.arguments("claude", "the port"),
+            notifier.arguments_for_notification("claude", "the port"),
             ["claude", "the port"]
         );
     }
@@ -93,6 +93,6 @@ mod tests {
     #[test]
     fn the_words_come_back_as_they_went_in() {
         let notifier = notifier(&["/opt/my notifier", "-u"]).unwrap();
-        assert_eq!(notifier.words(), ["/opt/my notifier", "-u"]);
+        assert_eq!(notifier.program_and_arguments(), ["/opt/my notifier", "-u"]);
     }
 }

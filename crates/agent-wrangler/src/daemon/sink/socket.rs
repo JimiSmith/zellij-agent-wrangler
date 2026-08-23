@@ -391,8 +391,12 @@ mod tests {
         let bound = bind(&name, &told).expect("a bound name");
         let peer = connect(&name);
         let mut writer: &Stream = &peer;
-        writeln!(writer, "{}", agent_wrangler_core::told::Told::Beat.encode())
-            .expect("a heartbeat");
+        writeln!(
+            writer,
+            "{}",
+            agent_wrangler_core::client_message::ClientMessage::Beat.encode()
+        )
+        .expect("a heartbeat");
         writer.flush().expect("a heartbeat");
         assert_eq!(
             heard.recv_timeout(Duration::from_secs(5)),

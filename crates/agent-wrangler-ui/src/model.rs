@@ -308,16 +308,16 @@ impl Row {
 mod tests {
     use super::*;
 
-    use agent_wrangler_core::agent::Meta;
+    use agent_wrangler_core::agent::LabelFacts;
     use agent_wrangler_core::origin::Origin;
 
     fn colored(color: &str) -> Agent {
         Agent::new(
             SessionId::new("one").unwrap(),
             "claude",
-            Meta {
+            LabelFacts {
                 color: color.to_string(),
-                ..Meta::default()
+                ..LabelFacts::default()
             },
             Origin::default(),
         )

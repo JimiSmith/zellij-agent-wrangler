@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use agent_wrangler_core::command::words;
+use agent_wrangler_core::command::split_command_line;
 use agent_wrangler_core::notify::Notifier;
 use agent_wrangler_ui::options::{Label, View};
 
@@ -19,7 +19,7 @@ fn notifier(value: &str) -> Option<Notifier> {
     match truth(value) {
         Some(false) => None,
         Some(true) => Notifier::new(vec![NOTIFY.to_string()]),
-        None => Notifier::new(words(value)),
+        None => Notifier::new(split_command_line(value)),
     }
 }
 
@@ -97,7 +97,7 @@ mod tests {
     fn notification_commands_keep_quoted_words_whole() {
         let options = read(&[("desktop_notification", "'/opt/my notifier' --urgency low")]);
         assert_eq!(
-            options.desktop.unwrap().words(),
+            options.desktop.unwrap().program_and_arguments(),
             ["/opt/my notifier", "--urgency", "low"]
         );
     }

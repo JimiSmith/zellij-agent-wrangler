@@ -36,7 +36,7 @@
 
 use std::process::{ExitCode, ExitStatus};
 
-use agent_wrangler_core::told::{Told, BEAT};
+use agent_wrangler_core::client_message::{ClientMessage, HEARTBEAT_INTERVAL};
 
 use crate::heartbeat::HeartbeatSettings;
 
@@ -124,8 +124,8 @@ pub fn run() -> ExitCode {
     // reads says nothing at all. Both ends take the interval and the line from
     // the crate that they share.
     let heartbeat = HeartbeatSettings {
-        interval: BEAT,
-        line: Told::Beat.encode(),
+        interval: HEARTBEAT_INTERVAL,
+        line: ClientMessage::Beat.encode(),
     };
     match client::run_client(&mut std::io::stdout().lock(), &heartbeat) {
         Ok(()) => ExitCode::SUCCESS,

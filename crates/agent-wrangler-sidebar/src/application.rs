@@ -10,8 +10,8 @@ use agent_wrangler_ui::{selection, tree, Rect};
 use crate::calls::Answered;
 use crate::client::Client;
 use crate::model::{
-    AgentSnapshot, Broadcast, Command, Decision, Effect, Focus, FocusTarget, Input,
-    InteractionItem, Permission, RenderedView, SessionLayout, TabId, TabReport, Told, UserAction,
+    AgentSnapshot, Broadcast, ClientMessage, Command, Decision, Effect, Focus, FocusTarget, Input,
+    InteractionItem, Permission, RenderedView, SessionLayout, TabId, TabReport, UserAction,
     ViewAction,
 };
 use crate::options::Options;
@@ -243,7 +243,7 @@ impl Application {
             .options
             .desktop
             .as_ref()
-            .map(|notifier| notifier.words())
+            .map(|notifier| notifier.program_and_arguments())
             .unwrap_or_default();
         if !notifier.is_empty() {
             owned.push("--notify".to_string());
@@ -273,7 +273,7 @@ impl Application {
             for agent in &calling {
                 decision
                     .effects
-                    .push(Effect::Tell(Told::Seen(agent.session.clone())));
+                    .push(Effect::Tell(ClientMessage::Seen(agent.session.clone())));
             }
         }
         changed
@@ -634,7 +634,7 @@ fn said(stderr: &[u8]) -> &str {
 mod tests {
     use super::*;
     use crate::model::{PaneReport, PaneVisibility, SidebarPaneReport, TabId, TabLayout};
-    use agent_wrangler_core::agent::Meta;
+    use agent_wrangler_core::agent::LabelFacts;
     use agent_wrangler_core::origin::Origin;
     use agent_wrangler_ui::ansi;
 
@@ -687,7 +687,7 @@ mod tests {
         let mut agent = Agent::new(
             SessionId::new(id).unwrap(),
             "claude",
-            Meta::default(),
+            LabelFacts::default(),
             Origin::default(),
         );
         agent.turn = turn;
@@ -1030,7 +1030,7 @@ mod tests {
         let mut agent = Agent::new(
             session.clone(),
             "claude",
-            Meta::default(),
+            LabelFacts::default(),
             Origin::default(),
         );
         agent.turn = Turn::Attention;
@@ -1044,7 +1044,7 @@ mod tests {
 
         assert!(decision.effects.iter().any(|effect| matches!(
             effect,
-            Effect::Tell(Told::Seen(session)) if session.as_str() == "call"
+            Effect::Tell(ClientMessage::Seen(session)) if session.as_str() == "call"
         )));
         assert_eq!(app.registry.get(&session).unwrap().turn, Turn::Idle);
     }
@@ -1063,20 +1063,20 @@ mod tests {
         assert!(!pending
             .effects
             .iter()
-            .any(|effect| matches!(effect, Effect::Tell(Told::Seen(_)))));
+            .any(|effect| matches!(effect, Effect::Tell(ClientMessage::Seen(_)))));
         assert_eq!(app.registry.get(&session).unwrap().turn, Turn::Attention);
 
         let confirmed = app.reduce(focus("10", FocusTarget::Content(PaneId::new("7"))));
         assert!(confirmed.effects.iter().any(|effect| matches!(
             effect,
-            Effect::Tell(Told::Seen(session)) if session.as_str() == "call"
+            Effect::Tell(ClientMessage::Seen(session)) if session.as_str() == "call"
         )));
         assert_eq!(app.registry.get(&session).unwrap().turn, Turn::Idle);
         assert!(!app
             .reduce(focus("10", FocusTarget::Content(PaneId::new("7"))))
             .effects
             .iter()
-            .any(|effect| matches!(effect, Effect::Tell(Told::Seen(_)))));
+            .any(|effect| matches!(effect, Effect::Tell(ClientMessage::Seen(_)))));
     }
 
     #[test]
@@ -1093,7 +1093,7 @@ mod tests {
         assert!(!decision
             .effects
             .iter()
-            .any(|effect| matches!(effect, Effect::Tell(Told::Seen(_)))));
+            .any(|effect| matches!(effect, Effect::Tell(ClientMessage::Seen(_)))));
         assert_eq!(app.registry.get(&session).unwrap().turn, Turn::Attention);
         assert!(app.answered.settled(&app.registry).is_empty());
     }
@@ -1626,7 +1626,7 @@ mod tests {
             registry.report(Agent::new(
                 session.clone(),
                 "claude",
-                Meta::default(),
+                LabelFacts::default(),
                 Origin::default(),
             ));
         }

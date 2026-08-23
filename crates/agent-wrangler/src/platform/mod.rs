@@ -396,7 +396,7 @@ mod tests {
         assert!(mine.started.is_some(), "this process can be dated");
         assert!(running(&mine));
         assert!(!running(&Process {
-            started: Some(agent_wrangler_core::agent::Started(1)),
+            started: Some(agent_wrangler_core::agent::ProcessStartStamp(1)),
             ..mine
         }));
     }

@@ -112,14 +112,18 @@ fn register_with_daemon(name: &SocketName) -> Result<(), FatalError> {
 /// once. To drop the header, this program must decide which record is which, and
 /// that decision belongs to the story that draws the sidebar.
 ///
-/// `flatten` maps every newline in the payload to `BREAK`, so one line off the
-/// socket is exactly one payload. `unflatten` restores what the daemon built. The
-/// number of lines then equals the number of records, because every captured
-/// value loses its control characters where it is built. `Agent::new` cleans the
-/// text fields at `agent.rs:245`. `Origin::from` cleans the origin values at
+/// `escape_record_breaks` maps every newline in the payload to
+/// `ESCAPED_RECORD_BREAK`, so one line off the socket is exactly one payload.
+/// `restore_record_breaks` gives back what the daemon built. The number of lines
+/// then equals the number of records, because every captured value loses its
+/// control characters where it is built. `Agent::new` cleans the text fields at
+/// `agent.rs:245`. `Origin::from_lookup` cleans the origin values at
 /// `origin.rs:70`.
 fn split_into_records(line: &str) -> Vec<String> {
-    agent::unflatten(line).lines().map(str::to_string).collect()
+    agent::restore_record_breaks(line)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 /// Writes out every record of one payload.
@@ -285,7 +289,7 @@ mod tests {
 
     /// One payload, framed as the daemon frames it.
     fn payload(records: &str) -> String {
-        agent::flatten(&agent::state(records))
+        agent::escape_record_breaks(&agent::build_state_message(records))
     }
 
     /// The header that every payload leads with.
@@ -406,7 +410,7 @@ mod tests {
     fn test_heartbeat() -> HeartbeatSettings {
         HeartbeatSettings {
             interval: Duration::from_secs(300),
-            line: agent_wrangler_core::told::Told::Beat.encode(),
+            line: agent_wrangler_core::client_message::ClientMessage::Beat.encode(),
         }
     }
 

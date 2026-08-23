@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::agent::Meta;
+use crate::agent::LabelFacts;
 
 /// How much of a transcript's end is read. A fixed amount keeps the cost of a
 /// hook the same, however long the session runs.
@@ -59,9 +59,9 @@ fn text<'a>(record: &'a Value, key: &str) -> Option<&'a str> {
 /// teammate carries the same field, and the reader passes over it. That record
 /// says what the name became, and the conversation records after it already say
 /// so.
-pub fn claude(transcript: &str) -> Meta {
+pub fn claude(transcript: &str) -> LabelFacts {
     let Some((bytes, cut)) = tail(Path::new(transcript)) else {
-        return Meta::default();
+        return LabelFacts::default();
     };
     let mut lines = bytes.split(|byte| *byte == b'\n');
     // The first line of a window that starts mid-file is half a record.
@@ -99,7 +99,7 @@ pub fn claude(transcript: &str) -> Meta {
         }
     }
 
-    Meta {
+    LabelFacts {
         dir: String::new(),
         name,
         color,
@@ -127,17 +127,17 @@ fn workspace(home: &Path, session: &str) -> PathBuf {
 ///
 /// Copilot has no teammates of its own, so a session read here is always a
 /// session of its own.
-pub fn copilot(home: &Path, session: &str) -> Meta {
+pub fn copilot(home: &Path, session: &str) -> LabelFacts {
     let Ok(text) = std::fs::read_to_string(workspace(home, session)) else {
-        return Meta::default();
+        return LabelFacts::default();
     };
     let title = match field(&text, "name") {
         title if title.is_empty() => field(&text, "summary"),
         title => title,
     };
-    Meta {
+    LabelFacts {
         title,
-        ..Meta::default()
+        ..LabelFacts::default()
     }
 }
 
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn a_transcript_that_is_not_there_says_nothing() {
-        assert_eq!(claude("/no/such/transcript.jsonl"), Meta::default());
+        assert_eq!(claude("/no/such/transcript.jsonl"), LabelFacts::default());
     }
 
     #[test]
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn a_workspace_that_is_not_there_says_nothing() {
         let scratch = Scratch::new("copilot-missing");
-        assert_eq!(copilot(scratch.path(), "abc"), Meta::default());
+        assert_eq!(copilot(scratch.path(), "abc"), LabelFacts::default());
     }
 
     #[test]

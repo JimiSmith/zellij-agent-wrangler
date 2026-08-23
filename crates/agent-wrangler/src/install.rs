@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
-use agent_wrangler_core::command::words;
+use agent_wrangler_core::command::split_command_line;
 
 /// Which of each agent's events call which action. The manifest is embedded, so
 /// the installed binary carries it.
@@ -97,7 +97,7 @@ fn is_client(program: &str) -> bool {
 /// claim a command that only mentions a similar name, or that runs a similarly
 /// named program from somewhere else.
 fn is_ours(command: &str, agent: &str) -> bool {
-    let words = words(command);
+    let words = split_command_line(command);
     let [exe, hook, named, ..] = words.as_slice() else {
         return false;
     };

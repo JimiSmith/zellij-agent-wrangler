@@ -63,9 +63,9 @@ Required:
   `ConnectionEnd`.
 - A constant says what it measures. `CONNECT_ATTEMPTS`, `TEST_TIMEOUT`.
 
-Riddle names remain in the shared crates. `Told`, `What`, `Seen`, `Sink` and
-`Note` are the known ones. Remove them when you refactor the code
-they live in. Never add another.
+Riddle names remain in the shared crates. `What`, `Sink` and `Note` are the
+known ones. Remove them when you refactor the code they live in. Never add
+another.
 
 ## Rule two: every system
 
@@ -206,7 +206,7 @@ at the top of the pane.
 
 `FORMAT` in `agent-wrangler-core` is that number. Bump it when the records
 change shape, and when the daemon starts to need a message that an older client
-does not send. `Told::Beat` is the second kind: the records did not move, and a
+does not send. `ClientMessage::Beat` is the second kind: the records did not move, and a
 client too old to beat is dropped after a minute and a half with nothing on the
 pane to explain it. A rename is neither kind. Never write the number in a test.
 Read the constant, or the next bump breaks tests that the change did not

@@ -86,7 +86,7 @@ pub fn save(dir: &Path, sessions: &[(String, Source)], clients: &[Client]) {
                 notify: client
                     .notify
                     .as_ref()
-                    .map(Notifier::words)
+                    .map(Notifier::program_and_arguments)
                     .unwrap_or_default(),
             })
             .collect(),

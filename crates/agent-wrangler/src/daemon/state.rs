@@ -8,11 +8,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use agent_wrangler_core::agent::{self, Agent, Meta, Process, SessionId, Turn};
+use agent_wrangler_core::agent::{self, Agent, LabelFacts, Process, SessionId, Turn};
 use agent_wrangler_core::label::{label, Label};
 use agent_wrangler_core::notify::Notifier;
 use agent_wrangler_core::origin::Origin;
-use agent_wrangler_core::payload::dir;
+use agent_wrangler_core::payload::directory_name;
 use agent_wrangler_core::registry::Registry;
 use agent_wrangler_core::titles;
 
@@ -36,7 +36,7 @@ pub struct Source {
 /// The reading, the clock and the process table, behind one seam.
 pub trait World {
     /// What an agent's own files say this session is called.
-    fn meta(&self, agent: &str, transcript: &str, session: &str) -> Meta;
+    fn meta(&self, agent: &str, transcript: &str, session: &str) -> LabelFacts;
     /// When a file last changed, or `None` for one that is not there.
     fn mtime(&self, path: &str) -> Option<u64>;
     /// Whether a process still runs, and is still the intended one.
@@ -47,14 +47,14 @@ pub trait World {
 pub struct Real;
 
 impl World for Real {
-    fn meta(&self, agent: &str, transcript: &str, session: &str) -> Meta {
+    fn meta(&self, agent: &str, transcript: &str, session: &str) -> LabelFacts {
         match agent {
             "claude" => titles::claude(transcript),
             "copilot" => match crate::paths::home() {
                 Some(home) => titles::copilot(&home, session),
-                None => Meta::default(),
+                None => LabelFacts::default(),
             },
-            _ => Meta::default(),
+            _ => LabelFacts::default(),
         }
     }
 
@@ -138,12 +138,13 @@ pub struct State {
 /// open connection does not answer that question. It says that the kernel kept
 /// the connection, and says nothing about the process behind it.
 ///
-/// This is three times [`agent_wrangler_core::told::BEAT`], so two lost beats
-/// retire nobody. A client that
-/// is retired goes deaf for good, because it registers once. So this must also
-/// cover a sidebar restarting, and a daemon restarting with its clients
-/// connecting to it again. The tmux client bounds its reconnect at about two
-/// seconds and holds a test on that bound.
+/// This is three times [`HEARTBEAT_INTERVAL`], so two lost beats retire nobody.
+/// A client that is retired goes deaf for good, because it registers once. So
+/// this must also cover a sidebar restarting, and a daemon restarting with its
+/// clients connecting to it again. The tmux client bounds its reconnect at
+/// about two seconds and holds a test on that bound.
+///
+/// [`HEARTBEAT_INTERVAL`]: agent_wrangler_core::client_message::HEARTBEAT_INTERVAL
 pub const SILENCE: Duration = Duration::from_secs(90);
 
 /// What an agent's files said, read before the daemon takes the lock.
@@ -155,7 +156,7 @@ pub const SILENCE: Duration = Duration::from_secs(90);
 /// is frozen, so nothing can take over from it either.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Reading {
-    meta: Meta,
+    meta: LabelFacts,
     mtime: Option<u64>,
 }
 
@@ -225,7 +226,7 @@ pub struct Plan {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Look {
     /// Session, the transcript's new modification time, and what it now says.
-    pub moved: Vec<(SessionId, u64, Meta)>,
+    pub moved: Vec<(SessionId, u64, LabelFacts)>,
     /// Sessions whose process no longer runs.
     pub dead: Vec<SessionId>,
 }
@@ -280,8 +281,8 @@ impl State {
             return Applied::told(self.registry.end(&session));
         }
 
-        let meta = Meta {
-            dir: dir(&hook.cwd),
+        let meta = LabelFacts {
+            dir: directory_name(&hook.cwd),
             ..reading.meta
         };
         let turn = match event {
@@ -453,7 +454,7 @@ impl State {
     /// that cannot tell an empty state from an empty message cannot ignore a
     /// message that was not this one.
     pub fn payload(&self) -> String {
-        agent::state(&self.registry.encode())
+        agent::build_state_message(&self.registry.encode())
     }
 
     /// Every session held, for a report of what is there rather than for a
@@ -518,7 +519,7 @@ impl State {
             // The directory is not in the transcript. The daemon keeps it from
             // what the last hook said, because a scan never looks for it.
             let record = Agent {
-                meta: Meta {
+                meta: LabelFacts {
                     dir: held.meta.dir.clone(),
                     ..found
                 },
@@ -589,9 +590,10 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_wrangler_core::client_message::HEARTBEAT_INTERVAL;
     use std::cell::RefCell;
 
-    use agent_wrangler_core::agent::Started;
+    use agent_wrangler_core::agent::ProcessStartStamp;
 
     /// A world with no files and no processes. A test states three things
     /// outright: what a transcript says, the time it last changed, and what
@@ -601,13 +603,13 @@ mod tests {
     /// that one number went to another process.
     #[derive(Default)]
     struct Fake {
-        meta: RefCell<BTreeMap<String, Meta>>,
+        meta: RefCell<BTreeMap<String, LabelFacts>>,
         mtime: RefCell<BTreeMap<String, u64>>,
-        alive: RefCell<BTreeMap<u32, Option<Started>>>,
+        alive: RefCell<BTreeMap<u32, Option<ProcessStartStamp>>>,
     }
 
     impl Fake {
-        fn says(&self, transcript: &str, meta: Meta, mtime: u64) {
+        fn says(&self, transcript: &str, meta: LabelFacts, mtime: u64) {
             self.meta.borrow_mut().insert(transcript.to_string(), meta);
             self.mtime
                 .borrow_mut()
@@ -624,7 +626,7 @@ mod tests {
     }
 
     impl World for Fake {
-        fn meta(&self, _agent: &str, transcript: &str, _session: &str) -> Meta {
+        fn meta(&self, _agent: &str, transcript: &str, _session: &str) -> LabelFacts {
             self.meta
                 .borrow()
                 .get(transcript)
@@ -644,13 +646,13 @@ mod tests {
     /// The process that the hooks in these tests report themselves as.
     const AGENT: Process = Process {
         pid: 4242,
-        started: Some(Started(918_273)),
+        started: Some(ProcessStartStamp(918_273)),
     };
 
-    fn titled(title: &str) -> Meta {
-        Meta {
+    fn titled(title: &str) -> LabelFacts {
+        LabelFacts {
             title: title.to_string(),
-            ..Meta::default()
+            ..LabelFacts::default()
         }
     }
 
@@ -662,7 +664,7 @@ mod tests {
             cwd: "/home/u/wrangler".to_string(),
             transcript: "/t/one.jsonl".to_string(),
             recoverable: None,
-            origin: Origin::from(|name| match name {
+            origin: Origin::from_lookup(|name| match name {
                 "ZELLIJ_SESSION_NAME" => Some("proto".to_string()),
                 "ZELLIJ_PANE_ID" => Some("7".to_string()),
                 _ => None,
@@ -897,7 +899,7 @@ mod tests {
         // multiplexer is busy. One lost beat is then enough to leave that
         // sidebar with whatever it last received, for good, and with no word
         // about why.
-        assert!(SILENCE >= agent_wrangler_core::told::BEAT * 3);
+        assert!(SILENCE >= HEARTBEAT_INTERVAL * 3);
     }
 
     #[test]
@@ -937,7 +939,7 @@ mod tests {
         world.says("/t/one.jsonl", titled("the port"), 1);
         let mut state = State::default();
         state.on_hook(&hook("start"), &world);
-        world.says("/t/one.jsonl", Meta::default(), 2);
+        world.says("/t/one.jsonl", LabelFacts::default(), 2);
         let applied = state.on_hook(&hook("needsAttention"), &world);
         assert_eq!(
             applied.call().map(|call| call.label.as_str()),
@@ -996,7 +998,7 @@ mod tests {
         // The whole point of the watch: a session takes a title, or gets a
         // color, with no hook at all.
         let world = Fake::default();
-        world.says("/t/one.jsonl", Meta::default(), 1);
+        world.says("/t/one.jsonl", LabelFacts::default(), 1);
         world.running(AGENT);
         let mut state = State::default();
         state.on_hook(&hook("start"), &world);
@@ -1018,7 +1020,7 @@ mod tests {
     #[test]
     fn watching_keeps_the_directory_no_transcript_mentions() {
         let world = Fake::default();
-        world.says("/t/one.jsonl", Meta::default(), 1);
+        world.says("/t/one.jsonl", LabelFacts::default(), 1);
         world.running(AGENT);
         let mut state = State::default();
         state.on_hook(&hook("start"), &world);
@@ -1058,7 +1060,7 @@ mod tests {
 
         world.running(Process {
             pid: AGENT.pid,
-            started: Some(Started(999_999)),
+            started: Some(ProcessStartStamp(999_999)),
         });
         assert!(state.poll(&world));
         assert!(state.registry().is_empty());

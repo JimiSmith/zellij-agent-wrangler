@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use agent_wrangler_core::agent::AGENTS_MESSAGE;
 use agent_wrangler_sidebar::{
-    Application, Effect, Input, Options, PaneId, Permission, Told, UserAction,
+    Application, ClientMessage, Effect, Input, Options, PaneId, Permission, UserAction,
 };
 use agent_wrangler_ui::{ansi, Rect};
 use zellij_agent_wrangler::adapter;
@@ -58,7 +58,7 @@ struct Plugin {
     /// A line that is already here is not added again, so a daemon that stopped
     /// sending leaves a list that is as long as the number of sessions and no
     /// longer.
-    owed: Vec<Told>,
+    owed: Vec<ClientMessage>,
 }
 
 register_plugin!(Plugin);
@@ -115,7 +115,7 @@ impl Plugin {
         let Some(id) = self.pipe_id.clone() else {
             return;
         };
-        for told in self.owed.drain(..).chain([Told::Beat]) {
+        for told in self.owed.drain(..).chain([ClientMessage::Beat]) {
             cli_pipe_output(&id, &format!("{}\n", told.encode()));
         }
     }

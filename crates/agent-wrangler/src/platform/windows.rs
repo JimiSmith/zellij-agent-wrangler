@@ -18,7 +18,7 @@ use windows_sys::Win32::System::Threading::{
     DETACHED_PROCESS, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-use agent_wrangler_core::agent::Started;
+use agent_wrangler_core::agent::ProcessStartStamp;
 
 use super::Row;
 
@@ -114,7 +114,7 @@ fn still_running(exit_code: u32) -> bool {
 /// across two words. This folds the two words back into the one number that
 /// they stand for, and keeps those units. Nothing reads the figure. The only
 /// use of it is a comparison with another reading of the same process.
-pub fn started(pid: u32) -> Option<Started> {
+pub fn started(pid: u32) -> Option<ProcessStartStamp> {
     if pid == 0 {
         return None;
     }
@@ -142,7 +142,7 @@ pub fn started(pid: u32) -> Option<Started> {
 
     match read == FALSE {
         true => None,
-        false => Some(Started(moment(creation))),
+        false => Some(ProcessStartStamp(moment(creation))),
     }
 }
 

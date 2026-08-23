@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::agent::{Agent, Record, SessionId, Turn, RECORD};
+use crate::agent::{Agent, SessionId, Turn, RECORD};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Registry {
@@ -117,76 +117,13 @@ impl Registry {
             .collect::<Vec<String>>()
             .join(&RECORD.to_string())
     }
-
-    /// Become exactly the run of records that `encode` wrote, and drop every
-    /// session that the run does not mention. If this changed anything, the
-    /// result is `true`.
-    ///
-    /// This is for a whole statement of what there is. [`absorb`] is for news to
-    /// add to what the registry already holds. A session that the sender no
-    /// longer has is a session that ended. To keep it leaves a row that nothing
-    /// ever takes away.
-    ///
-    /// [`absorb`]: Registry::absorb
-    pub fn adopt(&mut self, text: &str) -> bool {
-        let mut fresh = Registry::default();
-        for line in text.split(RECORD) {
-            if let Record::Known(agent) = Agent::decode(line) {
-                fresh.sessions.insert(agent.session.clone(), agent);
-            }
-        }
-        let changed = fresh != *self;
-        *self = fresh;
-        changed
-    }
-
-    /// Take in every record of a run that `encode` wrote, turns included. Keep
-    /// what is already known about a session that the run does not mention. If
-    /// this changed anything, the result is `true`.
-    pub fn absorb(&mut self, text: &str) -> bool {
-        let mut changed = false;
-        for line in text.split(RECORD) {
-            if let Record::Known(agent) = Agent::decode(line) {
-                changed |= self.merge(agent);
-            }
-        }
-        changed
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::tests::{agent, at_pane, colored, meta, nowhere, reporting, session};
-    use crate::agent::FORMAT;
-
-    #[test]
-    fn a_registry_survives_the_round_trip() {
-        let mut registry = Registry::default();
-        registry.start(agent("one", 3));
-        registry.start(nowhere("two"));
-        let mut copy = Registry::default();
-        assert!(copy.absorb(&registry.encode()));
-        assert_eq!(copy, registry);
-    }
-
-    #[test]
-    fn an_empty_registry_absorbs_to_nothing() {
-        let mut registry = Registry::default();
-        assert!(!registry.absorb(&Registry::default().encode()));
-        assert_eq!(registry, Registry::default());
-    }
-
-    #[test]
-    fn absorbing_keeps_a_session_the_text_does_not_mention() {
-        let mut registry = Registry::default();
-        registry.start(agent("mine", 1));
-        let mut other = Registry::default();
-        other.start(agent("theirs", 2));
-        registry.absorb(&other.encode());
-        assert!(registry.get(&session("mine")).is_some());
-        assert!(registry.get(&session("theirs")).is_some());
-    }
+    use crate::agent::tests::{agent, at_pane, colored, meta, reporting, session};
+    use crate::agent::{Record, FORMAT};
 
     #[test]
     fn re_filing_the_same_record_changes_nothing() {
@@ -204,9 +141,6 @@ mod tests {
         let record = agent("one", 3).encode();
         let older = record.replacen(&FORMAT.to_string(), "0", 1);
         assert_eq!(Agent::decode(&older), Record::Foreign(0));
-        // The registry takes nothing from a format that it does not know.
-        let mut registry = Registry::default();
-        assert!(!registry.absorb(&older));
     }
 
     #[test]
@@ -272,16 +206,6 @@ mod tests {
             registry.get(&session("one")).unwrap().meta.title,
             "the port"
         );
-    }
-
-    #[test]
-    fn absorbing_takes_the_turn_it_is_told() {
-        let mut mine = Registry::default();
-        mine.start(agent("one", 3));
-        let mut theirs = Registry::default();
-        theirs.report(reporting("one", 3, Turn::Attention, 5));
-        assert!(mine.absorb(&theirs.encode()));
-        assert_eq!(mine.get(&session("one")).unwrap().turn, Turn::Attention);
     }
 
     #[test]

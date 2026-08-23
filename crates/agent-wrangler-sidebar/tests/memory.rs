@@ -12,7 +12,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use agent_wrangler_core::agent::{self, Agent, Meta, Record, SessionId, Turn};
+use agent_wrangler_core::agent::{self, Agent, LabelFacts, Record, SessionId, Turn};
 use agent_wrangler_core::origin::Origin;
 use agent_wrangler_core::registry::Registry;
 use agent_wrangler_sidebar::{
@@ -125,7 +125,7 @@ fn payload(step: usize) -> String {
     for n in 0..AGENTS {
         // A real session id is a uuid, so the id is that long here too.
         let session = SessionId::new(&format!("ba3d783b-cba5-4059-8053-a13c0000000{n}")).unwrap();
-        let origin = Origin::from(|name| match name {
+        let origin = Origin::from_lookup(|name| match name {
             "ZELLIJ" => Some("0".to_string()),
             "ZELLIJ_SESSION_NAME" => Some(SESSION.to_string()),
             "ZELLIJ_PANE_ID" => Some(pane_id(step % TABS, step % PANES_PER_TAB)),
@@ -134,7 +134,7 @@ fn payload(step: usize) -> String {
         let mut record = Agent::new(
             session,
             "claude",
-            Meta {
+            LabelFacts {
                 dir: format!("repo-{n}"),
                 name: String::new(),
                 color: "cyan".to_string(),
@@ -151,13 +151,13 @@ fn payload(step: usize) -> String {
         record.raised = 1_700_000_000_000 + step as u64;
         registry.report(record);
     }
-    agent::state(&registry.encode())
+    agent::build_state_message(&registry.encode())
 }
 
 /// Reads a state message into the registry and the pane placement of a
 /// snapshot. It keeps only the records that this session draws.
 fn snapshot(payload: &str) -> AgentSnapshot {
-    let (_, records) = agent::read_state(payload).expect("a state message");
+    let (_, records) = agent::read_state_message(payload).expect("a state message");
     let mut registry = Registry::default();
     let mut panes = BTreeMap::new();
     for line in records.split('\n') {

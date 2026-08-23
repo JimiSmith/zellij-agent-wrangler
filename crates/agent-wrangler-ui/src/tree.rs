@@ -256,7 +256,7 @@ pub fn build_tree(tabs: &[Tab], options: &View) -> Vec<Row> {
 mod tests {
     use super::*;
 
-    use agent_wrangler_core::agent::{Meta, SessionId};
+    use agent_wrangler_core::agent::{LabelFacts, SessionId};
     use agent_wrangler_core::label::Label;
     use agent_wrangler_core::origin::Origin;
 
@@ -278,9 +278,9 @@ mod tests {
                 Agent::new(
                     SessionId::new(label).unwrap(),
                     kind,
-                    Meta {
+                    LabelFacts {
                         dir: label.to_string(),
-                        ..Meta::default()
+                        ..LabelFacts::default()
                     },
                     Origin::default(),
                 )

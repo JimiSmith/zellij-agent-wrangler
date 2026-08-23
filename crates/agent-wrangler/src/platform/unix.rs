@@ -11,7 +11,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use agent_wrangler_core::agent::Started;
+use agent_wrangler_core::agent::ProcessStartStamp;
 
 use super::Row;
 
@@ -64,9 +64,9 @@ pub fn pid_alive(pid: u32) -> bool {
 /// shows the figure to a user. The only use of the figure is a comparison with
 /// another reading of the same process.
 #[cfg(target_os = "linux")]
-pub fn started(pid: u32) -> Option<Started> {
+pub fn started(pid: u32) -> Option<ProcessStartStamp> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    starttime(&stat).map(Started)
+    starttime(&stat).map(ProcessStartStamp)
 }
 
 /// The start time out of a `/proc/<pid>/stat` line: the twenty-second field.
@@ -93,7 +93,7 @@ fn starttime(stat: &str) -> Option<u64> {
 /// the start moment as a `timeval`. This folds the two halves into microseconds,
 /// so that one number stands for the whole moment.
 #[cfg(target_os = "macos")]
-pub fn started(pid: u32) -> Option<Started> {
+pub fn started(pid: u32) -> Option<ProcessStartStamp> {
     // SAFETY: `proc_bsdinfo` is a plain C record of integers and arrays, so an
     // all-zero record is a valid value of it. The call below overwrites the
     // whole record, or reports that it wrote nothing.
@@ -115,7 +115,7 @@ pub fn started(pid: u32) -> Option<Started> {
     if read != size {
         return None;
     }
-    Some(Started(
+    Some(ProcessStartStamp(
         info.pbi_start_tvsec
             .saturating_mul(1_000_000)
             .saturating_add(info.pbi_start_tvusec),

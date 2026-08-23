@@ -22,10 +22,10 @@ pub(crate) const RECORD: char = '\n';
 ///
 /// This number also covers the messages that a client sends back. A record
 /// shape that did not change can still meet a daemon that expects something a
-/// client of this age does not send. `Told::Beat` is that case: a daemon keeps
-/// a client for as long as it speaks, so a client too old to beat is dropped
-/// after a minute and a half, and the pane says nothing about why. A reader that
-/// meets a number it does not know says so instead.
+/// client of this age does not send. `ClientMessage::Beat` is that case: a
+/// daemon keeps a client for as long as it speaks, so a client too old to beat
+/// is dropped after a minute and a half, and the pane says nothing about why. A
+/// reader that meets a number it does not know says so instead.
 pub const FORMAT: u32 = 5;
 
 /// The character that stands in for a record break on a transport that frames
@@ -35,28 +35,29 @@ pub const FORMAT: u32 = 5;
 /// every payload holds newlines, because [`RECORD`] is one. The ASCII record
 /// separator carries that break instead. [`Origin`] uses the unit separator for
 /// the fields inside one record, so the two agree rather than compete.
-pub const BREAK: char = '\u{1e}';
+pub const ESCAPED_RECORD_BREAK: char = '\u{1e}';
 
-/// One payload as one line, with every record break carried by [`BREAK`].
-pub fn flatten(payload: &str) -> String {
+/// One payload as one line, with every record break carried by
+/// [`ESCAPED_RECORD_BREAK`].
+pub fn escape_record_breaks(payload: &str) -> String {
     payload
         .chars()
-        .map(|c| if c == RECORD { BREAK } else { c })
+        .map(|c| if c == RECORD { ESCAPED_RECORD_BREAK } else { c })
         .collect()
 }
 
-/// The reverse of [`flatten`], for a reader that took one line off a
-/// line-framed transport.
+/// The payload that [`escape_record_breaks`] wrote, for a reader that took one
+/// line off a line-framed transport.
 ///
-/// The line arrives with the newline that framed it still on the end. Zellij
-/// keeps that newline in the payload, so this drops one of them before it
-/// restores the record breaks. Without that, every payload ends in an empty
-/// record.
-pub fn unflatten(line: &str) -> String {
+/// This is not the exact reverse. The line arrives with the newline that framed
+/// it still on the end. Zellij keeps that newline in the payload, so this drops
+/// one of them before it restores the record breaks. Without that, every payload
+/// ends in an empty record.
+pub fn restore_record_breaks(line: &str) -> String {
     line.strip_suffix(RECORD)
         .unwrap_or(line)
         .chars()
-        .map(|c| if c == BREAK { RECORD } else { c })
+        .map(|c| if c == ESCAPED_RECORD_BREAK { RECORD } else { c })
         .collect()
 }
 
@@ -78,13 +79,13 @@ const HEADER: &str = "wrangler";
 /// say. Without the header, an empty state and an empty message are the same
 /// bytes. A truncated message, or a message from something else, then reads as
 /// an instruction to forget every agent.
-pub fn state(records: &str) -> String {
+pub fn build_state_message(records: &str) -> String {
     format!("{HEADER} {FORMAT}{RECORD}{records}")
 }
 
 /// The format and the records of a state message, or `None` for anything that
 /// is not one.
-pub fn read_state(payload: &str) -> Option<(u32, &str)> {
+pub fn read_state_message(payload: &str) -> Option<(u32, &str)> {
     let (head, records) = payload.split_once(RECORD)?;
     let (name, format) = head.split_once(' ')?;
     match name == HEADER {
@@ -165,7 +166,7 @@ impl Turn {
 /// code that draws a session can therefore spell the label differently, and the
 /// agents do not report themselves again.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Meta {
+pub struct LabelFacts {
     /// The name of the directory that the agent works in.
     pub dir: String,
     /// The agent's own name when it is a teammate of another session. The name
@@ -191,7 +192,7 @@ pub struct Meta {
 /// that it takes to tell one process from another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "native", derive(serde::Serialize, serde::Deserialize))]
-pub struct Started(pub u64);
+pub struct ProcessStartStamp(pub u64);
 
 /// The process that an agent runs as: which process, and when it began.
 ///
@@ -207,7 +208,7 @@ pub struct Started(pub u64);
 #[cfg_attr(feature = "native", derive(serde::Serialize, serde::Deserialize))]
 pub struct Process {
     pub pid: u32,
-    pub started: Option<Started>,
+    pub started: Option<ProcessStartStamp>,
 }
 
 /// What a line turned out to be.
@@ -233,7 +234,7 @@ pub enum Record {
 pub struct Agent {
     pub session: SessionId,
     pub agent: String,
-    pub meta: Meta,
+    pub meta: LabelFacts,
     /// Where the agent's own hook was invoked, as its environment described it.
     pub origin: Origin,
     /// The agent's own process, as its hook found it by a climb up its ancestry.
@@ -256,11 +257,11 @@ fn field(text: &str) -> String {
 }
 
 impl Agent {
-    pub fn new(session: SessionId, agent: &str, meta: Meta, origin: Origin) -> Self {
+    pub fn new(session: SessionId, agent: &str, meta: LabelFacts, origin: Origin) -> Self {
         Agent {
             session,
             agent: field(agent),
-            meta: Meta {
+            meta: LabelFacts {
                 dir: field(&meta.dir),
                 name: field(&meta.name),
                 color: field(&meta.color),
@@ -345,7 +346,7 @@ impl Agent {
                 pid: pid.parse().ok()?,
                 started: match started.is_empty() {
                     true => None,
-                    false => Some(Started(started.parse().ok()?)),
+                    false => Some(ProcessStartStamp(started.parse().ok()?)),
                 },
             }),
         };
@@ -356,7 +357,7 @@ impl Agent {
             ..Agent::new(
                 session,
                 agent,
-                Meta {
+                LabelFacts {
                     dir,
                     name,
                     color,
@@ -377,8 +378,8 @@ pub(crate) mod tests {
         SessionId::new(text).unwrap()
     }
 
-    pub(crate) fn meta(dir: &str, name: &str, title: &str) -> Meta {
-        Meta {
+    pub(crate) fn meta(dir: &str, name: &str, title: &str) -> LabelFacts {
+        LabelFacts {
             dir: dir.to_string(),
             name: name.to_string(),
             color: String::new(),
@@ -389,7 +390,7 @@ pub(crate) mod tests {
     /// An origin that describes a zellij pane. A hook invoked in such a pane
     /// captures this origin.
     pub(crate) fn at_pane(pane: u32) -> Origin {
-        Origin::from(|name| match name {
+        Origin::from_lookup(|name| match name {
             "ZELLIJ" => Some("0".to_string()),
             "ZELLIJ_SESSION_NAME" => Some("wrangler-proto".to_string()),
             "ZELLIJ_PANE_ID" => Some(pane.to_string()),
@@ -419,7 +420,7 @@ pub(crate) mod tests {
         Agent::new(
             session(id),
             "claude",
-            Meta {
+            LabelFacts {
                 color: color.to_string(),
                 ..meta("wrangler", "", "")
             },
@@ -460,7 +461,7 @@ pub(crate) mod tests {
         let with = Agent {
             process: Some(Process {
                 pid: 4242,
-                started: Some(Started(918_273)),
+                started: Some(ProcessStartStamp(918_273)),
             }),
             ..agent("one", 3)
         };
@@ -555,17 +556,20 @@ pub(crate) mod tests {
     #[test]
     fn a_state_message_survives_the_round_trip() {
         let records = format!("{}\n{}", agent("one", 3).encode(), agent("two", 4).encode());
-        let message = state(&records);
-        assert_eq!(read_state(&message), Some((FORMAT, records.as_str())));
+        let message = build_state_message(&records);
+        assert_eq!(
+            read_state_message(&message),
+            Some((FORMAT, records.as_str()))
+        );
     }
 
     #[test]
     fn having_no_agents_is_something_that_can_be_said() {
         // This is the difference that the header exists for. A state with
         // nothing in it is a message. Nothing at all is not a message.
-        let empty = state("");
-        assert_eq!(read_state(&empty), Some((FORMAT, "")));
-        assert_eq!(read_state(""), None);
+        let empty = build_state_message("");
+        assert_eq!(read_state_message(&empty), Some((FORMAT, "")));
+        assert_eq!(read_state_message(""), None);
     }
 
     #[test]
@@ -577,14 +581,14 @@ pub(crate) mod tests {
             "3\tone\tclaude",
             "somethingelse 3\n",
         ] {
-            assert_eq!(read_state(text), None, "{text}");
+            assert_eq!(read_state_message(text), None, "{text}");
         }
     }
 
     #[test]
     fn a_state_message_says_which_format_it_is_in() {
         let older = "wrangler 1\n3\tone\tclaude";
-        assert_eq!(read_state(older), Some((1, "3\tone\tclaude")));
+        assert_eq!(read_state_message(older), Some((1, "3\tone\tclaude")));
     }
 
     #[test]
@@ -597,24 +601,24 @@ pub(crate) mod tests {
     fn a_run_of_records_makes_one_line_and_comes_back_whole() {
         // Every payload holds record breaks, so this is the ordinary case and
         // not the awkward one.
-        let payload = state("3\tone\tclaude\n3\ttwo\tcopilot");
-        let line = flatten(&payload);
+        let payload = build_state_message("3\tone\tclaude\n3\ttwo\tcopilot");
+        let line = escape_record_breaks(&payload);
         assert!(!line.contains(RECORD), "one line, whatever it carries");
-        assert_eq!(unflatten(&line), payload);
+        assert_eq!(restore_record_breaks(&line), payload);
     }
 
     #[test]
     fn the_newline_that_framed_a_line_is_not_part_of_the_payload() {
         // A line-framed transport keeps the newline that ended the message. A
         // reader that leaves it there reads one empty record at the end.
-        let payload = state("3\tone\tclaude");
-        let framed = format!("{}\n", flatten(&payload));
-        assert_eq!(unflatten(&framed), payload);
+        let payload = build_state_message("3\tone\tclaude");
+        let framed = format!("{}\n", escape_record_breaks(&payload));
+        assert_eq!(restore_record_breaks(&framed), payload);
     }
 
     #[test]
     fn a_payload_with_no_record_break_is_carried_unchanged() {
-        assert_eq!(flatten("wrangler 4"), "wrangler 4");
-        assert_eq!(unflatten("wrangler 4"), "wrangler 4");
+        assert_eq!(escape_record_breaks("wrangler 4"), "wrangler 4");
+        assert_eq!(restore_record_breaks("wrangler 4"), "wrangler 4");
     }
 }

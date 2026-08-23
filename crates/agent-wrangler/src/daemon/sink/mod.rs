@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufReader, Read};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
-use agent_wrangler_core::agent::flatten;
+use agent_wrangler_core::agent::escape_record_breaks;
 
 use crate::proto::{read_message, Sink, Told};
 
@@ -86,7 +86,7 @@ impl Transports {
             };
             self.zellij.insert(session.to_string(), held);
         }
-        self.zellij[session].fill(flatten(payload));
+        self.zellij[session].fill(escape_record_breaks(payload));
     }
 
     /// Queues one payload for one socket name, and binds the name if it is not
@@ -111,7 +111,7 @@ impl Transports {
             };
             self.sockets.insert(name.to_string(), bound);
         }
-        self.sockets[name].fill(flatten(payload));
+        self.sockets[name].fill(escape_record_breaks(payload));
     }
 
     /// Records one delivery that did not land, and that this thread already
@@ -268,7 +268,7 @@ mod tests {
         // The transport frames by the line, and every payload holds newlines
         // because the record separator is one. A peer takes one state per read
         // only because the breaks travel as something else.
-        use agent_wrangler_core::agent::BREAK;
+        use agent_wrangler_core::agent::ESCAPED_RECORD_BREAK;
         use interprocess::local_socket::prelude::*;
         use interprocess::local_socket::{GenericNamespaced, Stream};
         use std::io::BufRead;
@@ -284,7 +284,10 @@ mod tests {
         let mut line = String::new();
         BufReader::new(&peer).read_line(&mut line).expect("a state");
         assert!(line.ends_with('\n'), "one line: {line:?}");
-        assert_eq!(line.trim_end(), format!("first{BREAK}second"));
+        assert_eq!(
+            line.trim_end(),
+            format!("first{ESCAPED_RECORD_BREAK}second")
+        );
         transports.retain(&BTreeSet::new());
     }
 

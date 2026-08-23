@@ -41,7 +41,7 @@ impl Payload {
 
 /// The name of the directory that an agent works in. The name is empty for a
 /// path with no final component: the root, or an empty path.
-pub fn dir(cwd: &str) -> String {
+pub fn directory_name(cwd: &str) -> String {
     std::path::Path::new(cwd)
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
@@ -109,13 +109,13 @@ mod tests {
 
     #[test]
     fn the_directory_is_its_own_name() {
-        assert_eq!(dir("/home/u/repo"), "repo");
-        assert_eq!(dir("/home/u/repo/"), "repo");
+        assert_eq!(directory_name("/home/u/repo"), "repo");
+        assert_eq!(directory_name("/home/u/repo/"), "repo");
     }
 
     #[test]
     fn a_path_with_no_name_yields_none() {
-        assert_eq!(dir("/"), "");
-        assert_eq!(dir(""), "");
+        assert_eq!(directory_name("/"), "");
+        assert_eq!(directory_name(""), "");
     }
 }

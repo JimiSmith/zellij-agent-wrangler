@@ -11,7 +11,7 @@
 /// text inside it is empty, so `''` is one empty argument rather than none. The
 /// function recognizes no escape character. An unclosed quote runs to the end of
 /// the line.
-pub fn words(line: &str) -> Vec<String> {
+pub fn split_command_line(line: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut started = false;
@@ -48,25 +48,28 @@ mod tests {
 
     #[test]
     fn a_plain_line_splits_on_whitespace() {
-        assert_eq!(words("notify-send  -u low"), ["notify-send", "-u", "low"]);
-        assert!(words("   ").is_empty());
+        assert_eq!(
+            split_command_line("notify-send  -u low"),
+            ["notify-send", "-u", "low"]
+        );
+        assert!(split_command_line("   ").is_empty());
     }
 
     #[test]
     fn a_quoted_run_is_one_word_however_much_space_it_holds() {
         assert_eq!(
-            words(r#""/home/a b/wrangler" hook 'a  b'"#),
+            split_command_line(r#""/home/a b/wrangler" hook 'a  b'"#),
             ["/home/a b/wrangler", "hook", "a  b"]
         );
     }
 
     #[test]
     fn a_quote_opens_a_word_even_when_it_holds_nothing() {
-        assert_eq!(words("cmd '' x"), ["cmd", "", "x"]);
+        assert_eq!(split_command_line("cmd '' x"), ["cmd", "", "x"]);
     }
 
     #[test]
     fn an_unclosed_quote_runs_to_the_end_of_the_line() {
-        assert_eq!(words("cmd \"a b"), ["cmd", "a b"]);
+        assert_eq!(split_command_line("cmd \"a b"), ["cmd", "a b"]);
     }
 }
