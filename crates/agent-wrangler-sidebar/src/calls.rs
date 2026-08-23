@@ -11,14 +11,17 @@ use agent_wrangler_core::registry::Registry;
 /// that call. One entry per session limits the size to the number of sessions
 /// in the registry, not to the number of calls.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Answered(BTreeMap<SessionId, u64>);
+pub struct AnsweredCalls(BTreeMap<SessionId, u64>);
 
-impl Answered {
-    pub fn answer(&mut self, agent: &Agent) {
+impl AnsweredCalls {
+    /// Remember that the user reached this session while it called.
+    pub fn record_answer(&mut self, agent: &Agent) {
         self.0.insert(agent.session.clone(), agent.raised);
     }
 
-    pub fn settled(&self, registry: &Registry) -> Vec<SessionId> {
+    /// The sessions that call now, and whose current call the user already
+    /// answered. The sidebar draws no attention for these.
+    pub fn already_answered_sessions(&self, registry: &Registry) -> Vec<SessionId> {
         registry
             .calling()
             .into_iter()
@@ -27,7 +30,8 @@ impl Answered {
             .collect()
     }
 
-    pub fn prune(&mut self, registry: &Registry) {
+    /// Forget every session that the registry no longer holds.
+    pub fn drop_gone_sessions(&mut self, registry: &Registry) {
         self.0.retain(|session, _| registry.get(session).is_some());
     }
 }
@@ -52,59 +56,59 @@ mod tests {
 
     #[test]
     fn the_exact_answered_call_is_suppressed() {
-        let mut answered = Answered::default();
+        let mut answered = AnsweredCalls::default();
         let agent = calling("one", 5);
-        answered.answer(&agent);
+        answered.record_answer(&agent);
         let mut registry = Registry::default();
         registry.report(agent);
         assert_eq!(
-            answered.settled(&registry),
+            answered.already_answered_sessions(&registry),
             [SessionId::new("one").unwrap()]
         );
     }
 
     #[test]
     fn a_later_call_from_the_same_session_is_not_suppressed() {
-        let mut answered = Answered::default();
-        answered.answer(&calling("one", 5));
+        let mut answered = AnsweredCalls::default();
+        answered.record_answer(&calling("one", 5));
         let mut registry = Registry::default();
         registry.report(calling("one", 6));
-        assert!(answered.settled(&registry).is_empty());
+        assert!(answered.already_answered_sessions(&registry).is_empty());
     }
 
     #[test]
     fn a_session_that_keeps_calling_is_remembered_once() {
-        let mut answered = Answered::default();
+        let mut answered = AnsweredCalls::default();
         let mut registry = Registry::default();
         let mut held = Vec::new();
         for raised in 0..1_000 {
             let agent = calling("one", raised);
-            answered.answer(&agent);
+            answered.record_answer(&agent);
             registry.report(agent);
-            answered.prune(&registry);
+            answered.drop_gone_sessions(&registry);
             held.push(answered.0.len());
         }
         assert_eq!(held.iter().max(), Some(&1));
         assert_eq!(
-            answered.settled(&registry),
+            answered.already_answered_sessions(&registry),
             [SessionId::new("one").unwrap()]
         );
 
         registry.report(calling("one", 1_000));
-        assert!(answered.settled(&registry).is_empty());
+        assert!(answered.already_answered_sessions(&registry).is_empty());
     }
 
     #[test]
     fn an_answer_to_a_session_that_ended_is_forgotten() {
-        let mut answered = Answered::default();
+        let mut answered = AnsweredCalls::default();
         let agent = calling("one", 5);
-        answered.answer(&agent);
+        answered.record_answer(&agent);
         let mut registry = Registry::default();
         registry.report(agent);
-        answered.prune(&registry);
-        assert_eq!(answered.settled(&registry).len(), 1);
+        answered.drop_gone_sessions(&registry);
+        assert_eq!(answered.already_answered_sessions(&registry).len(), 1);
 
-        answered.prune(&Registry::default());
-        assert_eq!(answered, Answered::default());
+        answered.drop_gone_sessions(&Registry::default());
+        assert_eq!(answered, AnsweredCalls::default());
     }
 }

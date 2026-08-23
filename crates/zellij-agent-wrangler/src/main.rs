@@ -234,7 +234,7 @@ impl Plugin {
 
 impl ZellijPlugin for Plugin {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
-        self.application = Application::new(Options::read(&configuration), "zellij");
+        self.application = Application::new(Options::from_configuration(&configuration), "zellij");
         self.plugin_id = get_plugin_ids().plugin_id;
         request_permission(&[
             PermissionType::ReadApplicationState,

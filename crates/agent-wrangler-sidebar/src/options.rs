@@ -31,7 +31,7 @@ pub struct Options {
 }
 
 impl Options {
-    pub fn read(configuration: &BTreeMap<String, String>) -> Self {
+    pub fn from_configuration(configuration: &BTreeMap<String, String>) -> Self {
         let default = Options::default();
         let flag = |key: &str, default: bool| {
             configuration
@@ -62,7 +62,9 @@ impl Options {
         }
     }
 
-    pub fn client(&self) -> &str {
+    /// The program that the sidebar runs to reach the daemon. This is what the
+    /// layout named, or the name that the installed client carries.
+    pub fn helper_program_path(&self) -> &str {
         self.install_hooks.as_deref().unwrap_or(CLIENT)
     }
 }
@@ -72,7 +74,7 @@ mod tests {
     use super::*;
 
     fn read(values: &[(&str, &str)]) -> Options {
-        Options::read(
+        Options::from_configuration(
             &values
                 .iter()
                 .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -90,7 +92,7 @@ mod tests {
     #[test]
     fn install_hooks_also_names_the_client() {
         let options = read(&[("install_hooks", "/opt/agent-wrangler")]);
-        assert_eq!(options.client(), "/opt/agent-wrangler");
+        assert_eq!(options.helper_program_path(), "/opt/agent-wrangler");
     }
 
     #[test]

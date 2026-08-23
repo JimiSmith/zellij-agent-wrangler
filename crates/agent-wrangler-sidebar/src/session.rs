@@ -27,7 +27,7 @@ pub struct ReconciledSession {
 ///
 /// A parked pane is a place that the sidebar can send the user to. The host
 /// brings the pane back on screen as it takes the focus.
-pub fn tab_of_pane(layout: &SessionLayout, pane: &PaneId) -> Option<TabPosition> {
+pub fn tab_position_of_pane(layout: &SessionLayout, pane: &PaneId) -> Option<TabPosition> {
     layout.tabs.iter().find_map(|tab| {
         tab.content_panes
             .iter()
@@ -41,7 +41,7 @@ pub fn tab_of_pane(layout: &SessionLayout, pane: &PaneId) -> Option<TabPosition>
 /// A parked pane is never that pane. It answers for an agent that the user
 /// asked for by name, and not for a tab that the user asked to enter. Focus on
 /// a parked pane also takes the pane in front of it off the screen.
-pub fn first_pane(layout: &SessionLayout, tab: TabPosition) -> Option<PaneId> {
+pub fn first_pane_on_screen(layout: &SessionLayout, tab: TabPosition) -> Option<PaneId> {
     layout
         .tabs
         .iter()
@@ -86,7 +86,7 @@ pub fn position_of(tabs: &[TabReport], id: &TabId) -> Option<TabPosition> {
 /// A reorder that leaves the same positions occupied is not visible here. A
 /// position-keyed pane report cannot tell one arrangement of the same tabs
 /// from another.
-pub fn coherent(tabs: &[TabReport], layout: &SessionLayout) -> bool {
+fn reports_match_layout(tabs: &[TabReport], layout: &SessionLayout) -> bool {
     tabs.len() == layout.tabs.len()
         && tabs.iter().all(|tab| {
             layout
@@ -96,7 +96,14 @@ pub fn coherent(tabs: &[TabReport], layout: &SessionLayout) -> bool {
         })
 }
 
-pub fn left_behind_by(
+/// The content pane to remember for the tab that the user is in, or `held`
+/// where this focus says nothing new.
+///
+/// The sidebar hands focus back to this pane when the user leaves the tab. A
+/// tab with no sidebar in it changes nothing, because the sidebar never takes
+/// focus there. Focus on the sidebar itself changes nothing either, because
+/// the pane the user came from is what must come back.
+pub fn remembered_content_pane(
     tabs: &[TabReport],
     layout: &SessionLayout,
     now: &Focus,
@@ -118,9 +125,16 @@ pub fn left_behind_by(
     }
 }
 
-pub fn stand_down_to(
+/// The pane to focus before the user leaves a tab, or `None` where the sidebar
+/// must do nothing.
+///
+/// The sidebar takes focus when it draws, so it must give focus back before the
+/// user goes somewhere else. `remembered` is the pane that the user came from.
+/// A pane that went off the screen since then is no longer a place to send the
+/// user, so the first pane on screen takes its place.
+pub fn pane_to_focus_when_leaving(
     layout: &SessionLayout,
-    left_behind: Option<&PaneId>,
+    remembered: Option<&PaneId>,
     leaving_from: TabPosition,
     going_to: TabPosition,
 ) -> Option<PaneId> {
@@ -131,15 +145,15 @@ pub fn stand_down_to(
     if source.position == going_to {
         return None;
     }
-    left_behind
-        .filter(|remembered| {
+    remembered
+        .filter(|held| {
             source
                 .content_panes
                 .iter()
-                .any(|pane| &pane.id == *remembered && pane.visibility == PaneVisibility::OnScreen)
+                .any(|pane| &pane.id == *held && pane.visibility == PaneVisibility::OnScreen)
         })
         .cloned()
-        .or_else(|| first_pane(layout, source.position))
+        .or_else(|| first_pane_on_screen(layout, source.position))
 }
 
 pub fn reconcile(
@@ -200,7 +214,7 @@ fn reconcile_focus(
     if !visible || observed.is_none() {
         return ReconciledFocus::Unknown;
     }
-    if !coherent(reports, layout) {
+    if !reports_match_layout(reports, layout) {
         return ReconciledFocus::Pending;
     }
     let observed = observed.expect("checked above");
@@ -215,7 +229,7 @@ fn reconcile_focus(
         return ReconciledFocus::Pending;
     }
     if let FocusTarget::Content(pane) = &observed.target {
-        if tab_of_pane(layout, pane) != Some(focused_tab) {
+        if tab_position_of_pane(layout, pane) != Some(focused_tab) {
             return ReconciledFocus::Pending;
         }
     }
@@ -368,7 +382,7 @@ mod tests {
             vec![tab("mine", 0), tab("second", 1), tab("third", 2)],
             vec![tab("mine", 0), tab("second", 2)],
         ] {
-            assert!(!coherent(&reports, &layout()));
+            assert!(!reports_match_layout(&reports, &layout()));
             let resolved = observed(&reports, &layout(), &focus);
             assert_eq!(resolved.focus, ReconciledFocus::Pending);
             // The tabs stay in the list, because each row comes from the
@@ -414,10 +428,13 @@ mod tests {
         let parked = PaneId::new("%2");
         // An agent row names its pane, and the host takes the pane back on
         // screen as it takes the focus.
-        assert_eq!(tab_of_pane(&layout, &parked), Some(TabPosition::at(1)));
+        assert_eq!(
+            tab_position_of_pane(&layout, &parked),
+            Some(TabPosition::at(1))
+        );
         // A tab row names no pane, so it goes to one the user can already see.
         assert_eq!(
-            first_pane(&layout, TabPosition::at(1)),
+            first_pane_on_screen(&layout, TabPosition::at(1)),
             Some(PaneId::new("%3"))
         );
     }
@@ -427,7 +444,7 @@ mod tests {
         let mut layout = with_a_parked_pane();
         layout.tabs[1].sidebar_pane = Some(SidebarPaneReport { focused: false });
         assert_eq!(
-            stand_down_to(
+            pane_to_focus_when_leaving(
                 &layout,
                 Some(&PaneId::new("%2")),
                 TabPosition::at(1),
@@ -441,10 +458,10 @@ mod tests {
     fn pane_ids_are_opaque_when_finding_and_leaving_tabs() {
         let layout = layout();
         let id = PaneId::new("%2");
-        assert_eq!(tab_of_pane(&layout, &id), Some(TabPosition::at(1)));
-        assert_eq!(first_pane(&layout, TabPosition::at(1)), Some(id));
+        assert_eq!(tab_position_of_pane(&layout, &id), Some(TabPosition::at(1)));
+        assert_eq!(first_pane_on_screen(&layout, TabPosition::at(1)), Some(id));
         assert_eq!(
-            stand_down_to(
+            pane_to_focus_when_leaving(
                 &layout,
                 Some(&PaneId::new("%1")),
                 TabPosition::at(0),
@@ -460,7 +477,7 @@ mod tests {
 
         for stale in ["%gone", "%2"] {
             assert_eq!(
-                stand_down_to(
+                pane_to_focus_when_leaving(
                     &layout,
                     Some(&PaneId::new(stale)),
                     TabPosition::at(0),
@@ -480,7 +497,7 @@ mod tests {
             target: FocusTarget::Content(PaneId::new("%2")),
         };
         assert_eq!(
-            left_behind_by(&tabs, &layout(), &elsewhere, held.clone()),
+            remembered_content_pane(&tabs, &layout(), &elsewhere, held.clone()),
             held
         );
         let here = Focus {
@@ -488,7 +505,7 @@ mod tests {
             target: FocusTarget::Content(PaneId::new("%1")),
         };
         assert_eq!(
-            left_behind_by(&tabs, &layout(), &here, None),
+            remembered_content_pane(&tabs, &layout(), &here, None),
             Some(PaneId::new("%1"))
         );
     }
@@ -551,7 +568,7 @@ mod tests {
     fn leaving_for_the_same_tab_stands_down_nowhere() {
         let layout = layout();
         assert_eq!(
-            stand_down_to(
+            pane_to_focus_when_leaving(
                 &layout,
                 Some(&PaneId::new("%1")),
                 TabPosition::at(0),
@@ -565,7 +582,7 @@ mod tests {
     fn leaving_without_a_remembered_pane_uses_the_first_content_pane() {
         let layout = layout();
         assert_eq!(
-            stand_down_to(&layout, None, TabPosition::at(0), TabPosition::at(1),),
+            pane_to_focus_when_leaving(&layout, None, TabPosition::at(0), TabPosition::at(1),),
             Some(PaneId::new("%1"))
         );
     }
@@ -585,11 +602,11 @@ mod tests {
             ReconciledFocus::Confirmed(focus.clone())
         );
         assert_eq!(
-            left_behind_by(&reports, &layout, &focus, None),
+            remembered_content_pane(&reports, &layout, &focus, None),
             Some(PaneId::new("%2"))
         );
         assert_eq!(
-            stand_down_to(&layout, None, TabPosition::at(1), TabPosition::at(0),),
+            pane_to_focus_when_leaving(&layout, None, TabPosition::at(1), TabPosition::at(0),),
             Some(PaneId::new("%2"))
         );
     }
@@ -603,7 +620,7 @@ mod tests {
         };
         let held = Some(PaneId::new("%held"));
         assert_eq!(
-            left_behind_by(&reports, &layout(), &focus, held.clone()),
+            remembered_content_pane(&reports, &layout(), &focus, held.clone()),
             held
         );
     }

@@ -7,12 +7,12 @@ use agent_wrangler_ui::frame::{build_frame, ClientProblem, Frame};
 use agent_wrangler_ui::model::{NamedColor, Notification, PaneId, RowKey, TabPosition};
 use agent_wrangler_ui::{selection, tree, Rect};
 
-use crate::calls::Answered;
-use crate::client::Client;
+use crate::calls::AnsweredCalls;
+use crate::helper_program::HelperProgramState;
 use crate::model::{
-    AgentSnapshot, Broadcast, ClientMessage, Command, Decision, Effect, Focus, FocusTarget, Input,
-    InteractionItem, Permission, RenderedView, SessionLayout, TabId, TabReport, UserAction,
-    ViewAction,
+    AgentSnapshot, Broadcast, ClientMessage, Decision, Effect, Focus, FocusTarget, Input,
+    InteractionItem, Permission, ProgramToRun, RenderedView, SessionLayout, TabId, TabReport,
+    UserAction, ViewAction,
 };
 use crate::options::Options;
 use crate::session;
@@ -29,8 +29,8 @@ pub struct Application {
     layout: SessionLayout,
     registry: Registry,
     agent_panes: BTreeMap<SessionId, PaneId>,
-    answered: Answered,
-    client: Client,
+    answered: AnsweredCalls,
+    client: HelperProgramState,
     session_name: Option<String>,
     registered: bool,
     selected: Option<RowKey>,
@@ -46,7 +46,7 @@ pub struct Application {
 
 impl Application {
     pub fn new(options: Options, multiplexer: impl Into<String>) -> Self {
-        let client = Client::new(options.client());
+        let client = HelperProgramState::new(options.helper_program_path());
         Application {
             options,
             multiplexer: multiplexer.into(),
@@ -207,8 +207,8 @@ impl Application {
 
     fn finish_command(&mut self, exit: Option<i32>, stderr: &[u8], call: &str) -> Decision {
         let changed = match exit {
-            Some(0) => self.client.reached(),
-            _ => self.client.failed(call, said(stderr)),
+            Some(0) => self.client.record_success(),
+            _ => self.client.record_failure(call, said(stderr)),
         };
         let mut decision = Decision::default();
         decision.request_repaint(changed);
@@ -223,7 +223,7 @@ impl Application {
         let Some(program) = self.client.path() else {
             return;
         };
-        decision.effects.push(Effect::Run(Command {
+        decision.effects.push(Effect::Run(ProgramToRun {
             call: call.to_string(),
             program: program.to_string(),
             args: args.iter().map(|word| (*word).to_string()).collect(),
@@ -266,7 +266,7 @@ impl Application {
             .collect();
         let mut changed = false;
         for agent in &calling {
-            self.answered.answer(agent);
+            self.answered.record_answer(agent);
             changed |= self.registry.seen(&agent.session);
         }
         if self.allowed() {
@@ -281,7 +281,7 @@ impl Application {
 
     fn suppress(&mut self) -> bool {
         let mut changed = false;
-        for settled in self.answered.settled(&self.registry) {
+        for settled in self.answered.already_answered_sessions(&self.registry) {
             changed |= self.registry.seen(&settled);
         }
         changed
@@ -319,7 +319,9 @@ impl Application {
             return Decision::default();
         };
         let remembered = self.left_behind.get(&focus.tab).cloned();
-        if let Some(pane) = session::left_behind_by(&self.tabs, &self.layout, &focus, remembered) {
+        if let Some(pane) =
+            session::remembered_content_pane(&self.tabs, &self.layout, &focus, remembered)
+        {
             self.left_behind.insert(focus.tab.clone(), pane);
         }
         let mut decision = Decision::default();
@@ -380,7 +382,7 @@ impl Application {
                 self.agent_panes = panes;
                 changed |= self.suppress();
                 let mut decision = self.confirmed_effects();
-                self.answered.prune(&self.registry);
+                self.answered.drop_gone_sessions(&self.registry);
                 decision.request_repaint(changed);
                 decision
             }
@@ -467,7 +469,7 @@ impl Application {
     fn activate_action(&mut self, action: &ViewAction, decision: &mut Decision) {
         match action {
             ViewAction::ActivatePane(pane) => {
-                if session::tab_of_pane(&self.layout, pane).is_some() {
+                if session::tab_position_of_pane(&self.layout, pane).is_some() {
                     self.go_to_pane(pane.clone(), decision);
                 }
             }
@@ -475,7 +477,7 @@ impl Application {
                 let Some(position) = self.tab_position(tab) else {
                     return;
                 };
-                match session::first_pane(&self.layout, position) {
+                match session::first_pane_on_screen(&self.layout, position) {
                     Some(pane) => self.go_to_pane(pane, decision),
                     None => {
                         self.stand_down(position, decision);
@@ -486,7 +488,7 @@ impl Application {
             ViewAction::ActivateAgent(agent) => {
                 if self.registry.get(agent).is_some() {
                     if let Some(pane) = self.agent_panes.get(agent) {
-                        if session::tab_of_pane(&self.layout, pane).is_some() {
+                        if session::tab_position_of_pane(&self.layout, pane).is_some() {
                             self.go_to_pane(pane.clone(), decision);
                         }
                     }
@@ -496,7 +498,7 @@ impl Application {
     }
 
     fn go_to_pane(&mut self, pane: PaneId, decision: &mut Decision) {
-        if let Some(tab) = session::tab_of_pane(&self.layout, &pane) {
+        if let Some(tab) = session::tab_position_of_pane(&self.layout, &pane) {
             self.stand_down(tab, decision);
         }
         decision.effects.push(Effect::FocusPane(pane));
@@ -509,7 +511,7 @@ impl Application {
         let Some(leaving_from) = session::position_of(&self.tabs, &focus.tab) else {
             return;
         };
-        if let Some(pane) = session::stand_down_to(
+        if let Some(pane) = session::pane_to_focus_when_leaving(
             &self.layout,
             self.left_behind.get(&focus.tab),
             leaving_from,
@@ -536,7 +538,7 @@ impl Application {
         let tab = self
             .agent_panes
             .get(&agent.session)
-            .and_then(|pane| session::tab_of_pane(&self.layout, pane))
+            .and_then(|pane| session::tab_position_of_pane(&self.layout, pane))
             .and_then(|position| self.tabs.iter().find(|tab| tab.position == position))
             .map(|tab| tab.name.clone())
             .unwrap_or_default();
@@ -714,13 +716,13 @@ mod tests {
     fn reports_store_facts_and_derive_focus_without_an_effect() {
         let mut app = app();
         let decision = app.reduce(Input::TabsReported(vec![tab("10", 0)]));
-        assert_eq!(decision, Decision::repaint());
+        assert_eq!(decision, Decision::effect(Effect::Repaint));
         assert_eq!(app.tabs[0].id, TabId::new("10"));
 
         let mut panes = layout(0, &[(0, &["%7"])]);
         panes.tabs[0].sidebar_pane.as_mut().unwrap().focused = true;
         let decision = app.reduce(Input::LayoutReported(panes.clone()));
-        assert_eq!(decision, Decision::repaint());
+        assert_eq!(decision, Decision::effect(Effect::Repaint));
         assert_eq!(app.layout, panes);
         assert_eq!(
             app.observed_focus,
@@ -794,7 +796,7 @@ mod tests {
         // the focus.
         assert_eq!(
             app.reduce(Input::VisibilityChanged(false)),
-            Decision::repaint()
+            Decision::effect(Effect::Repaint)
         );
         assert_eq!(
             app.reconciled_session().focus,
@@ -885,7 +887,7 @@ mod tests {
                         .effects,
                 );
             }
-            let runs: Vec<Command> = effects
+            let runs: Vec<ProgramToRun> = effects
                 .into_iter()
                 .filter_map(|effect| match effect {
                     Effect::Run(command) => Some(command),
@@ -1095,7 +1097,10 @@ mod tests {
             .iter()
             .any(|effect| matches!(effect, Effect::Tell(ClientMessage::Seen(_)))));
         assert_eq!(app.registry.get(&session).unwrap().turn, Turn::Attention);
-        assert!(app.answered.settled(&app.registry).is_empty());
+        assert!(app
+            .answered
+            .already_answered_sessions(&app.registry)
+            .is_empty());
     }
 
     #[test]
@@ -1572,7 +1577,7 @@ mod tests {
             pane: PaneId::new("%7"),
             title: Some("editor".to_string()),
         });
-        assert_eq!(decision, Decision::repaint());
+        assert_eq!(decision, Decision::effect(Effect::Repaint));
         assert_eq!(app.layout.tabs[0].content_panes[0].title, "editor");
 
         let decision = app.reduce(Input::PaneTitleObserved {

@@ -143,8 +143,12 @@ pub enum Input {
     EventSettled,
 }
 
+/// One program for the client to run, with the word that names the call.
+///
+/// The client hands `call` back with the result, so the reducer knows which
+/// call finished. The client turns `program` and `args` into a process.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Command {
+pub struct ProgramToRun {
     pub call: String,
     pub program: String,
     pub args: Vec<String>,
@@ -163,7 +167,7 @@ pub enum Effect {
     /// than the answer.
     RefreshFocus,
     RefreshPaneTitle(PaneId),
-    Run(Command),
+    Run(ProgramToRun),
     /// Says one thing to the daemon, on the transport that the daemon already
     /// holds open to reach this client.
     ///
@@ -185,10 +189,6 @@ pub struct Decision {
 }
 
 impl Decision {
-    pub fn repaint() -> Self {
-        Decision::effect(Effect::Repaint)
-    }
-
     pub fn effect(effect: Effect) -> Self {
         Decision {
             effects: vec![effect],

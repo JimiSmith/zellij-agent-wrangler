@@ -6,16 +6,16 @@
 
 pub mod application;
 pub mod calls;
-pub mod client;
+pub mod helper_program;
 pub mod model;
 pub mod options;
 pub mod session;
 
 pub use application::Application;
 pub use model::{
-    AgentSnapshot, Broadcast, ClientMessage, Command, Decision, Effect, Focus, FocusTarget, Input,
-    InteractionItem, PaneId, PaneReport, PaneVisibility, Permission, RenderedView, SessionLayout,
-    SidebarPaneReport, TabId, TabLayout, TabReport, UserAction, ViewAction,
+    AgentSnapshot, Broadcast, ClientMessage, Decision, Effect, Focus, FocusTarget, Input,
+    InteractionItem, PaneId, PaneReport, PaneVisibility, Permission, ProgramToRun, RenderedView,
+    SessionLayout, SidebarPaneReport, TabId, TabLayout, TabReport, UserAction, ViewAction,
 };
 pub use options::Options;
 pub use session::{ReconciledFocus, ReconciledSession};
