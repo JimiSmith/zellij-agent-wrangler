@@ -506,24 +506,17 @@ pub fn run() -> std::io::Result<()> {
     }
 
     // What the clients say back, on the transports that the daemon holds open
-    // to them. Every held transport reads on a thread of its own, and hands
-    // over what it read. This thread is the one place that acts on a message
-    // about an agent.
+    // to them. Every held transport reads on a thread of its own. Each one
+    // hands what it read to this thread, so what a message means is written
+    // once.
     let (told, heard) = channel();
     {
         let shared = Arc::clone(&shared);
         let owed = Arc::clone(&owed);
         let watchers = Arc::clone(&watchers);
         thread::spawn(move || {
-            while let Ok(told) = heard.recv() {
-                match told {
-                    Told::Seen { session } => seen(&shared, &owed, &watchers, &session),
-                    // A beat says only that the client is there. This thread
-                    // acts on a message about an agent, and a beat is not one.
-                    // The arm is empty because there is nothing left to do,
-                    // and not because something is unfinished.
-                    Told::Beat => {}
-                }
+            while let Ok(Told::Seen { session }) = heard.recv() {
+                seen(&shared, &owed, &watchers, &session);
             }
         });
     }
