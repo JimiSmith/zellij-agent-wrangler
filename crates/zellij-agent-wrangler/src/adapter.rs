@@ -22,6 +22,10 @@ pub fn tabs(reported: Vec<TabInfo>) -> Vec<TabReport> {
         .map(|tab| TabReport {
             id: TabId::new(tab.tab_id.to_string()),
             position: TabPosition::at(tab.position),
+            // Zellij numbers its tabs by their order, from one. So the number
+            // that the user types is the position plus one, and no separate
+            // number is reported.
+            displayed_index: (tab.position + 1).to_string(),
             name: tab.name,
             active: tab.active,
         })

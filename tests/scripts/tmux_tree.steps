@@ -1,0 +1,98 @@
+# A real tmux server, a real sidebar in a real pane, and the tree that it draws.
+#
+# The sidebar is the only way to see this. `tmux capture-pane` would read the
+# cells that tmux holds. This test asserts on the cells that reach the
+# terminal, and a user sees those cells.
+#
+# Every tmux command carries `-L wrangler-test`, which is a server of this
+# harness alone. The guard in drive.py refuses a tmux command without it.
+
+env: TERM=xterm-256color
+
+# An interrupted run leaves a server and a daemon behind. This run fails to
+# start rather than failing an assertion.
+sh?: tests/scripts/reset-tmux.sh
+sh: cargo build -p tmux-agent-wrangler -p agent-wrangler
+
+# `-f /dev/null` keeps the configuration of the developer out of the run. Their
+# key bindings, their status line and their `base-index` would otherwise decide
+# what this test asserts.
+spawn: tmux -L wrangler-test -f /dev/null new-session -s wrangler-test-tree -n editor
+wait: wrangler-0:editor @ 20
+
+# Two things about the line below.
+#
+# The variables go on it and not in an `env:` step. A pane that a host `sh:`
+# step creates takes the environment of the host, and not the environment that
+# the harness gave the tmux client. Without `PATH`, the sidebar runs the client
+# that the developer installed, and it draws OUT OF STEP rather than a tree.
+# Without `USER`, the run reports to the daemon of the developer.
+#
+# The two marks bracket the sidebar. The first says what the pane held before
+# the sidebar took it, and the second runs after the sidebar gives it back.
+sh: USER=wrangler-test XDG_STATE_HOME="$PWD/tests/out/state" PATH="$PWD/target/debug:$PATH" tmux -L wrangler-test split-window -h -l 34 -t wrangler-test-tree "echo WRANGLER-PANE-BEFORE; $PWD/target/debug/tmux-agent-wrangler; echo WRANGLER-PANE-AFTER; sleep 30"
+
+# The window that the session opened with. The number in front of the name is
+# the tmux window index.
+wait: 0: editor @ 25
+dump: tmux_tree_one
+
+# A window opened later reaches the tree. `select-window` goes back, because a
+# new window takes the focus and the sidebar lives in the first one.
+sh: tmux -L wrangler-test new-window -t wrangler-test-tree -n logs
+sh: tmux -L wrangler-test new-window -t wrangler-test-tree -n notes
+sh: tmux -L wrangler-test select-window -t wrangler-test-tree:0
+wait: 2: notes @ 20
+dump: tmux_tree_three
+
+# The point of drawing the tmux index rather than the order. Window 1 closes,
+# and window 2 keeps its own number. A row numbered by its order would say `1`
+# here, and the key that reaches that window is `2`.
+sh: tmux -L wrangler-test kill-window -t wrangler-test-tree:1
+waitgone: 1: logs
+wait: 2: notes @ 20
+dump: tmux_tree_gap
+
+# A split reaches the tree as a second pane under its window.
+sh: tmux -L wrangler-test split-window -t wrangler-test-tree:0
+sh: tmux -L wrangler-test select-window -t wrangler-test-tree:0
+wait: 2:  @ 20
+dump: tmux_tree_split
+
+# A pane that the user makes narrower is drawn again at the width it now has.
+# Tmux reports a resize to no program, and a resize changes nothing in the state
+# that the sidebar holds. So the drawing reads the width of the pane itself,
+# every time that it draws.
+#
+# The name below is long enough to be cut at twenty columns, and short enough to
+# fit whole at thirty-four. The two dumps therefore differ in the text of a row,
+# and not only in the column that the row starts at. A frame left over from
+# thirty-four columns carries no mark of the cut, because tmux cuts a stored
+# line without one.
+#
+# The new window is number 1. Tmux gives a new window the lowest free index, and
+# the window killed above left that one free.
+sh: tmux -L wrangler-test new-window -t wrangler-test-tree -n resize-me-a-long-name
+sh: tmux -L wrangler-test select-window -t wrangler-test-tree:0
+wait: 1: resize-me-a-long-name @ 20
+
+# A shell names its own pane as it draws its first prompt, and the sidebar
+# redraws for that name. The wait leaves every shell of this session time to do
+# it, so the resize below is the only thing that changes. Without the wait, this
+# case passes on a sidebar that redraws for a new pane name and not for a
+# resize.
+sleep: 3
+dump: tmux_tree_wide
+
+sh: tmux -L wrangler-test resize-pane -t wrangler-test-tree:0.1 -x 20
+wait: 1: resize-me-a-l… @ 20
+dump: tmux_tree_narrow
+
+# The sidebar draws on the alternate screen, which has no history behind it. So
+# it gives the pane back exactly as it found it. A sidebar on the normal screen
+# would leave its last frame there, and would fill a history that a whole-pane
+# drawing can never use.
+sh: tmux -L wrangler-test display-message -p -t wrangler-test-tree:0.1 'SIDEBAR history=#{history_size} alt=#{alternate_on}' > tests/out/tmux_tree_screen.txt
+sh: tmux -L wrangler-test send-keys -t wrangler-test-tree:0.1 q
+wait: WRANGLER-PANE-AFTER @ 20
+dump: tmux_tree_after_quit

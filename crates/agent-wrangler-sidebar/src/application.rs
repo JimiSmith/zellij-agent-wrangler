@@ -11,8 +11,8 @@ use crate::calls::AnsweredCalls;
 use crate::helper_program::HelperProgramState;
 use crate::model::{
     AgentSnapshot, Broadcast, ClientMessage, Decision, Effect, Focus, FocusTarget, Input,
-    InteractionItem, Permission, ProgramToRun, RenderedView, SessionLayout, TabId, TabReport,
-    UserAction, ViewAction,
+    InteractionItem, Permission, ProgramToRun, Registration, RenderedView, SessionLayout, TabId,
+    TabReport, UserAction, ViewAction,
 };
 use crate::options::Options;
 use crate::session;
@@ -24,7 +24,6 @@ const MISMATCH: &str = "the hook client is a different version; install both aga
 #[derive(Default)]
 pub struct Application {
     options: Options,
-    multiplexer: String,
     tabs: Vec<TabReport>,
     layout: SessionLayout,
     registry: Registry,
@@ -32,6 +31,7 @@ pub struct Application {
     answered: AnsweredCalls,
     client: HelperProgramState,
     session_name: Option<String>,
+    registration: Option<Registration>,
     registered: bool,
     selected: Option<RowKey>,
     permission: Option<Permission>,
@@ -45,11 +45,10 @@ pub struct Application {
 }
 
 impl Application {
-    pub fn new(options: Options, multiplexer: impl Into<String>) -> Self {
+    pub fn new(options: Options) -> Self {
         let client = HelperProgramState::new(options.helper_program_path());
         Application {
             options,
-            multiplexer: multiplexer.into(),
             client,
             ..Application::default()
         }
@@ -64,6 +63,7 @@ impl Application {
             Input::PaneTitleObserved { pane, title } => self.observe_pane_title(pane, title),
             Input::FocusObserved(focus) => self.observe_focus(focus),
             Input::SessionNamed(name) => self.name_session(name),
+            Input::RegistrationReported(registration) => self.report_registration(registration),
             Input::PermissionReported(permission) => self.report_permission(permission),
             Input::CommandFinished { exit, stderr, call } => {
                 self.finish_command(exit, &stderr, &call)
@@ -182,8 +182,16 @@ impl Application {
     }
 
     fn name_session(&mut self, name: String) -> Decision {
+        let changed = self.session_name.as_deref() != Some(name.as_str());
         self.session_name = Some(name);
         let mut decision = Decision::effect(Effect::StopSessionDiscovery);
+        decision.request_repaint(changed);
+        decision
+    }
+
+    fn report_registration(&mut self, registration: Registration) -> Decision {
+        self.registration = Some(registration);
+        let mut decision = Decision::default();
         self.register(&mut decision);
         decision
     }
@@ -230,15 +238,20 @@ impl Application {
         }));
     }
 
+    /// Asks the daemon to reach this client, once.
+    ///
+    /// The registration and the permission arrive as separate inputs, in
+    /// either order. This runs on both, and the second one to arrive sends the
+    /// command. `registered` stops a later input from sending it again.
     fn register(&mut self, decision: &mut Decision) {
-        let Some(name) = self.session_name.clone() else {
+        let Some(registration) = self.registration.clone() else {
             return;
         };
         if self.registered || !self.allowed() {
             return;
         }
         self.registered = true;
-        let mut owned = vec!["register".to_string(), self.multiplexer.clone(), name];
+        let mut owned = vec!["register".to_string(), registration.kind, registration.id];
         let notifier = self
             .options
             .desktop
@@ -644,6 +657,7 @@ mod tests {
         TabReport {
             id: TabId::new(id),
             position: TabPosition::at(position),
+            displayed_index: (position + 1).to_string(),
             name: format!("tab {id}"),
             active: position == 0,
         }
@@ -680,7 +694,7 @@ mod tests {
     }
 
     fn app() -> Application {
-        let mut app = Application::new(Options::default(), "tmux");
+        let mut app = Application::new(Options::default());
         app.reduce(Input::VisibilityChanged(true));
         app
     }
@@ -754,7 +768,7 @@ mod tests {
 
     #[test]
     fn being_shown_asks_where_the_user_is_rather_than_reading_held_reports() {
-        let mut app = Application::new(Options::default(), "zellij");
+        let mut app = Application::new(Options::default());
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
         let mut reported = layout(0, &[(0, &["7"])]);
         reported.tabs[0].sidebar_pane.as_mut().unwrap().focused = true;
@@ -869,8 +883,15 @@ mod tests {
         ));
     }
 
+    fn registration() -> Registration {
+        Registration {
+            kind: "socket".to_string(),
+            id: "agent-wrangler-tmux-592f327a-3.sock".to_string(),
+        }
+    }
+
     #[test]
-    fn session_and_permission_in_either_order_register_once() {
+    fn registration_and_permission_in_either_order_register_once() {
         for permission_first in [false, true] {
             let mut app = app();
             let mut effects = Vec::new();
@@ -880,7 +901,10 @@ mod tests {
                         .effects,
                 );
             }
-            effects.extend(app.reduce(Input::SessionNamed("work".to_string())).effects);
+            effects.extend(
+                app.reduce(Input::RegistrationReported(registration()))
+                    .effects,
+            );
             if !permission_first {
                 effects.extend(
                     app.reduce(Input::PermissionReported(Permission::Granted))
@@ -895,13 +919,51 @@ mod tests {
                 })
                 .collect();
             assert_eq!(runs.len(), 1);
-            assert_eq!(runs[0].args, ["register", "tmux", "work"]);
+            assert_eq!(
+                runs[0].args,
+                ["register", "socket", "agent-wrangler-tmux-592f327a-3.sock"]
+            );
             assert!(app
-                .reduce(Input::SessionNamed("work".to_string()))
+                .reduce(Input::RegistrationReported(registration()))
                 .effects
                 .iter()
                 .all(|effect| !matches!(effect, Effect::Run(_))));
         }
+    }
+
+    #[test]
+    fn a_registration_carries_the_words_that_the_client_program_accepts() {
+        // These three words are the contract with another program. A mistake in
+        // them compiles, and it fails only against a real client.
+        let mut app = app();
+        app.reduce(Input::PermissionReported(Permission::Granted));
+        let decision = app.reduce(Input::RegistrationReported(Registration {
+            kind: "zellij".to_string(),
+            id: "work".to_string(),
+        }));
+        let run = decision
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Run(command) => Some(command),
+                _ => None,
+            })
+            .expect("a register command");
+        assert_eq!(run.args, ["register", "zellij", "work"]);
+    }
+
+    #[test]
+    fn a_session_name_alone_registers_nothing() {
+        // The pane draws the session name. The daemon does not reach this
+        // client by that name, so a session name starts no registration.
+        let mut app = app();
+        app.reduce(Input::PermissionReported(Permission::Granted));
+        let decision = app.reduce(Input::SessionNamed("work".to_string()));
+        assert!(decision
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::Run(_))));
+        assert_eq!(app.session_name(), Some("work"));
     }
 
     #[test]
@@ -910,7 +972,7 @@ mod tests {
             install_hooks: Some("agent-wrangler".to_string()),
             ..Options::default()
         };
-        let mut app = Application::new(options, "zellij");
+        let mut app = Application::new(options);
         app.reduce(Input::VisibilityChanged(true));
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
         app.reduce(Input::LayoutReported(layout(0, &[(0, &["7"])])));
@@ -931,7 +993,7 @@ mod tests {
             install_hooks: Some("agent-wrangler".to_string()),
             ..Options::default()
         };
-        let mut app = Application::new(options, "zellij");
+        let mut app = Application::new(options);
         app.reduce(Input::VisibilityChanged(true));
         app.reduce(Input::TabsReported(vec![tab("10", 0)]));
         app.reduce(Input::LayoutReported(layout(0, &[(0, &["7"])])));

@@ -432,10 +432,124 @@ stopped has an explanation.
 
 ## The tmux client
 
-`tmux-agent-wrangler` is the socket sink's first reader. It registers, connects,
-and writes out every record that arrives. It draws no sidebar and it reads no
-tmux topology. What it proves is the transport, from a hook in a pane to a line
-on a stream.
+`tmux-agent-wrangler` reads the shape of one tmux session, holds an
+`Application` of the shared crate, and draws the sidebar into its own pane. It
+takes the same three shared crates that the zellij plugin takes, and it adapts
+at the same boundary.
+
+One thread owns the application and draws. Every other thread sends it one kind
+of event and touches no state:
+
+```
+socket reader   ->  a state payload, or the reader gave up
+control client  ->  something moved, an answer, or the server went
+change ticker   ->  something moved                (the fallback feed)
+input reader    ->  the user asked to stop
+child runner    ->  a program that an effect started has finished
+                        |
+                        v
+                 std::sync::mpsc
+                        |
+                        v
+      the drawing thread: Application::reduce, then Terminal::draw
+```
+
+Nothing there needs a runtime, an async crate or a signal handler.
+
+The drawing goes through ratatui. The `Sidebar` widget fills a buffer for both
+clients. The zellij plugin turns that buffer into bytes with `frame_to_ansi`,
+because printing is all a plugin can do. The tmux client hands the same widget to
+a ratatui `Terminal`, which holds the new frame beside the one before it and
+writes only the cells that differ.
+
+The tmux client therefore draws after every event, and it never decides whether
+to draw. A resize explains that rule. Tmux reports a resize to no program, and a
+resize changes nothing in the application. A client that drew only on a change
+of the application would hold the frame of the old width until something else
+moved.
+`Terminal::draw` reads the size of the pane every time, so the frame follows the
+pane.
+
+The client owns its pane while it runs: the alternate screen, raw mode on,
+cursor hidden. The alternate screen has no history behind it, which suits a
+program that draws a whole pane at a time and has nothing to scroll back
+through. On the normal screen a host keeps a history for such a pane anyway, and
+one frame too tall would start filling it. Leaving that screen also gives the
+pane back as the client found it, rather than leaving the last frame behind. Raw mode
+stops the pane echoing a keystroke over the drawing, and it also stops Ctrl-C
+raising an interrupt. So the client reads its input and answers `q` and Ctrl-C
+itself. `ratatui::try_init` takes the pane and installs the panic hook. The
+sidebar gives the pane back as it drops, and the hook gives it back when a panic
+ends the program. A panic on another thread does not unwind the drawing thread,
+so only the hook covers that case.
+
+### How a change reaches the sidebar
+
+A control mode client, `tmux -C attach`, sends a line for every change in the
+session and runs a command written on its standard input. Every notification
+means one thing here: ask again. Nothing decodes the layout string in
+`%layout-change`, which is a checksum and a nested geometry grammar.
+
+The question goes down that same client, as one line of four commands joined by
+semicolons. Each of them gets a reply block of its own, and their bodies joined
+are exactly what those commands write when they run as a child process. So one
+reader parses the answer whichever transport carried it.
+
+A control client is an attached client, and tmux counts an attached client when
+it sizes the windows of a session. This one is 80 by 24, because its output is a
+pipe. Under the default `window-size latest` the windows of the user snap to
+that size the moment a sidebar starts. A control client also receives every byte
+that every pane writes. Two flags settle both:
+
+```
+refresh-client -f no-output,ignore-size
+```
+
+A server that does not know a flag accepts the command and does nothing with it,
+so an error check finds nothing. Psmux does exactly that. The handshake
+therefore asks the server to name its flags back with `#{client_flags}`, and the
+sidebar keeps the control client only when the answer names `no-output`. A
+server that fails the check is left, and a timer asks every half second instead.
+That is a capability check and not a `cfg`, so psmux works today and gets the
+faster feed with no change here on the day it grows the flag.
+
+The timer runs whether or not a control client does. A control client that dies
+leaves no gap in the feed, and a tick that arrives while a question is
+unanswered costs one line on a pipe.
+
+Two rules about writing a tmux command line. Tmux parses these itself, so `#`
+starts a comment there and every format is quoted. Tmux also reads an argument
+that starts with a dash as a flag, so every marker that this client prints
+starts with a letter.
+
+### What tmux is asked, and what is done with the answer
+
+Two questions and not one. A window name and a pane title are both free text and
+either can hold a tab, so one query carrying both would need a repair when a
+split came out with the wrong number of fields. Two queries each put their one
+free text field last, and a split into four parts is then exact.
+
+A window is identified by `#{window_id}` and a pane by `#{pane_id}`, which are
+stable. The order in the list becomes `TabPosition`, because the shared code
+joins a tab report to a session layout on it. The number that tmux calls the
+window becomes `displayed_index`, and the row draws that number. A user sets
+`base-index` to any value, and a closed window leaves a gap, so the order and the
+number are two facts.
+
+The pane title is not `#{pane_title}` alone. That holds what a program set with
+an escape sequence, and a program such as `sleep` sets none, so tmux answers the
+host name. The format asks whether the title is still the host name and names
+the running program when it is. Zellij falls back to the command in the same
+way.
+
+The pane that the client runs in is reported as the sidebar pane of its window,
+and it is left out of the content panes. Tmux parks no pane, so every pane is on
+screen. Tmux runs no plugin, so no other kind of pane holds the focus.
+
+### The socket, and what proves the transport
+
+The client also registers a socket sink and reads the agent state on it. That
+half proves the transport, from a hook in a pane to a record in the registry.
 
 The binary must find its own session before it can name a socket. The first
 field of `$TMUX` is the server, which is a path on unix and the name of a pipe
@@ -471,7 +585,8 @@ silent client. A slower reconnect costs the registration that it tries to
 restore.
 
 A stream that ends says that the daemon went, and the client goes round again. A
-write that fails says that the reader of the output went, and the client stops.
+payload that the sidebar refuses says that the thread which draws has stopped,
+and the client stops.
 These are two outcomes and not one, and the type says which. The kind of an
 error names what went wrong and never which end it went wrong at.
 
@@ -482,9 +597,17 @@ waits for ever on Windows. Both spellings take one arm.
 
 The crate is built on every system and not on unix alone. Tmux does not run on
 Windows, but psmux does, and psmux ships a program called `tmux`. So the crate
-holds no `cfg` for a system, builds no path, and names no directory. A green
-Windows job compiles it. Nothing in the build runs `tmux`, so the Windows path
-is not proven from end to end.
+holds no `cfg` for a system, builds no path, and names no directory. Crossterm
+holds the difference between the systems for raw mode and for the size of a
+pane, and the crate takes it with default features off: the `events` feature is
+what pulls a signal handler, and this crate installs none.
+
+A green Windows job compiles it. Nothing in the build runs `tmux`, so the
+Windows path is not proven from end to end.
+
+A record is kept only when the pane that it names belongs to this tmux server.
+The pane id alone is not enough, because two servers number their panes from the
+same counter and `%1` names a pane on each.
 
 ## Testing
 

@@ -17,7 +17,7 @@ feature list. This file holds the rules.
 | `agent-wrangler-sidebar` | Application state, the reducer, effects, session reconciliation and options. |
 | `agent-wrangler` | One binary: the hook client, the daemon, the installer and the platform integration. |
 | `zellij-agent-wrangler` | The zellij plugin. Builds for wasm only. |
-| `tmux-agent-wrangler` | The tmux client. Registers a socket and reads the state on it. |
+| `tmux-agent-wrangler` | The tmux client. Reads the tmux topology, draws the sidebar, and reads the state on its socket. |
 
 The dependency direction never reverses. These are every edge:
 
@@ -26,11 +26,14 @@ agent-wrangler-ui        ->  core
 agent-wrangler-sidebar   ->  core, ui
 agent-wrangler (daemon)  ->  core
 zellij-agent-wrangler    ->  core, ui, sidebar
-tmux-agent-wrangler      ->  core
+tmux-agent-wrangler      ->  core, ui, sidebar
 ```
 
-The tmux client takes `core` alone because it draws nothing yet. It takes `ui`
-and `sidebar` when it draws a sidebar, and it takes nothing else ever.
+The tmux client takes all three because it draws a sidebar. Beyond the three it
+takes `interprocess` for the socket and `ratatui` for the terminal under the
+drawing: raw mode, the alternate screen, the size of its pane, and the pair of
+buffers that limits a draw to the cells that changed. Ratatui comes with default
+features OFF and with the `crossterm` feature alone. Nothing else ever.
 
 Three rules follow.
 
@@ -169,10 +172,21 @@ plugin pane, so this is the only way to see what a sidebar drew.
 ```
 python3 -m unittest discover -s tests -v
 python3 tests/drive.py tests/scripts/agent_row.steps
+python3 tests/drive.py tests/scripts/tmux_tree.steps
 ```
 
-The zellij cases skip themselves when `zellij` is not on `PATH`. The harness
-names its own user, so a run never reports to the daemon you have installed.
+The zellij cases skip themselves when `zellij` is not on `PATH`, and the tmux
+cases do the same without `tmux`.
+
+Three things keep a run away from what the developer has installed, and
+`tests/README.md` explains each one.
+
+1. The harness names its own user, so a run never reports to your daemon.
+2. Every tmux command must carry `-L wrangler-test`, which is a server of the
+   harness alone. `guard_tmux_command` refuses one without it.
+3. A run that starts a sidebar must put `target/debug` first on `PATH`. The
+   sidebar runs `agent-wrangler` by name, and your installed one is older. A run
+   that gets this wrong draws OUT OF STEP rather than a tree.
 
 ## Comments
 

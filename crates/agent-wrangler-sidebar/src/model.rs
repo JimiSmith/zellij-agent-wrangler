@@ -10,7 +10,15 @@ use agent_wrangler_ui::model::{RowKey, TabPosition};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabReport {
     pub id: TabId,
+    /// Where this tab sits in the order of the tabs. Contiguous and zero based.
     pub position: TabPosition,
+    /// The number that this tab's row draws, and that the user types to reach
+    /// the tab.
+    ///
+    /// This is not the position. A host is free to number its tabs from any
+    /// value, and to leave a gap where a tab closed. A host that numbers its
+    /// tabs by their order reports the position plus one here.
+    pub displayed_index: String,
     pub name: String,
     pub active: bool,
 }
@@ -75,6 +83,20 @@ pub enum Permission {
     Denied,
 }
 
+/// How a client asks the daemon to reach it.
+///
+/// Both fields are opaque here. `kind` is the word that the client program
+/// accepts after `register`, and `id` is the value that follows that word.
+/// Nothing in this crate reads either field, so this crate names no host.
+///
+/// This is not the session name. A client is free to be reached under a name
+/// that it derived, and the session keeps the name that the user gave it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Registration {
+    pub kind: String,
+    pub id: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UserAction {
     Next,
@@ -131,6 +153,7 @@ pub enum Input {
     },
     FocusObserved(Option<Focus>),
     SessionNamed(String),
+    RegistrationReported(Registration),
     PermissionReported(Permission),
     CommandFinished {
         exit: Option<i32>,

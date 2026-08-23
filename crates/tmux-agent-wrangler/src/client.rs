@@ -1,7 +1,7 @@
 //! Registering the sink, connecting to the socket that the daemon binds, and writing
 //! out every state that arrives.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read};
 use std::process::Command;
 use std::sync::Arc;
 use std::thread;
@@ -9,8 +9,6 @@ use std::time::Duration;
 
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{GenericNamespaced, Stream};
-
-use agent_wrangler_core::agent;
 
 use crate::heartbeat::{self, HeartbeatSettings};
 use crate::socket_name::SocketName;
@@ -76,15 +74,30 @@ fn connect_with_retry(name: &SocketName) -> std::io::Result<Stream> {
     Err(last.unwrap_or_else(|| std::io::Error::other("nothing bound the socket")))
 }
 
+/// The word that names this kind of client to the client program.
+///
+/// The daemon reaches this client by binding a socket and writing on it, and
+/// this word asks the daemon to do that. The client program accepts a set of
+/// these words, and a word outside that set is refused with an exit status and
+/// nothing drawn.
+const REGISTER_KIND: &str = "socket";
+
+/// The flag that hands the desktop notification command to the daemon.
+const NOTIFY_FLAG: &str = "--notify";
+
 /// The command that registers this client with the daemon.
 ///
 /// The words are built here and run by the caller. A test can therefore read the
 /// program and its arguments on any system, with the program installed or not.
 /// These words are a contract with another program, and a mistake in them
 /// compiles and passes every test that does not read them.
-fn build_register_command(name: &SocketName) -> Command {
+fn build_register_command(name: &SocketName, notifier: &[String]) -> Command {
     let mut command = Command::new(REGISTER_PROGRAM);
-    command.args(["register", "socket", name.as_str()]);
+    command.args(["register", REGISTER_KIND, name.as_str()]);
+    if !notifier.is_empty() {
+        command.arg(NOTIFY_FLAG);
+        command.args(notifier);
+    }
     command
 }
 
@@ -94,8 +107,13 @@ fn build_register_command(name: &SocketName) -> Command {
 /// command starts a daemon if none runs, and the daemon binds the name while it
 /// handles the registration. A registration is idempotent by name, so the second
 /// sidebar of one session changes nothing.
-fn register_with_daemon(name: &SocketName) -> Result<(), FatalError> {
-    let status = build_register_command(name)
+///
+/// This is the one path that registers a tmux client, and it runs again on
+/// every round of the reconnect loop above. A daemon that gave up on a client,
+/// or a daemon that restarted, has dropped the client record and released the
+/// socket name. Only a new registration makes it bind the name again.
+fn register_with_daemon(name: &SocketName, notifier: &[String]) -> Result<(), FatalError> {
+    let status = build_register_command(name, notifier)
         .status()
         .map_err(FatalError::RegisterDidNotRun)?;
     match status.success() {
@@ -104,57 +122,25 @@ fn register_with_daemon(name: &SocketName) -> Result<(), FatalError> {
     }
 }
 
-/// The records of one payload, in the order that they arrive.
-///
-/// The first record of every payload is the header, such as `wrangler 4`. This
-/// program prints the header and does not read it. The header names the record
-/// format, so a reader that sees a format it does not know has found the fault at
-/// once. To drop the header, this program must decide which record is which, and
-/// that decision belongs to the story that draws the sidebar.
-///
-/// `escape_record_breaks` maps every newline in the payload to
-/// `ESCAPED_RECORD_BREAK`, so one line off the socket is exactly one payload.
-/// `restore_record_breaks` gives back what the daemon built. The number of lines
-/// then equals the number of records, because every captured value loses its
-/// control characters where it is built. `Agent::new` cleans the text fields at
-/// `agent.rs:245`. `Origin::from_lookup` cleans the origin values at
-/// `origin.rs:70`.
-fn split_into_records(line: &str) -> Vec<String> {
-    agent::restore_record_breaks(line)
-        .lines()
-        .map(str::to_string)
-        .collect()
-}
-
-/// Writes out every record of one payload.
-///
-/// Side effect: this function flushes after each payload. A reader therefore
-/// never waits for the next state before it sees this one.
-///
-/// The writer is given rather than taken, and `println!` is never used here.
-/// `println!` panics when the write fails, and Rust ignores the pipe signal, so a
-/// run piped into `head` would print a panic message.
-fn write_records<W: Write>(out: &mut W, line: &str) -> std::io::Result<()> {
-    for record in split_into_records(line) {
-        writeln!(out, "{record}")?;
-    }
-    out.flush()
-}
-
-/// Writes out every payload that arrives, until one end or the other stops.
+/// Hands over every payload that arrives, until one end or the other stops.
 ///
 /// A read that fails ends this function in the same way as the end of the
 /// stream. Both say that the daemon has gone, and the caller answers both the
 /// same way: it registers again and connects again.
 ///
-/// A write that fails says that the reader of this program's output has gone.
-/// That is not a lost daemon, so nothing reconnects and nothing is reported.
+/// `take` receives one payload, exactly as it came off the socket. An error
+/// from `take` says that the reader of these payloads has stopped. A stopped
+/// reader is not a lost daemon, so this function reconnects to nothing and
+/// reports nothing.
 ///
 /// The reader is taken by value rather than as a stream, so a test can give a
 /// reader that fails. Without that, no test reaches the failing arm below,
 /// because dropping either end of a local socket is a clean close on both
 /// systems.
-fn read_until_connection_ends<R: Read, W: Write>(reader: R, out: &mut W) -> ConnectionEnd {
+fn read_until_connection_ends<R: Read, T: FnMut(&str) -> std::io::Result<()>>(
+    reader: R,
+    mut take: T,
+) -> ConnectionEnd {
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
     loop {
@@ -168,7 +154,7 @@ fn read_until_connection_ends<R: Read, W: Write>(reader: R, out: &mut W) -> Conn
             Ok(0) | Err(_) => return ConnectionEnd::DaemonDisconnected,
             Ok(_) => {}
         }
-        if write_records(out, &line).is_err() {
+        if take(&line).is_err() {
             return ConnectionEnd::OutputClosed;
         }
     }
@@ -179,16 +165,16 @@ fn read_until_connection_ends<R: Read, W: Write>(reader: R, out: &mut W) -> Conn
 ///
 /// Every connection beats. The daemon gives up on a client that says nothing,
 /// and a client that only reads says nothing at all.
-pub fn read_one_connection<W: Write>(
+pub fn read_one_connection<T: FnMut(&str) -> std::io::Result<()>>(
     stream: Stream,
-    out: &mut W,
+    take: T,
     heartbeat: &HeartbeatSettings,
 ) -> ConnectionEnd {
     let stream = Arc::new(stream);
     let beating = heartbeat::start_heartbeat(&stream, heartbeat);
     // The deref is explicit because the reader is now generic, and a generic
     // parameter takes no deref coercion. `&Stream` is what reads.
-    let ended = read_until_connection_ends(&*stream, out);
+    let ended = read_until_connection_ends(&*stream, take);
     beating.stop();
     ended
 }
@@ -204,15 +190,15 @@ pub fn read_one_connection<W: Write>(
 ///
 /// This loop goes round when the stream ends. Whether a retired client's stream
 /// ends is the daemon's side of the contract and not this program's.
-fn reconnect_loop<W, N, R, C>(
-    out: &mut W,
+fn reconnect_loop<T, N, R, C>(
+    mut take: T,
     heartbeat: &HeartbeatSettings,
     mut name: N,
     mut register: R,
     mut connect: C,
 ) -> Result<(), FatalError>
 where
-    W: Write,
+    T: FnMut(&str) -> std::io::Result<()>,
     N: FnMut() -> Result<SocketName, FatalError>,
     R: FnMut(&SocketName) -> Result<(), FatalError>,
     C: FnMut(&SocketName) -> Result<Stream, FatalError>,
@@ -221,7 +207,7 @@ where
         let name = name()?;
         register(&name)?;
         let stream = connect(&name)?;
-        match read_one_connection(stream, out, heartbeat) {
+        match read_one_connection(stream, &mut take, heartbeat) {
             ConnectionEnd::DaemonDisconnected => {}
             ConnectionEnd::OutputClosed => return Ok(()),
         }
@@ -231,13 +217,21 @@ where
 /// Registers, connects, and writes out the state until something stops this
 /// program.
 ///
-/// Side effect: this function runs `tmux` and `agent-wrangler`, and it writes to
-/// `out`. It returns when the reader of the output goes away, and it answers an
+/// Side effect: this function runs `tmux` and `agent-wrangler`, and it hands
+/// every payload to `take`. It returns when `take` fails, and it answers an
 /// error when it gives up on the daemon.
-pub fn run_client<W: Write>(out: &mut W, heartbeat: &HeartbeatSettings) -> Result<(), FatalError> {
+///
+/// `notifier` is the command that raises a desktop notification, and it is
+/// empty when the user asked for none. The registration carries it, because the
+/// daemon raises the notification and this program never does.
+pub fn run_client<T: FnMut(&str) -> std::io::Result<()>>(
+    take: T,
+    heartbeat: &HeartbeatSettings,
+    notifier: &[String],
+) -> Result<(), FatalError> {
     let location = TmuxLocation::from_environment()?;
     reconnect_loop(
-        out,
+        take,
         heartbeat,
         // The session is read again on every round. A window that moved to
         // another session therefore names the right socket as soon as the daemon
@@ -248,7 +242,7 @@ pub fn run_client<W: Write>(out: &mut W, heartbeat: &HeartbeatSettings) -> Resul
                 &location.read_session()?,
             ))
         },
-        register_with_daemon,
+        |name| register_with_daemon(name, notifier),
         |name| {
             connect_with_retry(name).map_err(|why| FatalError::SocketNeverBound {
                 name: name.as_str().to_string(),
@@ -263,6 +257,7 @@ mod tests {
     use super::*;
     use crate::test_daemon;
     use crate::tmux_location::TmuxSessionId;
+    use agent_wrangler_core::agent;
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::time::Instant;
@@ -297,65 +292,54 @@ mod tests {
         format!("wrangler {}", agent::FORMAT)
     }
 
-    fn printed_records(lines: &[&str]) -> String {
-        let mut out = Vec::new();
-        for line in lines {
-            write_records(&mut out, &format!("{line}\n")).expect("the output");
-        }
-        String::from_utf8(out).expect("text")
-    }
-
-    #[test]
-    fn a_payload_with_two_agents_prints_the_header_and_both_records() {
-        assert_eq!(
-            printed_records(&[&payload("recA\nrecB")]),
-            format!("{}\nrecA\nrecB\n", header())
-        );
-    }
-
-    #[test]
-    fn a_payload_with_no_agents_prints_the_header_alone() {
-        // A state with no agents is still a message. The header is what tells it
-        // apart from a message that carried nothing.
-        assert_eq!(printed_records(&[&payload("")]), format!("{}\n", header()));
-    }
-
-    #[test]
-    fn no_payload_ever_ends_in_a_blank_line() {
-        // The daemon frames each payload with a newline, and a payload with no
-        // agents ends on a record break. A split that keeps either one prints a
-        // blank line after every state.
-        for records in ["recA\nrecB", "recA", ""] {
-            let out = printed_records(&[&payload(records)]);
-            assert!(!out.contains("\n\n"), "{out:?}");
+    /// A sink that keeps every payload, in the way that the sidebar keeps one.
+    /// It keeps a payload whole and splits none, because the reader hands one
+    /// line over exactly as it came off the socket.
+    fn keep_payloads(kept: &mut Vec<String>) -> impl FnMut(&str) -> std::io::Result<()> + '_ {
+        move |payload| {
+            kept.push(payload.to_string());
+            Ok(())
         }
     }
 
     #[test]
-    fn every_state_that_arrives_is_printed() {
+    fn every_state_that_arrives_is_handed_over_whole() {
+        // One line off the socket is one payload. The reader never splits it.
+        // The record breaks inside it travel escaped, and only whatever reads
+        // the records undoes them.
         let pair = test_daemon::connected_pair("every-state");
         pair.send_line(&payload("recA\nrecB"));
         pair.send_line(&payload(""));
-        let mut out = Vec::new();
+        let mut kept = Vec::new();
         assert_eq!(
-            read_one_connection(pair.close_daemon_end(), &mut out, &test_heartbeat()),
+            read_one_connection(
+                pair.close_daemon_end(),
+                keep_payloads(&mut kept),
+                &test_heartbeat()
+            ),
             ConnectionEnd::DaemonDisconnected
         );
+        assert_eq!(kept.len(), 2);
         assert_eq!(
-            String::from_utf8(out).expect("text"),
-            format!("{0}\nrecA\nrecB\n{0}\n", header())
+            agent::restore_record_breaks(&kept[0]).trim_end(),
+            format!("{}\nrecA\nrecB", header())
         );
+        assert_eq!(agent::restore_record_breaks(&kept[1]).trim_end(), header());
     }
 
     #[test]
     fn the_end_of_the_stream_says_that_the_daemon_went() {
         let pair = test_daemon::connected_pair("stream-ends");
-        let mut out = Vec::new();
+        let mut kept = Vec::new();
         assert_eq!(
-            read_one_connection(pair.close_daemon_end(), &mut out, &test_heartbeat()),
+            read_one_connection(
+                pair.close_daemon_end(),
+                keep_payloads(&mut kept),
+                &test_heartbeat()
+            ),
             ConnectionEnd::DaemonDisconnected
         );
-        assert!(out.is_empty());
+        assert!(kept.is_empty());
     }
 
     #[test]
@@ -371,33 +355,26 @@ mod tests {
                 Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset))
             }
         }
-        let mut out = Vec::new();
+        let mut kept = Vec::new();
         assert_eq!(
-            read_until_connection_ends(FailingReader, &mut out),
+            read_until_connection_ends(FailingReader, keep_payloads(&mut kept)),
             ConnectionEnd::DaemonDisconnected
         );
-        assert!(out.is_empty());
+        assert!(kept.is_empty());
     }
 
     #[test]
-    fn a_reader_that_went_away_is_not_a_daemon_that_went_away() {
+    fn a_sink_that_went_away_is_not_a_daemon_that_went_away() {
         // The two failures are told apart by the type and never by the kind of
-        // the error. Only one of them reconnects.
-        struct FailingWriter;
-        impl Write for FailingWriter {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
+        // the error. Only one of them reconnects. The sink of the sidebar fails
+        // when the thread that draws has stopped, and nothing must reconnect
+        // for that.
         let pair = test_daemon::connected_pair("reader-went");
         pair.send_line(&payload("recA"));
         assert_eq!(
             read_one_connection(
                 pair.close_daemon_end(),
-                &mut FailingWriter,
+                |_| Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
                 &test_heartbeat()
             ),
             ConnectionEnd::OutputClosed
@@ -423,8 +400,8 @@ mod tests {
             line: "beat".to_string(),
         };
         let serving = thread::spawn(move || {
-            let mut out = Vec::new();
-            read_one_connection(pair.client_end, &mut out, &settings)
+            let mut kept = Vec::new();
+            read_one_connection(pair.client_end, keep_payloads(&mut kept), &settings)
         });
         assert_eq!(
             heard.recv_timeout(test_daemon::TEST_TIMEOUT),
@@ -474,8 +451,15 @@ mod tests {
             Ok(test_daemon::connected_pair("rounds").close_daemon_end())
         };
 
-        let mut out = Vec::new();
-        assert!(reconnect_loop(&mut out, &test_heartbeat(), name, register, connect).is_err());
+        let mut kept = Vec::new();
+        assert!(reconnect_loop(
+            keep_payloads(&mut kept),
+            &test_heartbeat(),
+            name,
+            register,
+            connect
+        )
+        .is_err());
         assert_eq!(
             *done.borrow(),
             ["name", "register", "connect", "name", "register", "connect"]
@@ -512,11 +496,33 @@ mod tests {
         // These words are the contract with `agent-wrangler`. A mistake in them
         // compiles, and it fails only against a real daemon.
         let sink = test_socket_name("words");
-        let command = build_register_command(&sink);
+        let command = build_register_command(&sink, &[]);
         assert_eq!(command_program(&command), "agent-wrangler");
         assert_eq!(
             command_args(&command),
             ["register", "socket", sink.as_str()]
+        );
+    }
+
+    #[test]
+    fn the_register_command_hands_over_the_desktop_notifier() {
+        // The daemon raises the desktop notification, once per call however
+        // many sidebars hold it. The daemon learns the command from the
+        // registration, so a notifier that stayed in this program would raise
+        // nothing at all.
+        let sink = test_socket_name("notifier");
+        let notifier = ["notify-send".to_string(), "--urgency".to_string()];
+        let command = build_register_command(&sink, &notifier);
+        assert_eq!(
+            command_args(&command),
+            [
+                "register",
+                "socket",
+                sink.as_str(),
+                "--notify",
+                "notify-send",
+                "--urgency"
+            ]
         );
     }
 

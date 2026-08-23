@@ -85,6 +85,7 @@ fn tabs(step: usize) -> Vec<TabReport> {
         .map(|tab| TabReport {
             id: TabId::new(tab.to_string()),
             position: TabPosition::at(tab),
+            displayed_index: (tab + 1).to_string(),
             // Tab names change with renames by the user and with renumbers by
             // zellij.
             name: format!("tab-{tab}-{}", step % 7),
@@ -204,7 +205,7 @@ fn step(app: &mut Application, step: usize) {
 
 #[test]
 fn a_long_running_session_holds_a_steady_heap() {
-    let mut app = Application::new(Options::default(), "zellij");
+    let mut app = Application::new(Options::default());
     app.reduce(Input::VisibilityChanged(true));
     app.reduce(Input::SessionNamed(SESSION.to_string()));
     app.reduce(Input::PermissionReported(Permission::Granted));

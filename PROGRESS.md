@@ -385,7 +385,118 @@ output is parsed by it, so a printed `\x07` does set `ring_bell` — but `has_be
 is only implemented for terminal panes and defaults to `false` in the `Pane`
 trait, so nothing ever reads it. There is no bell command or action either.
 
+## What tmux does
+
+Every line here was checked against tmux 3.7b, or read from the psmux source at
+`crates/portable-pty-psmux` and `src/`.
+
+**A control mode client is an attached client, and it sizes the windows.** Its
+own size is 80 by 24, because its output is a pipe and not a terminal. The
+default `window-size` is `latest`, so the windows of the user snap to that size
+the moment a sidebar starts. `refresh-client -f ignore-size` stops tmux counting
+that client. Measured: a session forced to 200 by 50 stayed there while a
+pipe-attached control client was on.
+
+**A control mode client receives every byte that every pane writes.** They come
+as `%output` lines. A sidebar wants the changes and nothing else, and an agent
+printing a long transcript would push all of it down that pipe.
+`refresh-client -f no-output` stops it.
+
+**Psmux accepts `refresh-client -f` and does nothing with it.** `src/main.rs`
+reads `-f` and drops it "for compatibility". So an error check finds nothing.
+Psmux also answers a fixed `"focused"` for `#{client_flags}` in `src/format.rs`.
+The handshake therefore asks the server to name its flags back, which is a
+positive check: a server that does not name `no-output` is left, and the sidebar
+asks on a timer instead.
+
+**`tmux -CC` refuses to start without a terminal.** It says "tcgetattr failed:
+Not a tty". `-C` alone works with pipes on both ends, and it sends the same
+notifications.
+
+**Tmux parses its own command lines, and `#` starts a comment there.** An
+unquoted `#{...}` is stripped, and the command answers something else with no
+error at all. Every format that this project writes on a control client or a
+command line is inside single quotes. Tmux also reads an argument that starts
+with a dash as a flag, so every marker that this project prints starts with a
+letter.
+
+**Each command joined by a semicolon gets its own reply block.** A line of three
+commands gives three `%begin`/`%end` pairs and not one. Joined, their bodies are
+exactly what the same commands write when they run as a child process, so one
+reader parses either transport.
+
+**A pane id starts with a percent sign, exactly as a notification does.** Only
+the reply block tells them apart. A reader that classified by the first
+character alone would ask for a fresh reading once per pane it was told about.
+
+**`#{pane_title}` falls back to the host name.** It holds what a program set
+with an escape sequence, and a program such as `sleep` sets none. A column of
+host names says nothing, so the format asks whether the title is still the host
+name and names the running program when it is. Zellij falls back to the command
+in the same way, so the two clients draw alike.
+
+**A tmux window index is not its order.** A user sets `base-index` to any value,
+and a closed window leaves a gap. The row draws the number that the user types,
+so `TabReport` carries that number apart from the position. The position stays the
+order, because the shared code joins a tab report to a session layout on it.
+
+**A pane made from outside takes the environment of whoever made it.** A
+`split-window` run on the host gives the new pane the host's `PATH` and `USER`,
+and not the environment of the tmux client that the harness spawned. This is the
+same trap as the daemon socket, in a second form, and `tests/README.md` records
+both.
+
 ## Decisions
+
+**The control client signals, and a query answers.** Nothing decodes the layout
+string in `%layout-change`, which is a checksum and a nested geometry grammar.
+Every notification means one thing to this sidebar: ask again. The answer comes
+from `list-windows` and `list-panes -s`, which are plain tab separated text that
+a test can hand to the reader with no tmux running. The transport differs
+between a control client and a child process. The reading does not.
+
+**A capability check and not a `cfg`.** The sidebar asks the server what it can
+do, and keeps the control client only when the server names `no-output` back. A
+server that cannot do it gets the timer. So psmux works today with no
+`cfg(windows)` anywhere, and it gets the faster feed with no change to this code
+on the day it grows the flag.
+
+**The timer runs whether or not a control client does.** A control client that
+dies leaves no gap in the feed. A tick that arrives while a control client holds
+an unanswered question costs one line on a pipe.
+
+**The tmux client owns its own registration.** `reconnect_loop` registers on
+every round, because a daemon that restarted has dropped the client record and
+released the socket name. `Application::register` fires once, so it cannot be
+that path. The registration therefore stays in `client.rs`, and the desktop
+notifier arguments go with it. That is one path and not two.
+
+**A registration is a pair, and it is not the session name.** `Application` used
+to build `register <multiplexer> <session>`, and the client program accepts
+`zellij` and `socket` and nothing else. A tmux sidebar is reached at a socket
+name that it derived, and the session keeps the name the user gave it. So the
+pair travels as its own input, both halves opaque to the shared crate.
+
+**The sidebar draws on the alternate screen.** A whole-pane drawing has nothing
+to scroll back through. On the normal screen a host keeps a history for it
+anyway, which is two thousand lines per sidebar in tmux by default, and a user
+who scrolls that pane finds blank lines. One frame too tall for the pane would
+start filling that history, one screen at a time, and nothing would report it.
+Leaving the alternate screen also gives the pane back as the sidebar found it,
+which lets a test see that the client restores the terminal when it exits.
+
+**A whole-frame print cost the sidebar its redraw on a resize.** A print puts a
+whole pane of bytes on the wire, so the client drew only when the application
+changed. A resize changes nothing in the application, and tmux reports a resize
+to nobody, so the pane held the frame of the old width until something else
+moved. A ratatui `Terminal` reads the size on every draw and writes only the
+cells that differ. So the client draws after every event, and the gate that held
+the bug is gone.
+
+**Raw mode arrived with the drawing, not with the keys.** Without it the pane
+echoes a keystroke over the frame. With it, Ctrl-C no longer raises an
+interrupt, so the sidebar reads the input and answers `q` and Ctrl-C itself. A
+sidebar that read no key at all would be a pane the user could not leave.
 
 **Where the user is travels; nobody guesses at it.** A sidebar is sent events
 only while its own tab is on screen, so at most one of them can read the focus

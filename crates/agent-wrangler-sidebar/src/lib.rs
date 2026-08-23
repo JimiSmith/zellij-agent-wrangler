@@ -14,8 +14,9 @@ pub mod session;
 pub use application::Application;
 pub use model::{
     AgentSnapshot, Broadcast, ClientMessage, Decision, Effect, Focus, FocusTarget, Input,
-    InteractionItem, PaneId, PaneReport, PaneVisibility, Permission, ProgramToRun, RenderedView,
-    SessionLayout, SidebarPaneReport, TabId, TabLayout, TabReport, UserAction, ViewAction,
+    InteractionItem, PaneId, PaneReport, PaneVisibility, Permission, ProgramToRun, Registration,
+    RenderedView, SessionLayout, SidebarPaneReport, TabId, TabLayout, TabReport, UserAction,
+    ViewAction,
 };
 pub use options::Options;
 pub use session::{ReconciledFocus, ReconciledSession};

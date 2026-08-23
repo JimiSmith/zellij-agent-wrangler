@@ -268,7 +268,8 @@ instrumenting to tell whether it works.
 - [x] **1. The live tree.** Real tabs and panes, drawn read-only. Split, close,
       rename, switch tabs, move focus: the tree matches and the gutter follows.
       Also answers whether one instance sees the whole session's panes, which is
-      what decides the topology below.
+      what decides the topology below. The tmux client answers this one too, and
+      `tests/scripts/tmux_tree.steps` drives it against a real server.
 - [x] **2. Activation.** `Enter` and a click focus the real tab and pane. From
       here it is a usable pane switcher with no agent support at all.
 - [x] **3. Lifecycle.** Leaving an empty tab, `q` turning the sidebar off for

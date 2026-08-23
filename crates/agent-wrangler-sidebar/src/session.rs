@@ -196,6 +196,7 @@ pub fn reconcile(
             Tab {
                 id: report.id.clone(),
                 position: report.position,
+                displayed_index: report.displayed_index.clone(),
                 name: report.name.clone(),
                 active,
                 panes: listed,
@@ -245,6 +246,7 @@ mod tests {
         TabReport {
             id: TabId::new(id),
             position: TabPosition::at(position),
+            displayed_index: (position + 1).to_string(),
             name: id.to_string(),
             active: false,
         }

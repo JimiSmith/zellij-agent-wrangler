@@ -26,7 +26,8 @@ From the repository root:
     python3 tests/drive.py tests/scripts/bash_smoke.steps
     python3 tests/drive.py tests/scripts/zellij_smoke.steps
 
-The zellij cases skip themselves when `zellij` is not on `PATH`.
+The zellij cases skip themselves when `zellij` is not on `PATH`, and the tmux
+cases skip themselves when `tmux` is not on `PATH`.
 
 Dumps are written to `tests/out/`, which is not tracked.
 
@@ -35,6 +36,8 @@ step list from stdin when the script argument is `-`.
 
 ## Session safety
 
+### Which zellij sessions a run reaches
+
 Any zellij session the harness starts is named with the `wrangler-test-` prefix.
 Cleanup only ever deletes names carrying that prefix, and only names that a
 command in the run itself mentioned; `guard_session_name` raises on anything
@@ -42,7 +45,25 @@ else. `zellij kill-all-sessions` and `zellij delete-all-sessions` are refused
 outright as `sh:` steps. A developer's own sessions are never in reach of a test
 run.
 
-## Which daemon a run reaches
+### Which tmux server a run reaches
+
+A tmux server is one process, and `-L` chooses which one. A tmux command with no
+`-L` reaches the server that holds the sessions of the developer. That is the
+server that `kill-server` would end.
+
+Every tmux command in a run must therefore carry the server of the harness:
+
+    -L wrangler-test
+
+`guard_tmux_command` refuses a `spawn:`, `sh:` or `sh?:` step that runs tmux
+without it. The check finds tmux as a command word rather than as a substring,
+so `target/debug/tmux-agent-wrangler` needs no flag.
+
+Cleanup ends that server with `tmux -L wrangler-test kill-server`, and only when
+a command in the run started it. The name is written in `drive.py` and never
+taken from a step, so no step can point the kill at another server.
+
+### Which daemon a run reaches
 
 The daemon's socket is named for the user and for nothing else. A developer of
 this project has the real client installed, and its daemon holds that name. A
@@ -57,6 +78,29 @@ Every script that starts a daemon must give the run a user of its own:
 An `env:` step reaches the children that the harness spawns, and not a `sh:`
 step, which runs on the host. Any host script that runs the client must set the
 same name itself. `expect-turn.sh` and `raise-call.sh` are the examples.
+
+### Which client a run reaches
+
+The sidebar runs `agent-wrangler` by name, so the system resolves it. A
+developer of this project has the released client on `PATH`, and that one is
+older than the build under test. The sidebar then reads a record format that it
+does not know, and it draws OUT OF STEP in place of a tree.
+
+Every run that starts a sidebar must therefore put the build under test first:
+
+    PATH=$PWD/target/debug:$PATH
+
+A pane made by a host `sh:` step takes the environment of the host, and not the
+environment that the harness gave the tmux client. So the variables go on that
+`sh:` line itself:
+
+    sh: USER=wrangler-test PATH="$PWD/target/debug:$PATH" \
+        tmux -L wrangler-test split-window -t wrangler-test-tree "$PWD/target/debug/tmux-agent-wrangler"
+
+`tmux_tree.steps` is the example. A run that gets this wrong starts a daemon
+from the installed client, and that daemon outlives the run and holds the test
+socket. `reset-tmux.sh` ends only the daemon that the build under test started,
+so a stray one must be ended by hand.
 
 ## Steps
 

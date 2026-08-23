@@ -19,7 +19,35 @@ path = "src/bin/tmux-agent-wrangler.rs"
 # The types alone. This crate is handed records and does not read an agent's
 # files, so the JSON that reading them needs has no use here.
 agent-wrangler-core = { path = "../agent-wrangler-core", default-features = false }
+# The rows, the tree and the cells that they land in. This crate draws a sidebar
+# and decides nothing about what a row says.
+agent-wrangler-ui = { path = "../agent-wrangler-ui" }
+# The application state, the reducer and the session vocabulary. What tmux
+# reports is converted into that vocabulary here, and the effects that come back
+# are run here.
+agent-wrangler-sidebar = { path = "../agent-wrangler-sidebar" }
 # A local socket that is a unix socket on unix and a named pipe on Windows. The
 # daemon binds the name through the same crate, so both ends agree on what a
 # name means.
 interprocess = { version = "2.2", default-features = false }
+# The terminal under the drawing: raw mode, the alternate screen, the size of
+# the pane, and two buffers that hold the new frame and the one before it. The
+# pair of buffers limits a draw to the cells that changed. Every
+# difference between the systems is held inside this crate and inside the
+# crossterm that it brings, so nothing here needs a `cfg`.
+#
+# Default features are OFF, and `crossterm` is the one feature kept. That
+# feature carries the backend that writes to the standard output, and `init`
+# and `restore`, which take the pane and give it back. The features left off are
+# a layout cache that this crate lays out nothing with, macros that it writes
+# nothing with, an underline colour that it sets on nothing, and the calendar
+# widget.
+#
+# Turning the features off leaves `ratatui-widgets` in the build. The facade
+# depends on it and offers no way to say no. This crate draws one widget of its
+# own and uses none from there.
+#
+# The version must agree with the `ratatui-core` that `agent-wrangler-ui`
+# takes. Both ends handle the same `Buffer` and the same `Widget`, and two
+# copies of `ratatui-core` in one build would be two different traits.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }

@@ -72,8 +72,14 @@ impl Pane {
 pub struct Tab {
     /// The tab's own stable identity.
     pub id: TabId,
-    /// The current position of the tab, which orders and labels its row.
+    /// The current position of the tab, which orders its row.
     pub position: TabPosition,
+    /// The number that the row draws in front of the name.
+    ///
+    /// The order and the number are two facts. A host is free to number its
+    /// tabs from any value, and to leave a gap where a tab closed. So the row
+    /// draws this and never the position.
+    pub displayed_index: String,
     pub name: String,
     pub active: bool,
     pub panes: Vec<Pane>,
@@ -130,7 +136,7 @@ fn children(tab: &Tab) -> Vec<Child<'_>> {
 /// The row a tab draws for itself.
 fn window_row(tab: &Tab) -> Row {
     Row::new(RowContent::Tab {
-        index: tab.position.one_based().to_string(),
+        index: tab.displayed_index.clone(),
         name: tab.name.clone(),
         placement: tab_placement(tab.active),
         color: None,
@@ -297,6 +303,7 @@ mod tests {
         Tab {
             id: TabId::new(name),
             position: TabPosition::at(position),
+            displayed_index: (position + 1).to_string(),
             name: name.to_string(),
             active,
             panes,

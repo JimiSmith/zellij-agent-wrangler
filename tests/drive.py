@@ -10,10 +10,15 @@ Every failure is loud. The harness prints the current screen and the tail of the
 raw byte stream before the run exits with a non-zero status. A harness that
 fails quietly costs more time than no harness at all.
 
-Session safety: this harness only creates and deletes zellij sessions with names
-that start with `wrangler-test-`. Cleanup uses the names that this run mentioned.
-`_guard_session_name` rejects every name outside the prefix, so the harness never
-reaches the sessions of the developer.
+Session safety, zellij: this harness only creates and deletes zellij sessions
+with names that start with `wrangler-test-`. Cleanup uses the names that this
+run mentioned. `guard_session_name` rejects every name outside the prefix, so the
+harness never reaches the sessions of the developer.
+
+Session safety, tmux: a tmux command must run against a server of the harness's
+own. `guard_tmux_command` rejects a tmux command that does not carry
+`-L wrangler-test`. That server is a separate process, so the sessions of the
+developer are out of reach whatever a command says.
 """
 
 import argparse
@@ -40,6 +45,20 @@ _SESSION_NAME = re.compile(r"wrangler-test-[A-Za-z0-9_.-]+")
 
 # Shell commands that can reach beyond the sessions that this harness created.
 _FORBIDDEN = ("kill-all-sessions", "delete-all-sessions")
+
+# The tmux server that this harness starts, and the only one it may reach.
+TMUX_SERVER = "wrangler-test"
+TMUX_SERVER_FLAG = "-L " + TMUX_SERVER
+
+# A tmux command in a shell line. The match needs a word and not a substring:
+# `target/debug/tmux-agent-wrangler` holds the letters and is not a tmux command.
+# The group before the name accepts a command run by its path, such as
+# `/usr/local/bin/tmux`. The lookahead after the name separates `tmux` from
+# `tmux-agent-wrangler`. Both edges accept a quote, because a step can
+# write `sh -c 'tmux ...'`.
+_TMUX_COMMAND = re.compile(
+    r"""(?:^|[\s;|&('"`])(?:[\w./-]*/)?tmux(?=[\s;|&)'"`]|$)"""
+)
 
 DEFAULT_ROWS = 24
 DEFAULT_COLS = 80
@@ -209,6 +228,32 @@ def guard_session_name(name):
     return name
 
 
+def runs_tmux(text):
+    """Tells whether a command line runs the tmux program.
+
+    The tmux client of this project is called `tmux-agent-wrangler`. Its path
+    holds the letters of `tmux` and it is not a tmux command, so a substring
+    test refuses a command that is safe.
+    """
+    return _TMUX_COMMAND.search(text) is not None
+
+
+def guard_tmux_command(text):
+    """Refuses a tmux command that does not name the server of this harness.
+
+    A tmux server is one process, and `-L` chooses which one. Without the flag,
+    a command reaches the server that holds the sessions of the developer. That
+    is the server that `kill-server` would end.
+    """
+    if runs_tmux(text) and TMUX_SERVER_FLAG not in text:
+        raise StepFailure(
+            "refusing to run %r: a tmux command must carry %r, so that it "
+            "reaches the server of this harness and no other"
+            % (text, TMUX_SERVER_FLAG)
+        )
+    return text
+
+
 class Runner:
     def __init__(self, rows=DEFAULT_ROWS, cols=DEFAULT_COLS, outdir=None, verbose=True):
         self.rows = rows
@@ -218,6 +263,9 @@ class Runner:
         self.verbose = verbose
         self.pty = None
         self.sessions = []
+        # Whether a command in this run started the tmux server of the harness.
+        # Cleanup ends that server, and it ends nothing when no command ran tmux.
+        self.started_tmux = False
         self.dumps = []
         # These variables go to every child that starts after the `env:` step
         # that set them. A script pins PS1 or TERM in this way.
@@ -229,6 +277,7 @@ class Runner:
         if self.pty is not None:
             self.pty.close()
         argv = shlex.split(command)
+        guard_tmux_command(command)
         self._note_sessions(command)
         child_env = dict(os.environ)
         child_env.setdefault("TERM", "xterm-256color")
@@ -240,19 +289,23 @@ class Runner:
         self.pty = Pty(argv, self.rows, self.cols, child_env)
 
     def _note_sessions(self, text):
-        """Records every `wrangler-test-` name that a command mentions.
+        """Records what a command mentions, so that cleanup knows what to end.
 
-        Cleanup works from this list. The harness deletes a session only because
-        a command from this run named it.
+        Cleanup works from these records. The harness deletes a zellij session
+        only because a command from this run named it. The harness ends the tmux
+        server only because a command from this run ran tmux.
         """
         for name in _SESSION_NAME.findall(text):
             if name not in self.sessions:
                 self.sessions.append(name)
+        if runs_tmux(text):
+            self.started_tmux = True
 
     def cleanup(self):
         if self.pty is not None:
             self.pty.close()
             self.pty = None
+        self._end_tmux_server()
         if not self.sessions or not which("zellij"):
             return
         live = set(live_sessions())
@@ -266,6 +319,22 @@ class Runner:
                 capture_output=True,
                 text=True,
             )
+
+    def _end_tmux_server(self):
+        """Ends the tmux server of this harness, and no other.
+
+        `kill-server` is safe here because `-L` names one server, and that
+        server holds only what this run started. The command is a list and not a
+        shell line, so the server name cannot come from anywhere else.
+        """
+        if not self.started_tmux or not which("tmux"):
+            return
+        self._log("cleanup: ending tmux server %s" % TMUX_SERVER)
+        subprocess.run(
+            ["tmux", "-L", TMUX_SERVER, "kill-server"],
+            capture_output=True,
+            text=True,
+        )
 
     # -- steps ------------------------------------------------------------
 
@@ -313,6 +382,7 @@ class Runner:
                     "refusing to run %r: it would reach sessions this harness "
                     "did not create" % argument
                 )
+        guard_tmux_command(argument)
         self._note_sessions(argument)
         result = subprocess.run(argument, shell=True, capture_output=True, text=True)
         if result.stdout.strip():

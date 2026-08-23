@@ -26,7 +26,7 @@ use crate::FatalError;
 ///
 /// Sources: <https://crates.io/crates/psmux> and
 /// <https://github.com/psmux/psmux>.
-const TMUX_PROGRAM: &str = "tmux";
+pub const TMUX_PROGRAM: &str = "tmux";
 
 /// The tmux session that holds one pane, as `#{session_id}` names it.
 ///
@@ -57,6 +57,14 @@ impl TmuxSessionId {
     /// The digits of the id, without the dollar sign.
     pub fn digits(&self) -> &str {
         &self.0
+    }
+
+    /// The id as tmux writes it, which is what a `-t` argument takes.
+    ///
+    /// A bare run of digits names a window index to tmux and not a session.
+    /// The dollar sign therefore makes the target name the session.
+    pub fn as_target(&self) -> String {
+        format!("${}", self.0)
     }
 }
 

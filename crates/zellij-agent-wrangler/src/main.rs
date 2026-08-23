@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use agent_wrangler_core::agent::AGENTS_MESSAGE;
 use agent_wrangler_sidebar::{
-    Application, ClientMessage, Effect, Input, Options, PaneId, Permission, UserAction,
+    Application, ClientMessage, Effect, Input, Options, PaneId, Permission, Registration,
+    UserAction,
 };
 use agent_wrangler_ui::{ansi, Rect};
 use zellij_agent_wrangler::adapter;
@@ -17,6 +18,13 @@ use zellij_tile::prelude::*;
 /// these calls reads a working directory, so the root is safe.
 const RUN_FROM: &str = "/";
 const CALL: &str = "call";
+
+/// The word that names this kind of client to the client program.
+///
+/// The daemon reaches a zellij sidebar with `zellij pipe`, and this word asks
+/// the daemon to do that. The client program accepts a set of these words, and
+/// it refuses a word outside that set with an exit status and nothing drawn.
+const REGISTER_KIND: &str = "zellij";
 
 /// The wait of a stale frame before the draw, in seconds.
 ///
@@ -190,51 +198,70 @@ impl Plugin {
         }
     }
 
-    fn update_input(&self, event: Event) -> Option<Input> {
+    /// What one host event says, as the inputs that carry it.
+    ///
+    /// A host event carries more than one fact in one case. A session update
+    /// names the session and it names how the daemon reaches this sidebar, and
+    /// those are two inputs.
+    fn update_input(&self, event: Event) -> Vec<Input> {
         match event {
-            Event::Visible(visible) => Some(Input::VisibilityChanged(visible)),
-            Event::TabUpdate(tabs) => Some(Input::TabsReported(adapter::tabs(tabs))),
-            Event::PaneUpdate(panes) => Some(Input::LayoutReported(adapter::layout(
+            Event::Visible(visible) => vec![Input::VisibilityChanged(visible)],
+            Event::TabUpdate(tabs) => vec![Input::TabsReported(adapter::tabs(tabs))],
+            Event::PaneUpdate(panes) => vec![Input::LayoutReported(adapter::layout(
                 panes,
                 self.plugin_id,
-            ))),
+            ))],
             Event::CommandChanged(zellij_tile::prelude::PaneId::Terminal(id), ..)
             | Event::CwdChanged(zellij_tile::prelude::PaneId::Terminal(id), ..) => {
-                Some(Input::PaneChanged(PaneId::new(id.to_string())))
+                vec![Input::PaneChanged(PaneId::new(id.to_string()))]
             }
             Event::SessionUpdate(sessions, _) => sessions
                 .into_iter()
                 .find(|session| session.is_current_session)
-                .map(|session| Input::SessionNamed(session.name)),
-            Event::RunCommandResult(exit, _, stderr, context) => Some(Input::CommandFinished {
+                .map(|session| {
+                    // The daemon reaches a zellij sidebar through the session,
+                    // so the name is both what the pane draws and how this
+                    // client is registered.
+                    vec![
+                        Input::SessionNamed(session.name.clone()),
+                        Input::RegistrationReported(Registration {
+                            kind: REGISTER_KIND.to_string(),
+                            id: session.name,
+                        }),
+                    ]
+                })
+                .unwrap_or_default(),
+            Event::RunCommandResult(exit, _, stderr, context) => vec![Input::CommandFinished {
                 exit,
                 stderr,
                 call: context.get(CALL).cloned().unwrap_or_default(),
-            }),
+            }],
             Event::PermissionRequestResult(status) => {
-                Some(Input::PermissionReported(match status {
+                vec![Input::PermissionReported(match status {
                     PermissionStatus::Granted => Permission::Granted,
                     PermissionStatus::Denied => Permission::Denied,
-                }))
+                })]
             }
             Event::Key(key) => match key.bare_key {
-                BareKey::Down | BareKey::Char('j') => Some(Input::User(UserAction::Next)),
-                BareKey::Up | BareKey::Char('k') => Some(Input::User(UserAction::Previous)),
-                BareKey::Enter => Some(Input::User(UserAction::Activate)),
-                BareKey::Char('q') => Some(Input::User(UserAction::Quit)),
-                _ => None,
+                BareKey::Down | BareKey::Char('j') => vec![Input::User(UserAction::Next)],
+                BareKey::Up | BareKey::Char('k') => vec![Input::User(UserAction::Previous)],
+                BareKey::Enter => vec![Input::User(UserAction::Activate)],
+                BareKey::Char('q') => vec![Input::User(UserAction::Quit)],
+                _ => Vec::new(),
             },
             Event::Mouse(Mouse::LeftClick(line, _)) => usize::try_from(line)
                 .ok()
-                .map(|line| Input::User(UserAction::Click(line))),
-            _ => None,
+                .map(|line| Input::User(UserAction::Click(line)))
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
         }
     }
 }
 
 impl ZellijPlugin for Plugin {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
-        self.application = Application::new(Options::from_configuration(&configuration), "zellij");
+        self.application = Application::new(Options::from_configuration(&configuration));
         self.plugin_id = get_plugin_ids().plugin_id;
         request_permission(&[
             PermissionType::ReadApplicationState,
@@ -271,8 +298,16 @@ impl ZellijPlugin for Plugin {
         if let Event::Timer(_) = event {
             return self.schedule.due();
         }
-        match self.update_input(event) {
-            Some(input) => self.reduce(input, true),
+        let inputs = self.update_input(event);
+        match inputs.split_last() {
+            // The settle runs once, after the last input of the event. An
+            // event that carries two facts is still one event.
+            Some((last, rest)) => {
+                for input in rest {
+                    self.reduce(input.clone(), false);
+                }
+                self.reduce(last.clone(), true);
+            }
             None => self.reduce(Input::EventSettled, false),
         }
         false
