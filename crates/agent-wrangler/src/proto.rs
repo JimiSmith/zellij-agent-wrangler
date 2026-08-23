@@ -106,13 +106,20 @@ pub enum Inbound {
 /// client. A line that says one of those things does not decode here at all,
 /// so no arm has to turn it down.
 ///
-/// Every variant is also an [`Inbound`] variant, written the same way. A test
-/// below fails if the two ever drift apart.
+/// A variant that appears in both types is written the same way. The daemon's
+/// own socket and a client transport carry the same words. A test below fails
+/// if the two drift apart. That test covers the `Seen` line only.
+///
+/// A beat appears in this type alone. A beat says that its own transport is
+/// alive. The daemon's own socket is a transport to no client. There is
+/// nothing there to keep alive.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Told {
     /// The user reached a session that called for them.
     Seen { session: String },
+    /// The client is there. This says nothing else.
+    Beat,
 }
 
 /// One message that the daemon received or sent, and the time of it.
@@ -360,6 +367,22 @@ mod tests {
         assert_eq!(
             read_message::<_, Inbound>(&mut line.as_bytes()).unwrap(),
             Some(Inbound::Seen { session })
+        );
+    }
+
+    #[test]
+    fn a_beat_reaches_a_client_transport_and_no_other() {
+        // A beat is about the transport that carried it. The daemon's own socket
+        // is a transport to no client. A beat written there costs the line and not
+        // the connection, because a line that does not decode is passed over.
+        let line = agent_wrangler_core::told::Told::Beat.encode();
+        assert_eq!(
+            read_message::<_, Told>(&mut line.as_bytes()).unwrap(),
+            Some(Told::Beat)
+        );
+        assert_eq!(
+            read_message::<_, Inbound>(&mut line.as_bytes()).unwrap(),
+            None
         );
     }
 
