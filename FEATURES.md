@@ -105,7 +105,8 @@ The color name is the fact; how to draw it is the sidebar's.
 - [x] Persists across its own restart, keeping only what still has a live process
 - [x] Delivers to registered clients, over a pipe it holds open or a socket it
       binds and listens on
-- [x] Gives up on a socket sink that has had no peer for thirty seconds
+- [x] Gives up on a client of either kind that has said nothing for ninety
+      seconds
 - [x] Answers a call for the user when a client says it was reached
 - [x] Builds and runs on Linux, macOS and Windows
 - [x] Reaps a session whose process number has been handed to something else

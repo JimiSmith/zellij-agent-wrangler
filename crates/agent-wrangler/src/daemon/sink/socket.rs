@@ -16,14 +16,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{GenericNamespaced, Listener, Stream};
 
 use super::slot::Slot;
-use super::NO_PEER;
-use crate::proto::Told;
+use crate::proto::{Sink, Told};
 
 /// How long to wait after an accept that failed, before accepting again.
 ///
@@ -48,17 +47,10 @@ impl Bound {
     pub fn fill(&self, line: String) {
         self.peers.fill(line);
     }
-
-    /// Whether this name has had no peer for longer than [`NO_PEER`].
-    pub fn stale(&self, now: Instant) -> bool {
-        self.peers
-            .alone_since()
-            .is_some_and(|since| now.duration_since(since) >= NO_PEER)
-    }
 }
 
-/// Every peer on one name, the newest payload, and how long there has been
-/// nobody.
+/// Every peer on one name, and the newest payload.
+#[derive(Default)]
 struct Peers {
     fed: Mutex<Fed>,
 }
@@ -72,21 +64,9 @@ struct Fed {
     /// The id of the next peer. Ids are never reused, so a peer that leaves
     /// cannot take a later peer's slot with it.
     next: u64,
-    /// When the last peer left, or when the name was bound. `None` while a peer
-    /// is connected.
-    alone: Option<Instant>,
 }
 
 impl Peers {
-    fn new(now: Instant) -> Self {
-        Peers {
-            fed: Mutex::new(Fed {
-                alone: Some(now),
-                ..Fed::default()
-            }),
-        }
-    }
-
     /// Takes in one peer, and gives it the payload that is held.
     fn joined(&self) -> (u64, Arc<Slot>) {
         let mut fed = self.held();
@@ -97,19 +77,18 @@ impl Peers {
             slot.fill(last);
         }
         fed.slots.insert(id, Arc::clone(&slot));
-        fed.alone = None;
         (id, slot)
     }
 
-    /// Drops one peer and releases its writer. If it was the last peer, the
-    /// clock that retires this sink starts now.
-    fn left(&self, id: u64, now: Instant) {
+    /// Drops one peer and releases its writer.
+    ///
+    /// A peer that leaves is not a client that has gone. The sidebars of a
+    /// session come and go while the session stays, and nothing here retires a
+    /// client. The daemon retires a client that stopped speaking.
+    fn left(&self, id: u64) {
         let mut fed = self.held();
         if let Some(slot) = fed.slots.remove(&id) {
             slot.close();
-        }
-        if fed.slots.is_empty() {
-            fed.alone = Some(now);
         }
     }
 
@@ -121,17 +100,12 @@ impl Peers {
         fed.last = Some(line);
     }
 
-    fn alone_since(&self) -> Option<Instant> {
-        self.held().alone
-    }
-
     /// Releases every writer. The readers end when their peers disconnect.
-    fn close_all(&self, now: Instant) {
+    fn close_all(&self) {
         let mut fed = self.held();
         for (_, slot) in std::mem::take(&mut fed.slots) {
             slot.close();
         }
-        fed.alone = Some(now);
     }
 
     fn held(&self) -> MutexGuard<'_, Fed> {
@@ -146,15 +120,18 @@ impl Peers {
 /// Side effect: this function binds a name and spawns a thread. It answers
 /// `None` for a name that something else already answers, and for one that
 /// cannot be bound at all.
-pub fn bind(name: &str, told: &Sender<Told>) -> Option<Bound> {
+pub fn bind(name: &str, told: &Sender<(Sink, Told)>) -> Option<Bound> {
     let listener = super::super::claim(name).ok().flatten()?;
-    let peers = Arc::new(Peers::new(Instant::now()));
+    let peers = Arc::new(Peers::default());
     let stop = Arc::new(AtomicBool::new(false));
 
+    let sink = Sink::Socket {
+        name: name.to_string(),
+    };
     let accepting = (Arc::clone(&peers), Arc::clone(&stop), told.clone());
     thread::spawn(move || {
         let (peers, stop, told) = accepting;
-        accept_until_stopped(&listener, &peers, &stop, &told);
+        accept_until_stopped(&sink, &listener, &peers, &stop, &told);
     });
 
     Some(Bound {
@@ -172,22 +149,24 @@ pub fn bind(name: &str, told: &Sender<Told>) -> Option<Bound> {
 /// which is what releases the name.
 ///
 /// The reader of a peer that is still connected ends when that peer
-/// disconnects. Nothing here shuts a peer's stream, because a retired sink is
-/// one that had no peer in the first place.
+/// disconnects. Nothing here shuts a peer's stream. A peer that reads a name
+/// the daemon released reads nothing more, and gives up on the daemon by
+/// itself.
 pub fn shut(bound: &Bound) {
     bound.stop.store(true, Ordering::Relaxed);
     if let Ok(name) = bound.name.as_str().to_ns_name::<GenericNamespaced>() {
         let _ = Stream::connect(name);
     }
-    bound.peers.close_all(Instant::now());
+    bound.peers.close_all();
 }
 
 /// Accepts peers until the daemon says to stop.
 fn accept_until_stopped(
+    sink: &Sink,
     listener: &Listener,
     peers: &Arc<Peers>,
     stop: &AtomicBool,
-    told: &Sender<Told>,
+    told: &Sender<(Sink, Told)>,
 ) {
     loop {
         let incoming = listener.accept();
@@ -200,7 +179,7 @@ fn accept_until_stopped(
             thread::sleep(AFTER_REFUSAL);
             continue;
         };
-        joined(peers, stream, told);
+        joined(sink, peers, stream, told);
     }
 }
 
@@ -209,7 +188,7 @@ fn accept_until_stopped(
 /// Side effect: this function spawns two threads. Both hold the same stream
 /// through an `Arc`, which is what the transport's own documentation asks for:
 /// a reference to a stream reads and writes, and splitting it buys nothing.
-fn joined(peers: &Arc<Peers>, stream: Stream, told: &Sender<Told>) {
+fn joined(sink: &Sink, peers: &Arc<Peers>, stream: Stream, told: &Sender<(Sink, Told)>) {
     let stream = Arc::new(stream);
     let (id, slot) = peers.joined();
 
@@ -218,11 +197,13 @@ fn joined(peers: &Arc<Peers>, stream: Stream, told: &Sender<Told>) {
 
     let peers = Arc::clone(peers);
     let told = told.clone();
+    let sink = sink.clone();
     thread::spawn(move || {
-        super::read_until_ended(&*stream, &told);
-        // The end of the stream says that this peer has gone. That releases its
-        // writer, and starts the clock if it was the last peer.
-        peers.left(id, Instant::now());
+        super::read_until_ended(&sink, &*stream, &told);
+        // The end of the stream says that this peer has gone, so its writer is
+        // released. The client that the peer belongs to is left alone. A
+        // sidebar that restarts loses its peer and stays a client.
+        peers.left(id);
     });
 }
 
@@ -248,6 +229,7 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader};
     use std::sync::mpsc::channel;
+    use std::time::Instant;
 
     /// A name of this run's own, so that two tests never share a socket.
     fn name(what: &str) -> String {
@@ -307,54 +289,25 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_that_leaves_is_dropped_and_starts_the_clock() {
+    fn a_peer_that_leaves_is_dropped_and_releases_its_writer() {
         let (told, _heard) = channel();
         let name = name("peer-leaves");
         let bound = bind(&name, &told).expect("a bound name");
         let peer = connect(&name);
         let until = Instant::now() + Duration::from_secs(5);
-        while bound.peers.alone_since().is_some() && Instant::now() < until {
+        while bound.peers.held().slots.is_empty() && Instant::now() < until {
             thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(bound.peers.alone_since(), None, "a peer is connected");
+        assert_eq!(bound.peers.held().slots.len(), 1, "a peer is connected");
         drop(peer);
         let until = Instant::now() + Duration::from_secs(5);
-        while bound.peers.alone_since().is_none() && Instant::now() < until {
+        while !bound.peers.held().slots.is_empty() && Instant::now() < until {
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(
-            bound.peers.alone_since().is_some(),
-            "the end of the stream says that the peer has gone"
-        );
         assert!(
             bound.peers.held().slots.is_empty(),
-            "its writer is released"
+            "the end of the stream says that the peer has gone"
         );
-        shut(&bound);
-    }
-
-    #[test]
-    fn a_name_with_no_peer_for_long_enough_is_stale() {
-        let (told, _heard) = channel();
-        let name = name("stale");
-        let bound = bind(&name, &told).expect("a bound name");
-        let now = Instant::now();
-        assert!(!bound.stale(now), "it was only just bound");
-        assert!(bound.stale(now + NO_PEER));
-        shut(&bound);
-    }
-
-    #[test]
-    fn a_name_with_a_peer_is_never_stale() {
-        let (told, _heard) = channel();
-        let name = name("not-stale");
-        let bound = bind(&name, &told).expect("a bound name");
-        let _peer = connect(&name);
-        let until = Instant::now() + Duration::from_secs(5);
-        while bound.peers.alone_since().is_some() && Instant::now() < until {
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(!bound.stale(Instant::now() + NO_PEER * 10));
         shut(&bound);
     }
 
@@ -406,7 +359,10 @@ mod tests {
     }
 
     #[test]
-    fn what_a_peer_says_reaches_the_daemon() {
+    fn what_a_peer_says_reaches_the_daemon_with_the_client_that_said_it() {
+        // The name travels with the line. The daemon holds one clock for each
+        // client, and the reader of a transport is the only place that knows
+        // which client is at the other end of it.
         let (told, heard) = channel();
         let name = name("speaks");
         let bound = bind(&name, &told).expect("a bound name");
@@ -416,18 +372,32 @@ mod tests {
         writer.flush().expect("a message");
         assert_eq!(
             heard.recv_timeout(Duration::from_secs(5)),
-            Ok(Told::Seen {
-                session: "9f3c-1a".to_string()
-            })
+            Ok((
+                Sink::Socket { name: name.clone() },
+                Told::Seen {
+                    session: "9f3c-1a".to_string()
+                }
+            ))
         );
         shut(&bound);
     }
 
     #[test]
-    fn the_time_without_a_peer_is_longer_than_any_restart() {
-        // A client that is retired goes deaf for good, because it registers
-        // once. The wait must cover a sidebar restarting and a daemon restarting
-        // with its clients connecting again.
-        assert!(NO_PEER >= Duration::from_secs(30));
+    fn a_beat_from_a_peer_reaches_the_daemon() {
+        // The line that a sidebar with nothing to report sends. It says that
+        // the client can still send a message, which is what keeps it a client.
+        let (told, heard) = channel();
+        let name = name("beats");
+        let bound = bind(&name, &told).expect("a bound name");
+        let peer = connect(&name);
+        let mut writer: &Stream = &peer;
+        writeln!(writer, "{}", agent_wrangler_core::told::Told::Beat.encode())
+            .expect("a heartbeat");
+        writer.flush().expect("a heartbeat");
+        assert_eq!(
+            heard.recv_timeout(Duration::from_secs(5)),
+            Ok((Sink::Socket { name: name.clone() }, Told::Beat))
+        );
+        shut(&bound);
     }
 }

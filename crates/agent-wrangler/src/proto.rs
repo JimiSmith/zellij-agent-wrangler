@@ -106,13 +106,21 @@ pub enum Inbound {
 /// client. A line that says one of those things does not decode here at all,
 /// so no arm has to turn it down.
 ///
-/// Every variant is also an [`Inbound`] variant, written the same way. A test
-/// below fails if the two ever drift apart.
+/// A variant that appears in both types is written the same way. The daemon's
+/// own socket and a client transport carry the same words. A test below fails
+/// if the two drift apart. That test covers the `Seen` line only.
+///
+/// A beat appears in this type alone. A beat says that the client on its own
+/// transport can still send a message. The daemon's own socket is a transport
+/// to no client, so there is nothing there for a beat to say anything about.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Told {
     /// The user reached a session that called for them.
     Seen { session: String },
+    /// The client is there and can still send a message. This says nothing
+    /// else.
+    Beat,
 }
 
 /// One message that the daemon received or sent, and the time of it.
@@ -153,6 +161,13 @@ pub enum What {
     Registered { sink: Sink },
     /// In: a client said that the user reached a session that called for them.
     Seen { session: String, told: bool },
+    /// In: a client said that it is there and can still send a message.
+    ///
+    /// The daemon gives up on a client that stops saying this. A run of these
+    /// says how fast the circle turns while nothing else happens. A client with
+    /// something to report sends no separate beat, so a `Seen` counts as one of
+    /// these and no record here follows it.
+    Beat { sink: Sink },
     /// In: something asked for the state on its own connection.
     Asked,
     /// Out: the state goes to this client, with this many agents in it.
@@ -161,18 +176,17 @@ pub enum What {
     /// write and not a process run. There is nothing to say afterwards about a
     /// delivery that landed, and no time to measure.
     Delivering { sink: Sink, agents: usize },
-    /// Out: a delivery to this client failed, so the client refused it.
+    /// Out: a delivery to this client did not land.
     ///
     /// Only a failure is worth a second record. The daemon learns of it after
-    /// the state went out, because nothing waits on a write. Enough of these in
-    /// a row retires the client.
+    /// the state went out, because nothing waits on a write. No count of these
+    /// retires a client. A client leaves for going quiet and for nothing else.
     Failed { sink: Sink },
     /// Out: the daemon gave up on this client and delivers to it no more.
     ///
-    /// A client leaves for one of two reasons, and this record covers both. A
-    /// zellij client refused enough deliveries in a row. A socket sink had no
-    /// peer for long enough. Without this record, a feed that stopped has no
-    /// explanation anywhere.
+    /// A client of either kind leaves for one reason. It said nothing for
+    /// longer than the daemon waits. Without this record, a feed that stopped
+    /// has no explanation anywhere.
     Retired { sink: Sink },
     /// Records that the daemon cannot hand over fast enough. A watcher that
     /// falls behind loses records and does not hold the daemon up. The daemon
@@ -360,6 +374,23 @@ mod tests {
         assert_eq!(
             read_message::<_, Inbound>(&mut line.as_bytes()).unwrap(),
             Some(Inbound::Seen { session })
+        );
+    }
+
+    #[test]
+    fn a_beat_reaches_a_client_transport_and_no_other() {
+        // A beat is about the transport that carried it. The daemon's own
+        // socket is a transport to no client. A beat written there costs the
+        // line and not the connection, because a line that does not decode is
+        // passed over.
+        let line = agent_wrangler_core::told::Told::Beat.encode();
+        assert_eq!(
+            read_message::<_, Told>(&mut line.as_bytes()).unwrap(),
+            Some(Told::Beat)
+        );
+        assert_eq!(
+            read_message::<_, Inbound>(&mut line.as_bytes()).unwrap(),
+            None
         );
     }
 

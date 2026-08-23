@@ -204,5 +204,10 @@ A daemon and a sidebar can be different builds. So a state message names the
 format it is written in. A sidebar that meets a format it does not know says so
 at the top of the pane.
 
-`FORMAT` in `agent-wrangler-core` is that number. A rename is not a format
-change. Bump it only when the records themselves change shape.
+`FORMAT` in `agent-wrangler-core` is that number. Bump it when the records
+change shape, and when the daemon starts to need a message that an older client
+does not send. `Told::Beat` is the second kind: the records did not move, and a
+client too old to beat is dropped after a minute and a half with nothing on the
+pane to explain it. A rename is neither kind. Never write the number in a test.
+Read the constant, or the next bump breaks tests that the change did not
+touch.

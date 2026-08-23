@@ -170,23 +170,22 @@ fn read_until_connection_ends<R: Read, W: Write>(reader: R, out: &mut W) -> Conn
     }
 }
 
-/// Reads one connection until it ends, and heartbeats on it for as long as it lasts.
+/// Reads one connection until it ends, and heartbeats on it for as long as it
+/// lasts.
 ///
-/// `heartbeat` is `None` while the shared message that names a heartbeat does
-/// not exist.
+/// Every connection beats. The daemon gives up on a client that says nothing,
+/// and a client that only reads says nothing at all.
 pub fn read_one_connection<W: Write>(
     stream: Stream,
     out: &mut W,
-    heartbeat: Option<&HeartbeatSettings>,
+    heartbeat: &HeartbeatSettings,
 ) -> ConnectionEnd {
     let stream = Arc::new(stream);
-    let beating = heartbeat.map(|settings| heartbeat::start_heartbeat(&stream, settings));
+    let beating = heartbeat::start_heartbeat(&stream, heartbeat);
     // The deref is explicit because the reader is now generic, and a generic
     // parameter takes no deref coercion. `&Stream` is what reads.
     let ended = read_until_connection_ends(&*stream, out);
-    if let Some(beating) = beating {
-        beating.stop();
-    }
+    beating.stop();
     ended
 }
 
@@ -203,7 +202,7 @@ pub fn read_one_connection<W: Write>(
 /// ends is the daemon's side of the contract and not this program's.
 fn reconnect_loop<W, N, R, C>(
     out: &mut W,
-    heartbeat: Option<&HeartbeatSettings>,
+    heartbeat: &HeartbeatSettings,
     mut name: N,
     mut register: R,
     mut connect: C,
@@ -231,10 +230,7 @@ where
 /// Side effect: this function runs `tmux` and `agent-wrangler`, and it writes to
 /// `out`. It returns when the reader of the output goes away, and it answers an
 /// error when it gives up on the daemon.
-pub fn run_client<W: Write>(
-    out: &mut W,
-    heartbeat: Option<&HeartbeatSettings>,
-) -> Result<(), FatalError> {
+pub fn run_client<W: Write>(out: &mut W, heartbeat: &HeartbeatSettings) -> Result<(), FatalError> {
     let location = TmuxLocation::from_environment()?;
     reconnect_loop(
         out,
@@ -338,7 +334,7 @@ mod tests {
         pair.send_line(&payload(""));
         let mut out = Vec::new();
         assert_eq!(
-            read_one_connection(pair.close_daemon_end(), &mut out, None),
+            read_one_connection(pair.close_daemon_end(), &mut out, &test_heartbeat()),
             ConnectionEnd::DaemonDisconnected
         );
         assert_eq!(
@@ -352,7 +348,7 @@ mod tests {
         let pair = test_daemon::connected_pair("stream-ends");
         let mut out = Vec::new();
         assert_eq!(
-            read_one_connection(pair.close_daemon_end(), &mut out, None),
+            read_one_connection(pair.close_daemon_end(), &mut out, &test_heartbeat()),
             ConnectionEnd::DaemonDisconnected
         );
         assert!(out.is_empty());
@@ -395,9 +391,23 @@ mod tests {
         let pair = test_daemon::connected_pair("reader-went");
         pair.send_line(&payload("recA"));
         assert_eq!(
-            read_one_connection(pair.close_daemon_end(), &mut FailingWriter, None),
+            read_one_connection(
+                pair.close_daemon_end(),
+                &mut FailingWriter,
+                &test_heartbeat()
+            ),
             ConnectionEnd::OutputClosed
         );
+    }
+
+    /// A heartbeat that no test waits out. Every test here is about something
+    /// else, and a beat that arrives during one must not be read as its
+    /// subject.
+    fn test_heartbeat() -> HeartbeatSettings {
+        HeartbeatSettings {
+            interval: Duration::from_secs(300),
+            line: agent_wrangler_core::told::Told::Beat.encode(),
+        }
     }
 
     #[test]
@@ -410,7 +420,7 @@ mod tests {
         };
         let serving = thread::spawn(move || {
             let mut out = Vec::new();
-            read_one_connection(pair.client_end, &mut out, Some(&settings))
+            read_one_connection(pair.client_end, &mut out, &settings)
         });
         assert_eq!(
             heard.recv_timeout(test_daemon::TEST_TIMEOUT),
@@ -461,7 +471,7 @@ mod tests {
         };
 
         let mut out = Vec::new();
-        assert!(reconnect_loop(&mut out, None, name, register, connect).is_err());
+        assert!(reconnect_loop(&mut out, &test_heartbeat(), name, register, connect).is_err());
         assert_eq!(
             *done.borrow(),
             ["name", "register", "connect", "name", "register", "connect"]
@@ -508,11 +518,15 @@ mod tests {
 
     #[test]
     fn giving_up_takes_a_bounded_time() {
-        // Today the daemon gives up on a socket sink that has had no peer for
-        // thirty seconds, and never while a peer is connected. The heartbeat
-        // story replaces that rule with ninety seconds of silence. A reconnect
-        // must end well inside the shorter of the two, or the reconnect itself
-        // costs the registration that it is trying to restore.
+        // The daemon gives up on a client that said nothing for ninety seconds.
+        // A reconnect must end well inside that time. A slower reconnect costs
+        // the registration that it tries to restore, because a client registers
+        // once and a client that the daemon dropped goes deaf.
+        //
+        // The daemon owns the ninety seconds and this crate cannot read it. A
+        // shared constant for it would put a daemon rule in a client, so this
+        // bound is written down instead. Three seconds is safe for any silence
+        // longer than about ten.
         assert!(PAUSE_BETWEEN_ATTEMPTS * CONNECT_ATTEMPTS <= Duration::from_secs(3));
     }
 }

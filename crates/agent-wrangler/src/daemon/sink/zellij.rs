@@ -15,7 +15,6 @@ use std::thread;
 use agent_wrangler_core::agent::AGENTS_MESSAGE;
 
 use super::slot::Slot;
-use super::Delivery;
 use crate::platform::command;
 use crate::proto::{Sink, Told};
 
@@ -58,11 +57,7 @@ impl Held {
 /// Side effect: this function spawns a process and two threads. The command
 /// carries no payload argument, which is what makes it read its stdin and stay
 /// open.
-pub fn open(
-    session: &str,
-    reported: &Sender<(Sink, Delivery)>,
-    told: &Sender<Told>,
-) -> Option<Held> {
+pub fn open(session: &str, reported: &Sender<Sink>, told: &Sender<(Sink, Told)>) -> Option<Held> {
     let mut piping = command("zellij");
     piping
         .args(["--session", session, "pipe", "--name", AGENTS_MESSAGE])
@@ -78,13 +73,18 @@ pub fn open(
         session: session.to_string(),
     };
 
-    let writing = (Arc::clone(&slot), Arc::clone(&child), reported.clone());
+    let writing = (
+        sink.clone(),
+        Arc::clone(&slot),
+        Arc::clone(&child),
+        reported.clone(),
+    );
     thread::spawn(move || {
-        let (slot, child, reported) = writing;
+        let (sink, slot, child, reported) = writing;
         write_until_closed(&sink, stdin, &slot, &child, &reported);
     });
     let told = told.clone();
-    thread::spawn(move || super::read_until_ended(stdout, &told));
+    thread::spawn(move || super::read_until_ended(&sink, stdout, &told));
 
     Some(Held { child, slot })
 }
@@ -106,6 +106,10 @@ pub fn shut(held: &Held) {
 
 /// Writes each payload as one line, until the slot is closed.
 ///
+/// This function reports a write that did not land, and says nothing about one
+/// that did. No delivery decides whether the daemon keeps a client, so a report
+/// of success would reach nobody.
+///
 /// The check after the write is what finds a session that has gone. A pipe into
 /// such a session exits within milliseconds. The write before that still lands
 /// in the buffer of a process that is on its way out.
@@ -114,7 +118,7 @@ fn write_until_closed(
     mut stdin: ChildStdin,
     slot: &Slot,
     child: &Arc<Mutex<Child>>,
-    reported: &Sender<(Sink, Delivery)>,
+    reported: &Sender<Sink>,
 ) {
     use std::io::Write;
     while let Some(line) = slot.take() {
@@ -128,11 +132,12 @@ fn write_until_closed(
                 .try_wait(),
             Ok(None)
         );
-        let delivery = match wrote && !gone {
-            true => Delivery::Sent,
-            false => Delivery::Failed,
-        };
-        if reported.send((sink.clone(), delivery)).is_err() {
+        if wrote && !gone {
+            continue;
+        }
+        // Nothing drains the reports any more, so the daemon is on its way
+        // down. This thread has nobody left to tell.
+        if reported.send(sink.clone()).is_err() {
             return;
         }
     }

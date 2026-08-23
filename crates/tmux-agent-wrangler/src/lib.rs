@@ -36,6 +36,10 @@
 
 use std::process::{ExitCode, ExitStatus};
 
+use agent_wrangler_core::told::{Told, BEAT};
+
+use crate::heartbeat::HeartbeatSettings;
+
 pub mod client;
 pub mod heartbeat;
 pub mod socket_name;
@@ -113,12 +117,17 @@ impl std::fmt::Display for FatalError {
 ///
 /// On an interrupt this program also says nothing. There is no handler, so the
 /// system ends the process, and this program tells the daemon nothing on the way
-/// out. The system closes the socket, so the daemon reads the end of the stream
-/// and gives up on the client because the peer went. The heartbeat story adds a
-/// second reason, which is a client that stops beating.
+/// out. The system closes the socket, and the heartbeat stops with the process.
+/// The daemon then gives up on the client for saying nothing.
 pub fn run() -> ExitCode {
-    // There is no heartbeat until the shared message that names one exists.
-    match client::run_client(&mut std::io::stdout().lock(), None) {
+    // The daemon gives up on a client that says nothing, and a client that only
+    // reads says nothing at all. Both ends take the interval and the line from
+    // the crate that they share.
+    let heartbeat = HeartbeatSettings {
+        interval: BEAT,
+        line: Told::Beat.encode(),
+    };
+    match client::run_client(&mut std::io::stdout().lock(), &heartbeat) {
         Ok(()) => ExitCode::SUCCESS,
         Err(stopped) => {
             eprintln!("tmux-agent-wrangler: {stopped}");

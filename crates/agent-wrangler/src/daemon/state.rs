@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use agent_wrangler_core::agent::{self, Agent, Meta, Process, SessionId, Turn};
 use agent_wrangler_core::label::{label, Label};
@@ -123,18 +124,27 @@ pub struct State {
     /// Where to deliver, newest last. A client that registers twice is one
     /// client, so this list never holds the same sink twice.
     clients: Vec<Client>,
-    /// How many deliveries in a row each client refused.
-    misses: BTreeMap<Sink, u32>,
+    /// When each client last said anything at all.
+    ///
+    /// A client that says nothing for [`SILENCE`] is a client that the daemon
+    /// gives up on. This map holds one entry for each client, and never an
+    /// entry for a client that left.
+    spoke: BTreeMap<Sink, Instant>,
 }
 
-/// How many refusals in a row retire a client.
+/// How long a client may say nothing before the daemon gives up on it.
 ///
-/// One is not enough. A client registers once, and it cannot know that the
-/// daemon dropped it. A single delivery can fail for a passing reason: the
-/// multiplexer is busy, or a program is not in the path that this daemon
-/// inherited. One refusal is then enough to leave that sidebar with whatever
-/// it last received, for good, and with no word about why.
-pub const REFUSALS: u32 = 3;
+/// A client answers one question by speaking: can it still send a message? An
+/// open connection does not answer that question. It says that the kernel kept
+/// the connection, and says nothing about the process behind it.
+///
+/// This is three times [`agent_wrangler_core::told::BEAT`], so two lost beats
+/// retire nobody. A client that
+/// is retired goes deaf for good, because it registers once. So this must also
+/// cover a sidebar restarting, and a daemon restarting with its clients
+/// connecting to it again. The tmux client bounds its reconnect at about two
+/// seconds and holds a test on that bound.
+pub const SILENCE: Duration = Duration::from_secs(90);
 
 /// What an agent's files said, read before the daemon takes the lock.
 ///
@@ -353,8 +363,13 @@ impl State {
     /// This method registers a client for delivery from now on. A client that
     /// registers twice is still one client, and states afresh what it announces
     /// a call with.
+    ///
+    /// Side effect: a register is a line from the client, so this method starts
+    /// the client's clock. A client therefore has a whole [`SILENCE`] to
+    /// connect and to speak for itself. A daemon that restored its clients from
+    /// disk gives each of them the same.
     pub fn register(&mut self, client: Client) {
-        self.misses.remove(&client.sink);
+        self.spoke.insert(client.sink.clone(), Instant::now());
         match self
             .clients
             .iter_mut()
@@ -365,36 +380,36 @@ impl State {
         }
     }
 
-    /// This method records that a delivery to a client failed. If the daemon
-    /// gave up on that client, this method returns `true`.
-    pub fn missed(&mut self, sink: &Sink) -> bool {
-        let misses = self.misses.entry(sink.clone()).or_default();
-        *misses += 1;
-        if *misses < REFUSALS {
-            return false;
+    /// This method records that a client said something at `now`.
+    ///
+    /// Any line from a client counts. What the line says is a separate
+    /// question, and a client with something to say sends no separate beat.
+    ///
+    /// A line from a sink that no client holds is passed over. That is a client
+    /// that the daemon already gave up on, and a late line does not bring it
+    /// back. It registers again or it stays gone.
+    pub fn spoke(&mut self, sink: &Sink, now: Instant) {
+        if self.clients.iter().any(|held| &held.sink == sink) {
+            self.spoke.insert(sink.clone(), now);
         }
-        self.clients.retain(|held| &held.sink != sink);
-        self.misses.remove(sink);
-        true
+    }
+
+    /// Every client that has said nothing for [`SILENCE`].
+    pub fn silent(&self, now: Instant) -> Vec<Sink> {
+        self.spoke
+            .iter()
+            .filter(|(_, spoke)| now.duration_since(**spoke) >= SILENCE)
+            .map(|(sink, _)| sink.clone())
+            .collect()
     }
 
     /// This method gives up on one client, whatever the daemon knew about it.
     /// It returns whether there was one to give up on.
-    ///
-    /// This is how a socket sink leaves. No count of refusals decides it. The
-    /// daemon reads its own listener, and a sink with no peer for long enough is
-    /// a client that nobody wants the state for.
     pub fn retire(&mut self, sink: &Sink) -> bool {
-        self.misses.remove(sink);
+        self.spoke.remove(sink);
         let held = self.clients.iter().any(|held| &held.sink == sink);
         self.clients.retain(|held| &held.sink != sink);
         held
-    }
-
-    /// This method records that a delivery reached a client. The refusals
-    /// before it then do not count against the client.
-    pub fn reached(&mut self, sink: &Sink) {
-        self.misses.remove(sink);
     }
 
     pub fn clients(&self) -> Vec<Client> {
@@ -818,55 +833,71 @@ mod tests {
     #[test]
     fn a_client_given_up_on_takes_its_notifier_with_it() {
         let mut state = State::default();
-        state.register(client("proto", notifier("notify-send")));
-        for _ in 1..REFUSALS {
-            state.missed(&client("proto", None).sink);
-        }
-        assert!(state.missed(&client("proto", None).sink));
+        let one = client("proto", notifier("notify-send"));
+        state.register(one.clone());
+        assert!(state.retire(&one.sink));
         assert!(state.notifiers().is_empty());
     }
 
     #[test]
-    fn a_client_is_given_up_on_only_after_refusing_repeatedly() {
+    fn a_client_is_given_up_on_only_after_it_stayed_quiet_for_long_enough() {
         let mut state = State::default();
         let one = client("proto", None);
         state.register(one.clone());
-        for _ in 1..REFUSALS {
-            assert!(!state.missed(&one.sink));
-            assert_eq!(state.clients(), vec![one.clone()]);
-        }
-        assert!(state.missed(&one.sink));
+        let now = Instant::now();
+        assert!(state.silent(now).is_empty(), "it only just registered");
+        assert_eq!(state.silent(now + SILENCE), vec![one.sink]);
+    }
+
+    #[test]
+    fn a_client_that_spoke_is_quiet_from_that_moment_and_not_from_before_it() {
+        let mut state = State::default();
+        let one = client("proto", None);
+        state.register(one.clone());
+        let now = Instant::now();
+        state.spoke(&one.sink, now + SILENCE);
+        assert!(
+            state.silent(now + SILENCE).is_empty(),
+            "the line restarts the clock"
+        );
+        assert_eq!(state.silent(now + SILENCE + SILENCE), vec![one.sink]);
+    }
+
+    #[test]
+    fn a_line_from_a_client_that_already_left_brings_nothing_back() {
+        // A client that the daemon gave up on registers again or stays gone. A
+        // late line on a transport that is closing must not resurrect a clock
+        // for a client that nothing delivers to.
+        let mut state = State::default();
+        let one = client("proto", None);
+        state.register(one.clone());
+        assert!(state.retire(&one.sink));
+        state.spoke(&one.sink, Instant::now());
+        assert!(state.silent(Instant::now() + SILENCE).is_empty());
         assert!(state.clients().is_empty());
     }
 
     #[test]
-    fn reaching_a_client_forgives_the_times_it_was_missed() {
+    fn registering_again_starts_the_clock_again() {
         let mut state = State::default();
         let one = client("proto", None);
         state.register(one.clone());
-        for _ in 1..REFUSALS {
-            state.missed(&one.sink);
-        }
-        state.reached(&one.sink);
-        // The count starts again, so refusals spread over hours never retire a
-        // client that answers now and then.
-        for _ in 1..REFUSALS {
-            assert!(!state.missed(&one.sink));
-        }
+        let now = Instant::now();
+        assert_eq!(state.silent(now + SILENCE), vec![one.sink.clone()]);
+        state.register(one.clone());
+        assert!(state.silent(now + SILENCE).is_empty());
         assert_eq!(state.clients(), vec![one]);
     }
 
     #[test]
-    fn registering_again_forgives_the_times_a_client_was_missed() {
-        let mut state = State::default();
-        let one = client("proto", None);
-        state.register(one.clone());
-        for _ in 1..REFUSALS {
-            state.missed(&one.sink);
-        }
-        state.register(one.clone());
-        assert!(!state.missed(&one.sink));
-        assert_eq!(state.clients(), vec![one]);
+    fn the_silence_covers_more_than_one_lost_beat() {
+        // One is not enough. A client registers once, and it cannot know that
+        // the daemon dropped it. A single beat can go missing for a passing
+        // reason: a sidebar holds a pipe id that the daemon replaced, or the
+        // multiplexer is busy. One lost beat is then enough to leave that
+        // sidebar with whatever it last received, for good, and with no word
+        // about why.
+        assert!(SILENCE >= agent_wrangler_core::told::BEAT * 3);
     }
 
     #[test]

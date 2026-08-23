@@ -19,7 +19,14 @@ pub(crate) const RECORD: char = '\n';
 /// and updated separately. One of them can therefore be older than the other. A
 /// record that names its own shape lets the reader report the difference.
 /// Without the shape, the reader makes nothing of the records and says nothing.
-pub const FORMAT: u32 = 4;
+///
+/// This number also covers the messages that a client sends back. A record
+/// shape that did not change can still meet a daemon that expects something a
+/// client of this age does not send. `Told::Beat` is that case: a daemon keeps
+/// a client for as long as it speaks, so a client too old to beat is dropped
+/// after a minute and a half, and the pane says nothing about why. A reader that
+/// meets a number it does not know says so instead.
+pub const FORMAT: u32 = 5;
 
 /// The character that stands in for a record break on a transport that frames
 /// its messages by the line.
@@ -481,8 +488,8 @@ pub(crate) mod tests {
     fn a_start_time_without_a_process_is_no_process() {
         // Nothing writes this. A record that arrived with a start time and no
         // process names a moment with nothing to attach it to.
-        let orphan = "4\tone\tclaude\t\t918273\tidle\t0\tdir\t\t\t\t";
-        let Record::Known(read) = Agent::decode(orphan) else {
+        let orphan = format!("{FORMAT}\tone\tclaude\t\t918273\tidle\t0\tdir\t\t\t\t");
+        let Record::Known(read) = Agent::decode(&orphan) else {
             panic!("not a record");
         };
         assert_eq!(read.process, None);
@@ -516,14 +523,14 @@ pub(crate) mod tests {
     #[test]
     fn a_line_that_is_not_a_record_decodes_to_nothing() {
         for line in [
-            "",
-            "one",
-            "4\tone\tclaude",
-            "4\tone\tclaude\t\t\tidle\t0\tdir",
-            "4\tone\tclaude\tx\t\tidle\t0\tdir\t\t\t\ttitle",
-            "4\tone\tclaude\t42\tnot-a-moment\tidle\t0\tdir\t\t\t\ttitle",
+            String::new(),
+            "one".to_string(),
+            format!("{FORMAT}\tone\tclaude"),
+            format!("{FORMAT}\tone\tclaude\t\t\tidle\t0\tdir"),
+            format!("{FORMAT}\tone\tclaude\tx\t\tidle\t0\tdir\t\t\t\ttitle"),
+            format!("{FORMAT}\tone\tclaude\t42\tnot-a-moment\tidle\t0\tdir\t\t\t\ttitle"),
         ] {
-            assert_eq!(Agent::decode(line), Record::None, "{line}");
+            assert_eq!(Agent::decode(&line), Record::None, "{line}");
         }
     }
 
@@ -538,7 +545,9 @@ pub(crate) mod tests {
     #[test]
     fn a_record_with_no_turn_it_recognises_decodes_to_nothing() {
         assert_eq!(
-            Agent::decode("4\tone\tclaude\t\t\tdozing\t0\tdir\t\t\t\t"),
+            Agent::decode(&format!(
+                "{FORMAT}\tone\tclaude\t\t\tdozing\t0\tdir\t\t\t\t"
+            )),
             Record::None
         );
     }

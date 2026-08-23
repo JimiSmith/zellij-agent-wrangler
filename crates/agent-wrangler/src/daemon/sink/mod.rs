@@ -24,35 +24,10 @@ mod zellij;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufReader, Read};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::time::{Duration, Instant};
 
 use agent_wrangler_core::agent::flatten;
 
 use crate::proto::{read_message, Sink, Told};
-
-/// How long a socket sink may have no peer at all before the daemon gives up on
-/// the client.
-///
-/// The end of a stream says that a peer has gone. A sink with no peer is not a
-/// client that has gone, because the sidebars of a session come and go while the
-/// session stays. So the daemon waits. This is long enough that a sidebar
-/// restarting, or a daemon restarting and its clients connecting again, never
-/// loses a registration. It is short enough that a session where the user turned
-/// the sidebar off stops being written to within half a minute.
-pub const NO_PEER: Duration = Duration::from_secs(30);
-
-/// The outcome of one delivery.
-///
-/// A zellij client that this module cannot reach is a client that went away.
-/// That outcome decides whether the daemon keeps the sink. A socket sink answers
-/// the same question a better way, so the only outcome it reports is a name that
-/// could not be bound. This type is deliberately not an error type. There is
-/// nothing to report, and nobody to report it to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Delivery {
-    Sent,
-    Failed,
-}
 
 /// Every transport that the daemon holds open, keyed by the client it reaches.
 ///
@@ -61,31 +36,27 @@ pub enum Delivery {
 pub struct Transports {
     zellij: BTreeMap<String, zellij::Held>,
     sockets: BTreeMap<String, socket::Bound>,
-    /// Every socket name that could not be bound, and when it was first
-    /// refused.
+    /// Every delivery that did not land, and the end that a caller drains.
     ///
-    /// A name that something else answers is left alone, and the next publish
-    /// tries it again. Without this clock those attempts never end, and a client
-    /// that this daemon can never serve stays registered for as long as the
-    /// daemon runs. A name that cannot be bound has no peer either, so the same
-    /// wait retires it.
-    refused: BTreeMap<String, Instant>,
-    /// What the writers report, and the end that a caller drains.
-    reported: Sender<(Sink, Delivery)>,
-    outcomes: Receiver<(Sink, Delivery)>,
-    /// Where a message from a client goes. The readers all share this end.
-    told: Sender<Told>,
+    /// This channel carries failures alone. A delivery that landed says nothing
+    /// about whether the client behind it works, so there is nobody to tell. A
+    /// client is kept for as long as it speaks, and the lines it speaks arrive
+    /// on `told`.
+    reported: Sender<Sink>,
+    failures: Receiver<Sink>,
+    /// Where a line from a client goes, with the client that said it. The
+    /// readers all share this end.
+    told: Sender<(Sink, Told)>,
 }
 
 impl Transports {
-    pub fn new(told: Sender<Told>) -> Self {
-        let (reported, outcomes) = channel();
+    pub fn new(told: Sender<(Sink, Told)>) -> Self {
+        let (reported, failures) = channel();
         Transports {
             zellij: BTreeMap::new(),
             sockets: BTreeMap::new(),
-            refused: BTreeMap::new(),
             reported,
-            outcomes,
+            failures,
             told,
         }
     }
@@ -108,12 +79,9 @@ impl Transports {
         }
         if !self.zellij.contains_key(session) {
             let Some(held) = zellij::open(session, &self.reported, &self.told) else {
-                self.report(
-                    &Sink::Zellij {
-                        session: session.to_string(),
-                    },
-                    Delivery::Failed,
-                );
+                self.report(&Sink::Zellij {
+                    session: session.to_string(),
+                });
                 return;
             };
             self.zellij.insert(session.to_string(), held);
@@ -125,51 +93,48 @@ impl Transports {
     /// bound.
     ///
     /// Side effect: this method can bind a name and spawn a thread. A name that
-    /// something else answers is left alone, and counts as a failed delivery so
-    /// that a watcher sees it. The next publish tries the name again.
+    /// something else answers is left alone, and counts as a delivery that did
+    /// not land so that a watcher sees it. The next publish tries the name
+    /// again. Nothing retires the client for it. A client that this daemon can
+    /// never bind a name for never speaks either, and silence is what retires
+    /// it.
     ///
-    /// A delivery that reached the peers reports nothing. No count decides
-    /// whether the daemon keeps a socket sink, so there would be nobody to tell.
+    /// A delivery that reached the peers reports nothing. No delivery decides
+    /// whether the daemon keeps a client, so there would be nobody to tell.
     fn socket(&mut self, name: &str, payload: &str) {
         if !self.sockets.contains_key(name) {
             let Some(bound) = socket::bind(name, &self.told) else {
-                self.refused
-                    .entry(name.to_string())
-                    .or_insert_with(Instant::now);
-                self.report(
-                    &Sink::Socket {
-                        name: name.to_string(),
-                    },
-                    Delivery::Failed,
-                );
+                self.report(&Sink::Socket {
+                    name: name.to_string(),
+                });
                 return;
             };
-            self.refused.remove(name);
             self.sockets.insert(name.to_string(), bound);
         }
         self.sockets[name].fill(flatten(payload));
     }
 
-    /// Records one outcome that this thread already knows.
-    fn report(&self, sink: &Sink, delivery: Delivery) {
-        let _ = self.reported.send((sink.clone(), delivery));
+    /// Records one delivery that did not land, and that this thread already
+    /// knows about.
+    fn report(&self, sink: &Sink) {
+        let _ = self.reported.send(sink.clone());
     }
 
-    /// Every delivery outcome reported since the last call to this method.
+    /// Every delivery that did not land since the last call to this method.
     ///
     /// Side effect: a failed delivery closes the pipe that it was for. A child
     /// that died is therefore replaced by the next delivery to that session,
     /// rather than written to for as long as the daemon runs.
-    pub fn outcomes(&mut self) -> Vec<(Sink, Delivery)> {
-        let outcomes: Vec<(Sink, Delivery)> = self.outcomes.try_iter().collect();
-        for (sink, delivery) in &outcomes {
-            if let (Sink::Zellij { session }, Delivery::Failed) = (sink, delivery) {
+    pub fn failures(&mut self) -> Vec<Sink> {
+        let failures: Vec<Sink> = self.failures.try_iter().collect();
+        for sink in &failures {
+            if let Sink::Zellij { session } = sink {
                 if let Some(held) = self.zellij.remove(session) {
                     zellij::shut(&held);
                 }
             }
         }
-        outcomes
+        failures
     }
 
     /// Gives the plugins on every held pipe a message, so that they can speak.
@@ -198,28 +163,6 @@ impl Transports {
         }
     }
 
-    /// Every socket sink that has had no peer for long enough to give up on.
-    ///
-    /// This method takes no lock of the daemon's, and reads a map with one entry
-    /// per client. The delivery thread can therefore ask on every turn of its
-    /// loop.
-    pub fn stale(&self, now: Instant) -> Vec<Sink> {
-        let bound = self
-            .sockets
-            .iter()
-            .filter(|(_, bound)| bound.stale(now))
-            .map(|(name, _)| name);
-        let refused = self
-            .refused
-            .iter()
-            .filter(|(_, since)| now.duration_since(**since) >= NO_PEER)
-            .map(|(name, _)| name);
-        bound
-            .chain(refused)
-            .map(|name| Sink::Socket { name: name.clone() })
-            .collect()
-    }
-
     /// Closes every transport whose client is no longer a client.
     ///
     /// Side effect: this method kills a process and waits for it, and releases a
@@ -244,20 +187,22 @@ impl Transports {
             socket::shut(bound);
             false
         });
-        self.refused
-            .retain(|name, _| live.contains(&Sink::Socket { name: name.clone() }));
     }
 }
 
 /// Reads what the clients on one transport say, until the stream ends.
 ///
+/// Each line carries the sink that it arrived on. The reader of a transport is
+/// the only place that knows which client is at the other end, and the daemon
+/// needs that to know which client spoke.
+///
 /// The end of the stream is the end of this thread. Nothing else stops it, and
 /// nothing needs to. A killed child closes its stdout, and a peer that goes
 /// closes its socket.
-fn read_until_ended<R: Read>(reader: R, told: &Sender<Told>) {
+fn read_until_ended<R: Read>(sink: &Sink, reader: R, told: &Sender<(Sink, Told)>) {
     let mut reader = BufReader::new(reader);
     while let Ok(Some(message)) = read_message::<_, Told>(&mut reader) {
-        if told.send(message).is_err() {
+        if told.send((sink.clone(), message)).is_err() {
             return;
         }
     }
@@ -266,8 +211,8 @@ fn read_until_ended<R: Read>(reader: R, told: &Sender<Told>) {
 /// Hands one payload to one client.
 ///
 /// Side effect: this function queues a write, and can start the transport that
-/// carries it. Neither one waits for the client to take the payload. The outcome
-/// arrives later, on [`Transports::outcomes`].
+/// carries it. Neither one waits for the client to take the payload. A write
+/// that did not land arrives later, on [`Transports::failures`].
 pub fn deliver(transports: &mut Transports, sink: &Sink, payload: &str) {
     match sink {
         Sink::Zellij { session } => transports.zellij(session, payload),
@@ -278,6 +223,7 @@ pub fn deliver(transports: &mut Transports, sink: &Sink, payload: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     fn transports() -> Transports {
         let (told, _heard) = channel();
@@ -290,28 +236,30 @@ mod tests {
 
     #[test]
     fn a_socket_delivery_that_landed_reports_nothing() {
-        // No count decides whether the daemon keeps a socket sink, so there is
+        // No delivery decides whether the daemon keeps a client, so there is
         // nobody to tell that a delivery landed.
         let mut transports = transports();
         let sink = Sink::Socket {
             name: name("delivery"),
         };
         deliver(&mut transports, &sink, "wrangler 3\nfirst");
-        assert_eq!(transports.outcomes(), Vec::new());
+        assert_eq!(transports.failures(), Vec::new());
         transports.retain(&BTreeSet::new());
     }
 
     #[test]
-    fn a_name_that_cannot_be_bound_is_a_failed_delivery() {
-        // Nothing retires the client for it. The record is what makes a name
-        // that the daemon cannot hold visible to whoever is watching.
+    fn a_name_that_cannot_be_bound_is_a_delivery_that_did_not_land() {
+        // Nothing retires the client for it. The record makes a name that the
+        // daemon cannot hold visible to whoever is watching. The client is
+        // retired for saying nothing, which a client behind an unbound name
+        // cannot help but do.
         let mut transports = transports();
         let taken = name("cannot-bind");
         let (told, _heard) = channel();
         let held = socket::bind(&taken, &told).expect("a bound name");
         let sink = Sink::Socket { name: taken };
         deliver(&mut transports, &sink, "wrangler 3");
-        assert_eq!(transports.outcomes(), vec![(sink, Delivery::Failed)]);
+        assert_eq!(transports.failures(), vec![sink]);
         socket::shut(&held);
     }
 
@@ -355,11 +303,10 @@ mod tests {
     }
 
     #[test]
-    fn a_name_that_stays_refused_is_given_up_on_like_one_with_no_peer() {
-        // A name that this daemon can never bind is a client it can never
-        // serve. Without the clock the attempts never end, and a `Failed`
-        // record is written for it on every publish for as long as the daemon
-        // runs.
+    fn a_name_that_something_else_answers_is_bound_once_it_is_free() {
+        // Nothing here retires the client for a name it cannot bind, so the
+        // daemon must keep trying. A publish that gave up would leave a client
+        // with a name that nothing ever binds again.
         let mut transports = transports();
         let taken = name("stays-refused");
         let (told, _heard) = channel();
@@ -368,16 +315,9 @@ mod tests {
             name: taken.clone(),
         };
         deliver(&mut transports, &sink, "wrangler 3");
-        let now = Instant::now();
-        assert_eq!(
-            transports.stale(now),
-            Vec::new(),
-            "it was only just refused"
-        );
-        assert_eq!(transports.stale(now + NO_PEER), vec![sink.clone()]);
-        // A name that answers later is not one that was refused.
+        assert_eq!(transports.failures(), vec![sink.clone()]);
         socket::shut(&held);
-        let until = Instant::now() + std::time::Duration::from_secs(5);
+        let until = Instant::now() + Duration::from_secs(5);
         while !transports.sockets.contains_key(&taken) && Instant::now() < until {
             deliver(&mut transports, &sink, "wrangler 3");
         }
@@ -385,20 +325,6 @@ mod tests {
             transports.sockets.contains_key(&taken),
             "it bound in the end"
         );
-        assert!(transports.refused.is_empty());
-        transports.retain(&BTreeSet::new());
-    }
-
-    #[test]
-    fn a_sink_with_no_peer_is_reported_stale_and_one_just_bound_is_not() {
-        let mut transports = transports();
-        let sink = Sink::Socket {
-            name: name("stale-report"),
-        };
-        deliver(&mut transports, &sink, "wrangler 3");
-        let now = Instant::now();
-        assert_eq!(transports.stale(now), Vec::new());
-        assert_eq!(transports.stale(now + NO_PEER), vec![sink]);
         transports.retain(&BTreeSet::new());
     }
 }

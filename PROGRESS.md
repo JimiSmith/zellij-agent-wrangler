@@ -41,6 +41,11 @@ out every record. It draws nothing and it reads no tmux topology. The sidebar,
 the drawing and the tmux topology are later work. The release attaches no such
 binary yet, by decision.
 
+Delivery no longer decides which clients the daemon keeps. A client of either
+kind is kept for as long as it speaks, and given up on after ninety seconds of
+silence. A client with nothing to report beats every thirty seconds, on the
+transport that already carries its state.
+
 ## How it is tested
 
 `cargo test` covers everything that does not call zellij: the row model, the
@@ -87,7 +92,10 @@ pipe, which is the case where two writers share one stream.
 kills the one it finds, and asserts that the next publish opens another.
 `tests/scripts/answered_everywhere.steps` answers a call in one tab and asserts
 that the call stops being drawn in the other one, which only the state coming
-back can do.
+back can do. `tests/scripts/sidebar_beats.steps` reads the daemon's own monitor
+stream and fails if the sidebar never says that it is there. That one asserts on
+no cell at all. A sidebar draws the same whether or not it beats, until the
+daemon gives up on it ninety seconds later.
 
 The harness names its own user. The daemon's socket is named for the user and
 for nothing else, so a developer with the real client installed had every run
@@ -442,11 +450,25 @@ publish after that one, and `held_pipe.steps` is what found it: the pipe was
 killed, the next agent reported, and its name never reached the screen. One call
 that does not wait, on the publish thread, turns two lost publishes into none.
 
-**The delivery outcome arrives a publish late, and that is the right trade.**
-Nothing waits on a write, so a client that refused is retired on the publish
-after the one it refused. It is retired either way, and no delivery waits for
-that to settle. A pipe into a session that has gone exits at once, so the count
-still reaches its limit in the time it takes to publish three times.
+**No delivery outcome says anything about the client it was for.** Two rules
+were tried before the one that stands, and each one had a client it could not
+see. Counting refused deliveries reads a busy multiplexer as a refusal, and it
+never finds a session that lives on with no sidebar in it, which `q` creates and
+FEATURES.md lists as a feature. Giving up on a socket with no peer reads the
+kernel rather than the process, and a client whose reader thread died holds its
+connection open for as long as it lives. What both of those ask is the wrong
+question. The right one is whether the client can still send a message, and a
+client answers it by speaking. Silence retires a client after ninety seconds,
+which is three of its thirty second beats.
+
+**A zellij sidebar cannot choose how often it beats.** A plugin writes on a pipe
+only while it handles a message from that pipe, so the daemon's own beat sets
+the cadence. That is why the two numbers are the same. It is also why nothing a
+sidebar owes the daemon is written the moment it is raised: the pipe id that the
+plugin holds between messages can already belong to a pipe that the daemon
+replaced, and a line sent to that id reaches nobody. Every line waits in a list
+and goes out inside the next message, where the id came in with the message and
+is fresh by construction.
 
 **One sidebar acts for all of them: the one in the tab you are in.** Every
 sidebar hears every pipe, so anything that must happen once needs a rule they
@@ -581,8 +603,9 @@ and a reader running alongside them.
 the daemon keeps its clients on disk beside the sessions. Without that, any
 restart - a version mismatch, a crash, `dev.sh` - leaves every sidebar drawing
 whatever it last received, for good, with nothing said about why. For the same
-reason a client is given up on after several refusals rather than one: a single
-delivery that failed for a passing reason would otherwise retire it permanently.
+reason the silence that retires a client is three beats and not one: a single
+beat that went missing for a passing reason would otherwise retire it
+permanently.
 
 ## A note on method
 

@@ -1,0 +1,35 @@
+# A zellij sidebar tells the daemon that it is there.
+#
+# The daemon keeps a client for as long as it speaks, and gives up on one that
+# goes quiet. A sidebar draws the same either way until the daemon gives up, so
+# the screen proves nothing here. The daemon's monitor stream is the assertion.
+#
+# A plugin writes on a pipe only while it handles a message from that pipe.
+# Nothing else in the repository can drive that path: `cli_pipe_output` is a
+# host function that exists inside zellij alone, so no unit test reaches it.
+
+env: ZELLIJ_CONFIG_DIR=$PWD/tests/zellij-config
+env: TERM=xterm-256color
+env: XDG_STATE_HOME=$PWD/tests/out/state
+env: XDG_CACHE_HOME=$PWD/tests/out/cache
+# The daemon socket is named for the user. Without a name of its own, a run
+# reports to the daemon of the client that the developer installed.
+env: USER=wrangler-test
+
+sh?: tests/scripts/reset.sh wrangler-test-beat
+
+sh: cargo build --target wasm32-wasip1 -p zellij-agent-wrangler
+sh: cargo build -p agent-wrangler
+sh: tests/scripts/make-layout.sh tests/out/beat.kdl
+
+spawn: zellij --session wrangler-test-beat --new-session-with-layout tests/out/beat.kdl
+
+wait: notes @ 25
+
+# The sidebar registered when it loaded, so the daemon holds this session as a
+# client. This reports an agent, watches what the daemon says, and fails if the
+# sidebar never answers.
+sh: tests/scripts/expect-beat.sh wrangler-test-beat
+
+keys: <C-q>
+sleep: 1

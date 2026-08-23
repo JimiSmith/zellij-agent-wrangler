@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 
 use agent_wrangler_core::agent::AGENTS_MESSAGE;
-use agent_wrangler_sidebar::{Application, Effect, Input, Options, PaneId, Permission, UserAction};
+use agent_wrangler_sidebar::{
+    Application, Effect, Input, Options, PaneId, Permission, Told, UserAction,
+};
 use agent_wrangler_ui::{ansi, Rect};
 use zellij_agent_wrangler::adapter;
 use zellij_tile::prelude::*;
@@ -45,6 +47,18 @@ struct Plugin {
     /// pipe that died, this holds the old id until a message on the new one
     /// arrives.
     pipe_id: Option<String>,
+    /// What this sidebar owes the daemon, oldest first.
+    ///
+    /// Nothing is written the moment it is raised. A plugin writes on a pipe
+    /// only while it handles a message from that pipe, and the id that this
+    /// plugin holds between messages can already belong to a pipe that the
+    /// daemon replaced. Every line therefore waits for the next message, where
+    /// the id is fresh because the message carried it.
+    ///
+    /// A line that is already here is not added again, so a daemon that stopped
+    /// sending leaves a list that is as long as the number of sessions and no
+    /// longer.
+    owed: Vec<Told>,
 }
 
 register_plugin!(Plugin);
@@ -83,7 +97,30 @@ impl Plugin {
         }
     }
 
-    fn execute(&self, effect: Effect) -> Option<Input> {
+    /// Writes everything that this sidebar owes the daemon, and one heartbeat.
+    ///
+    /// Side effect: this method writes on the pipe that the daemon holds open.
+    /// Call it only while this plugin handles a message from that pipe. Zellij
+    /// holds a line written at any other moment and hands it over on the next
+    /// message, and the daemon can have replaced the pipe by then.
+    ///
+    /// The heartbeat says that this sidebar can still send a message. That is
+    /// what keeps the session a client. A session whose last sidebar closed
+    /// answers nothing, and the daemon gives up on it.
+    ///
+    /// Every sidebar of a session answers on the same pipe. The daemon holds one
+    /// clock for the session and does not ask which sidebar spoke, so no
+    /// sidebar has to be chosen to speak for the rest.
+    fn answer_on_pipe(&mut self) {
+        let Some(id) = self.pipe_id.clone() else {
+            return;
+        };
+        for told in self.owed.drain(..).chain([Told::Beat]) {
+            cli_pipe_output(&id, &format!("{}\n", told.encode()));
+        }
+    }
+
+    fn execute(&mut self, effect: Effect) -> Option<Input> {
         match effect {
             Effect::Repaint => None,
             Effect::RefreshFocus => {
@@ -110,21 +147,14 @@ impl Plugin {
                 None
             }
             Effect::Tell(told) => {
-                // When this arrives, and what it can still drop. This call
-                // reaches the pipe only while this plugin handles a message
-                // from it. A focus change usually raises an effect of this
-                // kind, and a focus change is not a message. Zellij therefore
-                // holds the line and hands it over on the next message. The
-                // daemon writes down every held pipe on a beat for exactly that
-                // reason, and quickens that beat while an agent waits for the
-                // user.
-                //
-                // The line is still lost if it names a pipe that the daemon
-                // replaced. The id of the new pipe arrives only on the next
-                // message. The other sidebars then draw a call as unanswered
-                // until the agent reports again.
-                if let Some(id) = &self.pipe_id {
-                    cli_pipe_output(id, &format!("{}\n", told.encode()));
+                // Nothing goes out here. A focus change usually raises this
+                // effect, and a focus change is not a pipe message, so this
+                // plugin has no turn to write in. The line waits for the next
+                // message from the daemon. The daemon writes down every held
+                // pipe on a beat for exactly that reason, and quickens that beat
+                // while an agent waits for the user.
+                if !self.owed.contains(&told) {
+                    self.owed.push(told);
                 }
                 None
             }
@@ -252,6 +282,7 @@ impl ZellijPlugin for Plugin {
         // The id is taken before anything else acts on the message, so an
         // effect that this message raises finds the pipe already open. A fresh
         // pipe process carries a fresh id, so the newest one wins.
+        let from_the_daemon = matches!(&message.source, PipeSource::Cli(_));
         if let PipeSource::Cli(id) = &message.source {
             self.pipe_id = Some(id.clone());
         }
@@ -271,6 +302,12 @@ impl ZellijPlugin for Plugin {
         };
         if let Some(input) = input {
             self.reduce(input, false);
+        }
+        // This is the plugin's turn to write, and the only one it gets. A
+        // message from another plugin is not a turn, because it carries no
+        // pipe id of the daemon's.
+        if from_the_daemon {
+            self.answer_on_pipe();
         }
         false
     }

@@ -358,14 +358,37 @@ is written the held payload as soon as it arrives. A name that a dead daemon lef
 behind is taken over only when nothing answers it, which is the rule that the
 daemon's own socket already follows.
 
-Liveness is answered differently on the two. A zellij client is given up on after
-three refused deliveries, because the exit status of the pipe process is the only
-signal there is. A socket sink is given up on when it has had no peer for thirty
-seconds. The daemon reads its own listener, so that question costs nothing, and
-it is the better measure: the exit status reads a busy multiplexer as a refusal,
-and it never finds a session that lives on with no sidebar in it. A peer that
-disconnects is not a client that has gone, because the sidebars of a session come
-and go while the session stays.
+Liveness is one question on both: can this client still send a message? That
+covers being connected, and it covers working as well. A client answers by
+speaking, and the daemon gives up on a client that said nothing for ninety
+seconds. Any line counts, so a client with something to report sends no separate
+beat. A client with nothing to report sends `Told::Beat` every thirty seconds,
+on the transport that already carries its state, so a beat costs no process on
+either side.
+
+Two weaker measures came before it, and each one had a client it could not see.
+The exit status of the pipe process reads a busy multiplexer as a refusal, and
+it never finds a session that lives on with no sidebar in it, which `q` creates
+and FEATURES.md lists as a feature. An open connection says that the kernel kept
+it, and says nothing about the process behind it: a client whose reader thread
+died holds one open for as long as it lives. Both of those clients pass the old
+question and fail this one.
+
+A peer that disconnects is not a client that has gone, because the sidebars of a
+session come and go while the session stays. So losing a peer is not a second
+rule. A client that has really gone stops beating, and silence retires it.
+
+The ninety seconds is three beats. A client that is retired goes deaf for good,
+because it registers once, so the wait must cover a sidebar restarting and a
+daemon restarting with its clients connecting again. A register starts the clock
+as well, which gives a client that has just arrived the whole ninety seconds to
+connect and speak for itself.
+
+A zellij sidebar does not choose its own interval. It writes only while it
+handles a message from the pipe, so the daemon's own beat sets the cadence, and
+that beat is thirty seconds when nothing is happening. Every sidebar of a session
+answers on the same pipe. The daemon holds one clock for the session and never
+asks which sidebar spoke, so no sidebar has to be elected to speak for the rest.
 
 A plugin can only write on a pipe while it is handling a message from that pipe.
 Zellij holds anything written at any other moment and hands it over on the next
@@ -402,9 +425,10 @@ an arriving message is worth reading: whether it changed anything, since that
 and not the arrival is what owes the clients a delivery. One record is written
 for each state that goes out. A delivery is a write and not a process run, so
 there is nothing to say afterwards about one that landed; only a failure is
-worth a second record, and enough of those in a row retires a zellij client. A
-record is also written for every client that the daemon gives up on, whichever
-of the two rules ended it, so a feed that stopped has an explanation.
+worth a second record, and no count of those retires anybody. One record is
+written for each beat, so a monitor shows the circle turning while nothing else
+happens, and one for every client that the daemon gives up on, so a feed that
+stopped has an explanation.
 
 ## The tmux client
 
@@ -428,8 +452,8 @@ the name useful to a person who lists the sockets. The hash is FNV-1a and never
 `DefaultHasher` gives back. Every sidebar of one session must derive one name.
 Two sidebars that derive two names read two sockets and never agree.
 
-A session id is a dollar sign and one or more digits. `place::Session` refuses
-everything else, and that refusal is what makes the socket name infallible.
+A session id is a dollar sign and one or more digits. `TmuxSessionId::new`
+rejects everything else, so `SocketName::new` returns no error and runs no check.
 Every character of a name is then an ASCII letter, a digit, a hyphen or a dot,
 which the namespace accepts. A wider `Session` needs a check in the name.
 
@@ -442,8 +466,9 @@ deaf.
 The connect retries, because the daemon binds the name while it handles the
 registration. The wait is bounded at two seconds. A daemon that never binds the
 name is a fault to report rather than a thing to wait for. The bound must stay
-well inside the time that the daemon gives a sink with no peer. A slower
-reconnect costs the registration that it tries to restore.
+well inside the ninety seconds that the daemon waits before it gives up on a
+silent client. A slower reconnect costs the registration that it tries to
+restore.
 
 A stream that ends says that the daemon went, and the client goes round again. A
 write that fails says that the reader of the output went, and the client stops.

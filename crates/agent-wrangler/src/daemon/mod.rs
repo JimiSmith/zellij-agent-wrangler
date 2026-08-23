@@ -38,7 +38,7 @@ use agent_wrangler_core::agent::FORMAT;
 use agent_wrangler_core::notify::Notifier;
 
 use crate::daemon::notify::Announced;
-use crate::daemon::sink::{Delivery, Transports};
+use crate::daemon::sink::Transports;
 use crate::daemon::state::{look, read_hook, Call, Client, Real, State};
 use crate::daemon::watch::Watchers;
 use crate::paths;
@@ -166,20 +166,21 @@ pub(crate) fn claim(name: &str) -> std::io::Result<Option<Listener>> {
         .map(Some)
 }
 
-/// This function writes the state out and tells every client. It drops the
-/// clients that went away.
+/// This function writes the state out and tells every client.
 ///
 /// Side effect: it writes a file, and queues one write for each client. Nothing
 /// here waits for a client to take its payload, so a publish costs the same
 /// whatever the clients do.
 ///
-/// The outcomes are those of the deliveries before this one, because a write
-/// runs on a thread of its own. A client that went away is therefore retired a
-/// publish later than it refused. It is retired either way, and no delivery
-/// waits for that to be settled.
+/// No client leaves here. A delivery that did not land is written down for
+/// whoever watches, and decides nothing. A client leaves when it stops speaking,
+/// which [`retire_silent`] finds.
+///
+/// The failures are those of the deliveries before this one, because a write
+/// runs on a thread of its own.
 ///
 /// The caller holds no lock. This function takes the lock only to read what to
-/// send, and to note the clients that it did not reach.
+/// send.
 fn publish(
     shared: &Arc<Mutex<State>>,
     dir: &Path,
@@ -199,27 +200,13 @@ fn publish(
         });
         sink::deliver(transports, &client.sink, &payload);
     }
-    let outcomes = transports.outcomes();
-    for (sink, delivery) in &outcomes {
-        if *delivery == Delivery::Failed {
-            watchers.saw(|| What::Failed { sink: sink.clone() });
-        }
-    }
-    let (retired, live) = {
-        let mut state = held(shared);
-        let retired: Vec<Sink> = outcomes
-            .into_iter()
-            .filter(|(sink, delivery)| answered(&mut state, sink, *delivery))
-            .map(|(sink, _)| sink)
-            .collect();
-        (retired, live(&state))
-    };
-    for sink in retired {
-        watchers.saw(|| What::Retired { sink: sink.clone() });
+    for sink in transports.failures() {
+        watchers.saw(|| What::Failed { sink: sink.clone() });
     }
     // The pipe process does not exit when its session dies, and a socket name
     // that nothing releases is a name that a later client cannot bind. A client
-    // that this daemon just retired leaves both behind, unless this closes them.
+    // that the daemon retired leaves both behind, unless this closes them.
+    let live = live(&held(shared));
     transports.retain(&live);
 }
 
@@ -232,28 +219,36 @@ fn live(state: &State) -> BTreeSet<Sink> {
         .collect()
 }
 
-/// This function gives up on every socket sink that has had no peer for long
+/// This function gives up on every client that has said nothing for long
 /// enough, and tells the watchers.
 ///
-/// The daemon reads its own listener, so this question costs nothing. It is
-/// asked on every turn of the delivery loop, which is at most a second apart. A
-/// turn with nothing to retire takes no lock at all.
+/// One question retires a client of either kind: can it still send a message?
+/// A client answers it by speaking. The exit status of a process was always a
+/// poor measure. It reads a busy multiplexer as a refusal, and it never finds a
+/// session that lives on with no sidebar in it. An open connection is a poor
+/// measure as well. It says that the kernel kept the connection, and says
+/// nothing about the process behind it.
 ///
-/// Side effect: this function writes the state file, and releases a socket name.
-fn retire_idle(
+/// This is asked on every turn of the delivery loop, which is at most a second
+/// apart. It reads a map with one entry for each client, so the lock is held for
+/// no longer than that read takes.
+///
+/// Side effect: this function writes the state file, and closes the transport of
+/// every client that it retires.
+fn retire_silent(
     shared: &Arc<Mutex<State>>,
     dir: &Path,
     watchers: &Watchers,
     transports: &mut Transports,
     now: Instant,
 ) {
-    let stale = transports.stale(now);
-    if stale.is_empty() {
+    let silent = held(shared).silent(now);
+    if silent.is_empty() {
         return;
     }
     let live = {
         let mut state = held(shared);
-        for sink in &stale {
+        for sink in &silent {
             if state.retire(sink) {
                 watchers.saw(|| What::Retired { sink: sink.clone() });
             }
@@ -262,31 +257,6 @@ fn retire_idle(
     };
     record(shared, dir);
     transports.retain(&live);
-}
-
-/// What one delivery says about the client it was for. This function returns
-/// whether the daemon gave the client up.
-///
-/// Only a refusal counts against a zellij client. A refusal is the answer that a
-/// client that went away gives. A pipe into a session that is not there exits
-/// within milliseconds and says so.
-///
-/// Nothing counts against a socket sink. The exit status of a process was always
-/// a poor measure of liveness: it reads a busy multiplexer as a refusal, and it
-/// never finds a session that lives on with no sidebar in it. A socket answers
-/// the question directly instead. The daemon reads its own listener, and a sink
-/// with no peer for long enough is one to give up on.
-fn answered(state: &mut State, sink: &Sink, delivery: Delivery) -> bool {
-    if matches!(sink, Sink::Socket { .. }) {
-        return false;
-    }
-    match delivery {
-        Delivery::Sent => {
-            state.reached(sink);
-            false
-        }
-        Delivery::Failed => state.missed(sink),
-    }
 }
 
 /// This function records that the user reached a session that called for them.
@@ -515,8 +485,19 @@ pub fn run() -> std::io::Result<()> {
         let owed = Arc::clone(&owed);
         let watchers = Arc::clone(&watchers);
         thread::spawn(move || {
-            while let Ok(Told::Seen { session }) = heard.recv() {
-                seen(&shared, &owed, &watchers, &session);
+            while let Ok((sink, told)) = heard.recv() {
+                // Any line keeps the client. The line says that the client can
+                // still send a message, whatever else it says. A client with
+                // something to report therefore sends no separate beat.
+                held(&shared).spoke(&sink, Instant::now());
+                match told {
+                    Told::Seen { session } => seen(&shared, &owed, &watchers, &session),
+                    // A beat says only that the client is there, and the line
+                    // above already recorded that. What is left is to make the
+                    // beat visible to whoever watches, because a client that
+                    // stops beating is retired and nothing else explains why.
+                    Told::Beat => watchers.saw(|| What::Beat { sink: sink.clone() }),
+                }
             }
         });
     }
@@ -545,7 +526,7 @@ pub fn run() -> std::io::Result<()> {
                     transports.nudge();
                     spoke = Instant::now();
                 }
-                retire_idle(&shared, &dir, &watchers, &mut transports, Instant::now());
+                retire_silent(&shared, &dir, &watchers, &mut transports, Instant::now());
             }
         });
     }
@@ -586,7 +567,7 @@ pub fn run() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::state::REFUSALS;
+    use crate::daemon::state::SILENCE;
 
     #[test]
     fn the_poll_is_often_enough_to_read_as_immediate() {
@@ -657,34 +638,16 @@ mod tests {
     }
 
     #[test]
-    fn a_client_that_keeps_refusing_is_still_given_up_on() {
-        // The other half of it: a session that went away answers at once and
-        // says so. That is the answer that a client is retired for.
+    fn a_busy_multiplexer_never_retires_a_live_client() {
+        // The whole reason for the rule. A refused delivery says that this
+        // publish did not land. A sidebar that answers is working, whatever the
+        // exit status of a pipe process said a moment earlier.
         let mut state = State::default();
         let client = sidebar();
         state.register(client.clone());
-        for _ in 1..REFUSALS {
-            assert!(!answered(&mut state, &client.sink, Delivery::Failed));
-        }
-        assert!(answered(&mut state, &client.sink, Delivery::Failed));
-        assert!(state.clients().is_empty());
-    }
-
-    #[test]
-    fn a_delivery_that_landed_forgives_the_refusals_before_it() {
-        // Each run is one short of the count that retires the client. If the
-        // delivery in between forgave what came before it, the two runs stay
-        // two apart.
-        let mut state = State::default();
-        let client = sidebar();
-        state.register(client.clone());
-        for _ in 1..REFUSALS {
-            answered(&mut state, &client.sink, Delivery::Failed);
-        }
-        answered(&mut state, &client.sink, Delivery::Sent);
-        for _ in 1..REFUSALS {
-            answered(&mut state, &client.sink, Delivery::Failed);
-        }
+        let now = Instant::now();
+        state.spoke(&client.sink, now);
+        assert!(state.silent(now + SILENCE / 2).is_empty());
         assert_eq!(state.clients(), vec![client]);
     }
 
@@ -720,9 +683,7 @@ mod tests {
         let client = sidebar();
         state.register(client.clone());
         assert!(!live(&state).is_empty());
-        for _ in 0..REFUSALS {
-            answered(&mut state, &client.sink, Delivery::Failed);
-        }
+        assert!(state.retire(&client.sink));
         assert!(
             live(&state).is_empty(),
             "nothing keeps this session's pipe open"
@@ -730,21 +691,23 @@ mod tests {
     }
 
     #[test]
-    fn no_delivery_outcome_ever_retires_a_socket_sink() {
-        // A socket sink is given up on for having no peer, and for nothing
-        // else. A name that could not be bound is reported so that a watcher
-        // sees it, and the next publish tries the name again.
+    fn a_client_of_either_kind_is_retired_by_the_same_silence() {
+        // One rule covers both transports. A zellij session with no sidebar
+        // left in it answers no message, and a socket peer that stopped
+        // draining writes no line. Neither of them speaks.
         let mut state = State::default();
-        let client = native();
-        state.register(client.clone());
-        for _ in 0..REFUSALS * 3 {
-            assert!(!answered(&mut state, &client.sink, Delivery::Failed));
-        }
-        assert_eq!(state.clients(), vec![client]);
+        state.register(sidebar());
+        state.register(native());
+        let now = Instant::now();
+        assert!(state.silent(now).is_empty(), "they only just registered");
+        assert_eq!(
+            state.silent(now + SILENCE),
+            vec![sidebar().sink, native().sink]
+        );
     }
 
     #[test]
-    fn a_socket_sink_with_no_peer_is_given_up_on() {
+    fn a_client_that_left_is_dropped_once_and_not_twice() {
         let mut state = State::default();
         let client = native();
         state.register(client.clone());
@@ -754,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn a_socket_sink_that_never_had_a_peer_is_retired_and_gives_up_its_name() {
+    fn a_client_that_says_nothing_is_retired_and_gives_up_its_name() {
         // The whole rule, from the bound name to the client that goes. A
         // sidebar that the user turned off leaves the session alive and the
         // socket empty, and the daemon must stop writing to it.
@@ -773,38 +736,110 @@ mod tests {
         publish(&shared, &dir, &watchers, &mut transports);
 
         let now = Instant::now();
-        retire_idle(&shared, &dir, &watchers, &mut transports, now);
+        retire_silent(&shared, &dir, &watchers, &mut transports, now);
         assert_eq!(
             held(&shared).clients(),
             vec![client],
-            "it was only just bound"
+            "it only just registered"
         );
 
-        retire_idle(
+        retire_silent(&shared, &dir, &watchers, &mut transports, now + SILENCE);
+        assert!(held(&shared).clients().is_empty());
+
+        // The name is released, so a later client can bind it.
+        let (told, _heard) = channel();
+        let mut after = Transports::new(told);
+        let sink = Sink::Socket { name };
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            sink::deliver(&mut after, &sink, "wrangler 3");
+            if after.failures().is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < until,
+                "the name was never free to bind again"
+            );
+        }
+        after.retain(&BTreeSet::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_peer_that_holds_its_connection_open_and_says_nothing_is_retired() {
+        // The whole reason for the rule. An open connection says that the
+        // kernel kept it, and says nothing about the process behind it. A
+        // sidebar whose reader thread died holds one open for as long as the
+        // process lives, and draws nothing with what arrives on it.
+        let dir =
+            std::env::temp_dir().join(format!("agent-wrangler-wedged-{}", std::process::id()));
+        let name = format!("agent-wrangler-wedged-test-{}.sock", std::process::id());
+        let shared = Arc::new(Mutex::new(State::default()));
+        let watchers = Watchers::default();
+        let (told, _heard) = channel();
+        let mut transports = Transports::new(told);
+        let client = Client {
+            sink: Sink::Socket { name: name.clone() },
+            notify: None,
+        };
+        held(&shared).register(client);
+        publish(&shared, &dir, &watchers, &mut transports);
+
+        let ns = name
+            .as_str()
+            .to_ns_name::<GenericNamespaced>()
+            .expect("a name");
+        let until = Instant::now() + Duration::from_secs(5);
+        let peer = loop {
+            match Stream::connect(ns.clone()) {
+                Ok(stream) => break stream,
+                Err(error) => assert!(Instant::now() < until, "no peer: {error}"),
+            }
+        };
+
+        retire_silent(
             &shared,
             &dir,
             &watchers,
             &mut transports,
-            now + sink::NO_PEER,
+            Instant::now() + SILENCE,
         );
-        assert!(held(&shared).clients().is_empty());
-        // The name is released, so a later client can bind it.
+        assert!(
+            held(&shared).clients().is_empty(),
+            "the peer was connected the whole time and never said a word"
+        );
+        drop(peer);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_run_of_deliveries_that_did_not_land_never_retires_a_client() {
+        // A delivery that did not land says nothing about the client. The old
+        // rule counted refusals and gave up after three, so a busy multiplexer
+        // answered exactly like a client that went away.
+        let dir =
+            std::env::temp_dir().join(format!("agent-wrangler-refused-{}", std::process::id()));
+        let name = format!("agent-wrangler-refused-test-{}.sock", std::process::id());
+        // Something else answers the name, so the daemon binds nothing and no
+        // delivery lands.
+        let taken = claim(&name)
+            .expect("a name")
+            .expect("nothing else holds it");
+        let shared = Arc::new(Mutex::new(State::default()));
+        let watchers = Watchers::default();
         let (told, _heard) = channel();
-        let mut after = Transports::new(told);
-        let until = Instant::now() + Duration::from_secs(5);
-        while after.stale(Instant::now() + sink::NO_PEER).is_empty() && Instant::now() < until {
-            sink::deliver(
-                &mut after,
-                &Sink::Socket { name: name.clone() },
-                "wrangler 3",
-            );
+        let mut transports = Transports::new(told);
+        let client = Client {
+            sink: Sink::Socket { name },
+            notify: None,
+        };
+        held(&shared).register(client.clone());
+        for _ in 0..5 {
+            publish(&shared, &dir, &watchers, &mut transports);
         }
-        assert_eq!(
-            after.stale(Instant::now() + sink::NO_PEER),
-            vec![Sink::Socket { name }],
-            "the name was free to bind again"
-        );
-        after.retain(&BTreeSet::new());
+        assert_eq!(held(&shared).clients(), vec![client]);
+        drop(taken);
+        transports.retain(&BTreeSet::new());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
