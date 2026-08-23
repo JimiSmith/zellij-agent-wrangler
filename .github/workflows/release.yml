@@ -45,8 +45,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup component add clippy
-      - run: cargo clippy -p agent-wrangler -p agent-wrangler-core --all-targets --locked -- -D warnings
-      - run: cargo test -p agent-wrangler -p agent-wrangler-core --locked
+      - run: cargo clippy -p agent-wrangler -p agent-wrangler-core -p tmux-agent-wrangler --all-targets --locked -- -D warnings
+      - run: cargo test -p agent-wrangler -p agent-wrangler-core -p tmux-agent-wrangler --locked
 
   # The same, for macOS. A different kernel interface on each system answers
   # the question of when a process started. No other job compiles and runs the
@@ -58,8 +58,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup component add clippy
-      - run: cargo clippy -p agent-wrangler -p agent-wrangler-core --all-targets --locked -- -D warnings
-      - run: cargo test -p agent-wrangler -p agent-wrangler-core --locked
+      - run: cargo clippy -p agent-wrangler -p agent-wrangler-core -p tmux-agent-wrangler --all-targets --locked -- -D warnings
+      - run: cargo test -p agent-wrangler -p agent-wrangler-core -p tmux-agent-wrangler --locked
 
   release:
     needs: [check, check-windows, check-macos]

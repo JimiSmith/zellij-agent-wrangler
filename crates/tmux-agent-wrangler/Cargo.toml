@@ -1,0 +1,25 @@
+[package]
+name = "tmux-agent-wrangler"
+version.workspace = true
+edition.workspace = true
+description = "A tmux client that registers a socket sink and reads the agent state on it"
+
+# Built on every system, and not on unix alone. Tmux does not run on Windows,
+# but psmux does, and psmux ships a program called `tmux`. A crate that a
+# Windows build skips is a crate that a Windows build never compiles.
+[lib]
+name = "tmux_agent_wrangler"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tmux-agent-wrangler"
+path = "src/bin/tmux-agent-wrangler.rs"
+
+[dependencies]
+# The types alone. This crate is handed records and does not read an agent's
+# files, so the JSON that reading them needs has no use here.
+agent-wrangler-core = { path = "../agent-wrangler-core", default-features = false }
+# A local socket that is a unix socket on unix and a named pipe on Windows. The
+# daemon binds the name through the same crate, so both ends agree on what a
+# name means.
+interprocess = { version = "2.2", default-features = false }

@@ -2228,6 +2228,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tmux-agent-wrangler"
+version = "0.1.14"
+dependencies = [
+ "agent-wrangler-core",
+ "interprocess",
+]
+
+[[package]]
 name = "tokio"
 version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

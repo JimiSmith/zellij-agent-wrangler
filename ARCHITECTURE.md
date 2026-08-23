@@ -70,6 +70,11 @@ size. The renderer translates those lines into terminal output.
   installer and the platform integration. It is named for what it wrangles
   rather than for what draws it, because nothing it does is particular to
   Zellij.
+- `tmux-agent-wrangler` — the tmux client. It registers a socket sink, reads
+  the state that the daemon publishes on it, and writes out every record. It
+  draws no sidebar and reads no tmux topology. It takes
+  `agent-wrangler-core` for the record format alone, and it never sees
+  `agent-wrangler-ui`.
 
 ## Application state
 
@@ -400,6 +405,61 @@ there is nothing to say afterwards about one that landed; only a failure is
 worth a second record, and enough of those in a row retires a zellij client. A
 record is also written for every client that the daemon gives up on, whichever
 of the two rules ended it, so a feed that stopped has an explanation.
+
+## The tmux client
+
+`tmux-agent-wrangler` is the socket sink's first reader. It registers, connects,
+and writes out every record that arrives. It draws no sidebar and it reads no
+tmux topology. What it proves is the transport, from a hook in a pane to a line
+on a stream.
+
+The binary must find its own session before it can name a socket. The first
+field of `$TMUX` is the server, which is a path on unix and the name of a pipe
+on Windows. Nothing reads that field for meaning. `TMUX_PANE` is the pane, and
+the session comes from the pane through `tmux display-message`. The third field
+of `$TMUX` names the session that the process started in, and that field goes
+stale when a window moves to another session. `TMUX_PANE` stays true.
+
+The socket name carries a hash of the whole server string and the session after
+it. The hash tells apart two servers whose sockets share a basename in different
+directories, and it works for a server that is a named pipe. The session keeps
+the name useful to a person who lists the sockets. The hash is FNV-1a and never
+`DefaultHasher`, because the standard library does not specify what
+`DefaultHasher` gives back. Every sidebar of one session must derive one name.
+Two sidebars that derive two names read two sockets and never agree.
+
+A session id is a dollar sign and one or more digits. `place::Session` refuses
+everything else, and that refusal is what makes the socket name infallible.
+Every character of a name is then an ASCII letter, a digit, a hyphen or a dot,
+which the namespace accepts. A wider `Session` needs a check in the name.
+
+The client registers before it connects, on every round and not only on the
+first. A daemon that gives up on a client releases the socket name and drops the
+client record together. Only a new registration makes the daemon bind the name
+again. A client that only reconnects finds nothing to connect to, and stays
+deaf.
+
+The connect retries, because the daemon binds the name while it handles the
+registration. The wait is bounded at two seconds. A daemon that never binds the
+name is a fault to report rather than a thing to wait for. The bound must stay
+well inside the time that the daemon gives a sink with no peer. A slower
+reconnect costs the registration that it tries to restore.
+
+A stream that ends says that the daemon went, and the client goes round again. A
+write that fails says that the reader of the output went, and the client stops.
+These are two outcomes and not one, and the type says which. The kind of an
+error names what went wrong and never which end it went wrong at.
+
+The two systems spell the end of a stream differently. A unix peer's read
+answers zero after a shutdown, and a Windows client's read fails after a
+`DisconnectNamedPipe`. A program that waits for zero alone works on unix and
+waits for ever on Windows. Both spellings take one arm.
+
+The crate is built on every system and not on unix alone. Tmux does not run on
+Windows, but psmux does, and psmux ships a program called `tmux`. So the crate
+holds no `cfg` for a system, builds no path, and names no directory. A green
+Windows job compiles it. Nothing in the build runs `tmux`, so the Windows path
+is not proven from end to end.
 
 ## Testing
 

@@ -34,6 +34,13 @@ original has for a session whose pane it cannot take at face value (pid
 ancestry, title matching), and the selection falling back to a nearby row rather
 than to the first one when the row it was on goes.
 
+Work on a tmux client began. The daemon now delivers to a socket as well as to
+a zellij pipe, and `tmux-agent-wrangler` is the first program to read one. It
+registers a socket named for its server and its session, connects, and writes
+out every record. It draws nothing and it reads no tmux topology. The sidebar,
+the drawing and the tmux topology are later work. The release attaches no such
+binary yet, by decision.
+
 ## How it is tested
 
 `cargo test` covers everything that does not call zellij: the row model, the
@@ -47,7 +54,21 @@ Three crates separate the halves. `agent-wrangler-core` is the facts, and builds
 for wasm as well as the host; `agent-wrangler` is the daemon, the hook and the
 installer, and never sees `zellij-tile`; `zellij-agent-wrangler` is the plugin.
 Bare `cargo build` on the host is the one command that does not work: it tries
-to link the plugin bin, whose host functions exist only inside zellij.
+to link the plugin bin, whose host functions exist only inside zellij. So the
+build under test is named one crate at a time, which is what the release
+workflow does.
+
+`tmux-agent-wrangler` tests itself against a stand-in daemon. A test that needs
+one binds a socket named for this process and answers on it. No test reaches the
+real daemon. Two things resist that approach: the words of `tmux
+display-message` and the words of `agent-wrangler register`. A test reads each
+command instead of running it. Both are contracts with another program, and a
+mistake in either compiles and passes every test that does not read it.
+
+Two more tests cover what no socket in this crate can produce. Dropping either
+end of a local socket is a clean close on both systems. So a reader and a writer
+that fail on purpose stand in for a socket. The first proves that a failing read
+means the daemon went. The second proves that a failing write does not.
 
 `cargo check -p agent-wrangler --target x86_64-pc-windows-msvc` is how the
 Windows port is kept honest from a Linux machine. It needs no linker, so it

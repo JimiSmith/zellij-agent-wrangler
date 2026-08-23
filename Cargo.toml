@@ -5,6 +5,7 @@ members = [
     "crates/agent-wrangler-sidebar",
     "crates/agent-wrangler-ui",
     "crates/agent-wrangler",
+    "crates/tmux-agent-wrangler",
     "crates/zellij-agent-wrangler",
 ]
 
