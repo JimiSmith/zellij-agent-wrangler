@@ -39,7 +39,7 @@ pub use windows::{command, pid_alive, processes, spawn_detached, started};
 /// some systems and a path on others. Nothing here makes the name uniform,
 /// because the caller decides what counts as a match.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Row {
+pub struct ProcessTableRow {
     pub ppid: u32,
     pub name: String,
 }
@@ -137,7 +137,12 @@ const SHELLS: &[&str] = &[
 /// list here can hold every such name. Neither rule counts steps, because the
 /// number of shells between a hook and its agent depends on how the hook
 /// started.
-pub fn agent_process(pid: u32, agent: &str, table: &HashMap<u32, Row>, hops: u32) -> Option<u32> {
+pub fn agent_process(
+    pid: u32,
+    agent: &str,
+    table: &HashMap<u32, ProcessTableRow>,
+    hops: u32,
+) -> Option<u32> {
     let line = ancestors(pid, table, hops);
     let named = |ancestor: &&u32| {
         table
@@ -168,7 +173,7 @@ pub fn agent_process(pid: u32, agent: &str, table: &HashMap<u32, Row>, hops: u32
 pub fn agent_running(
     pid: u32,
     agent: &str,
-    table: &HashMap<u32, Row>,
+    table: &HashMap<u32, ProcessTableRow>,
     hops: u32,
 ) -> Option<Process> {
     let found = agent_process(pid, agent, table, hops)?;
@@ -232,7 +237,7 @@ fn stem(image: &str) -> &str {
 /// steps. A cycle in a snapshot that is truncated, or that was taken during a
 /// change, therefore cannot spin. The result does not hold the pid that the
 /// climb started from.
-pub fn ancestors(pid: u32, table: &HashMap<u32, Row>, hops: u32) -> Vec<u32> {
+pub fn ancestors(pid: u32, table: &HashMap<u32, ProcessTableRow>, hops: u32) -> Vec<u32> {
     let mut seen = Vec::new();
     let mut current = pid;
     for _ in 0..hops {
@@ -252,12 +257,12 @@ pub fn ancestors(pid: u32, table: &HashMap<u32, Row>, hops: u32) -> Vec<u32> {
 mod tests {
     use super::*;
 
-    fn tree(rows: &[(u32, u32, &str)]) -> HashMap<u32, Row> {
+    fn tree(rows: &[(u32, u32, &str)]) -> HashMap<u32, ProcessTableRow> {
         rows.iter()
             .map(|(pid, ppid, name)| {
                 (
                     *pid,
-                    Row {
+                    ProcessTableRow {
                         ppid: *ppid,
                         name: name.to_string(),
                     },

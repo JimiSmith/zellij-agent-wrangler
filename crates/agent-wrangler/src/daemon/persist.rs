@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use agent_wrangler_core::notify::Notifier;
 
 use crate::daemon::state::{Client, Source};
-use crate::proto::Sink;
+use crate::proto::DeliveryTarget;
 
 /// The number of writes that this process made. No two of those writes name the
 /// same temporary file.
@@ -42,7 +42,7 @@ struct Saved {
 /// client sent first.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Listening {
-    sink: Sink,
+    sink: DeliveryTarget,
     #[serde(default)]
     notify: Vec<String>,
 }
@@ -181,13 +181,13 @@ mod tests {
         ];
         let clients = vec![
             Client {
-                sink: Sink::Zellij {
+                sink: DeliveryTarget::Zellij {
                     session: "proto".to_string(),
                 },
                 notify: Notifier::new(vec!["notify-send".to_string(), "-u".to_string()]),
             },
             Client {
-                sink: Sink::Socket {
+                sink: DeliveryTarget::Socket {
                     name: "wrangler-tmux-work.sock".to_string(),
                 },
                 notify: None,

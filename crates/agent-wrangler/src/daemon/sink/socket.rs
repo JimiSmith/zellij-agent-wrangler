@@ -22,7 +22,7 @@ use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{GenericNamespaced, Listener, Stream};
 
 use super::slot::Slot;
-use crate::proto::{Sink, Told};
+use crate::proto::{ClientMessage, DeliveryTarget};
 
 /// How long to wait after an accept that failed, before accepting again.
 ///
@@ -120,12 +120,12 @@ impl Peers {
 /// Side effect: this function binds a name and spawns a thread. It answers
 /// `None` for a name that something else already answers, and for one that
 /// cannot be bound at all.
-pub fn bind(name: &str, told: &Sender<(Sink, Told)>) -> Option<Bound> {
+pub fn bind(name: &str, told: &Sender<(DeliveryTarget, ClientMessage)>) -> Option<Bound> {
     let listener = super::super::claim(name).ok().flatten()?;
     let peers = Arc::new(Peers::default());
     let stop = Arc::new(AtomicBool::new(false));
 
-    let sink = Sink::Socket {
+    let sink = DeliveryTarget::Socket {
         name: name.to_string(),
     };
     let accepting = (Arc::clone(&peers), Arc::clone(&stop), told.clone());
@@ -162,11 +162,11 @@ pub fn shut(bound: &Bound) {
 
 /// Accepts peers until the daemon says to stop.
 fn accept_until_stopped(
-    sink: &Sink,
+    sink: &DeliveryTarget,
     listener: &Listener,
     peers: &Arc<Peers>,
     stop: &AtomicBool,
-    told: &Sender<(Sink, Told)>,
+    told: &Sender<(DeliveryTarget, ClientMessage)>,
 ) {
     loop {
         let incoming = listener.accept();
@@ -188,7 +188,12 @@ fn accept_until_stopped(
 /// Side effect: this function spawns two threads. Both hold the same stream
 /// through an `Arc`, which is what the transport's own documentation asks for:
 /// a reference to a stream reads and writes, and splitting it buys nothing.
-fn joined(sink: &Sink, peers: &Arc<Peers>, stream: Stream, told: &Sender<(Sink, Told)>) {
+fn joined(
+    sink: &DeliveryTarget,
+    peers: &Arc<Peers>,
+    stream: Stream,
+    told: &Sender<(DeliveryTarget, ClientMessage)>,
+) {
     let stream = Arc::new(stream);
     let (id, slot) = peers.joined();
 
@@ -373,8 +378,8 @@ mod tests {
         assert_eq!(
             heard.recv_timeout(Duration::from_secs(5)),
             Ok((
-                Sink::Socket { name: name.clone() },
-                Told::Seen {
+                DeliveryTarget::Socket { name: name.clone() },
+                ClientMessage::Seen {
                     session: "9f3c-1a".to_string()
                 }
             ))
@@ -400,7 +405,10 @@ mod tests {
         writer.flush().expect("a heartbeat");
         assert_eq!(
             heard.recv_timeout(Duration::from_secs(5)),
-            Ok((Sink::Socket { name: name.clone() }, Told::Beat))
+            Ok((
+                DeliveryTarget::Socket { name: name.clone() },
+                ClientMessage::Beat
+            ))
         );
         shut(&bound);
     }

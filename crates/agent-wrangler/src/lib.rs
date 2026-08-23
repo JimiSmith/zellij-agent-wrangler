@@ -24,7 +24,7 @@ mod paths;
 mod platform;
 mod proto;
 
-use proto::{Hook, Inbound, Sink};
+use proto::{DeliveryTarget, Hook, Inbound};
 
 /// The largest number of ancestry levels that the search for the agent climbs.
 ///
@@ -97,15 +97,15 @@ fn hook(agent: &str, event: &str) {
 ///
 /// A name with nothing in it is refused here, so it never reaches the wire. The
 /// daemon cannot bind such a name, and the person who typed it is at this end.
-fn sink(kind: &str, id: &str) -> Option<Sink> {
+fn sink(kind: &str, id: &str) -> Option<DeliveryTarget> {
     if id.is_empty() {
         return None;
     }
     match kind {
-        "zellij" => Some(Sink::Zellij {
+        "zellij" => Some(DeliveryTarget::Zellij {
             session: id.to_string(),
         }),
-        "socket" => Some(Sink::Socket {
+        "socket" => Some(DeliveryTarget::Socket {
             name: id.to_string(),
         }),
         _ => None,
@@ -242,13 +242,13 @@ mod tests {
     fn each_kind_of_client_names_its_own_sink() {
         assert_eq!(
             sink("zellij", "proto"),
-            Some(Sink::Zellij {
+            Some(DeliveryTarget::Zellij {
                 session: "proto".to_string()
             })
         );
         assert_eq!(
             sink("socket", "wrangler-tmux-work"),
-            Some(Sink::Socket {
+            Some(DeliveryTarget::Socket {
                 name: "wrangler-tmux-work".to_string()
             })
         );

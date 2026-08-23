@@ -12,7 +12,7 @@
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Mutex, MutexGuard};
 
-use crate::proto::{Watched, What};
+use crate::proto::{MonitorEvent, MonitorRecord};
 
 /// The number of records that a watcher falls behind by before it loses records.
 ///
@@ -23,7 +23,7 @@ const BACKLOG: usize = 4096;
 
 /// One watcher: where to hand records to, and how many records it did not get.
 struct Watcher {
-    to: SyncSender<Watched>,
+    to: SyncSender<MonitorRecord>,
     /// The records dropped since the last record that got through. Once there
     /// is room again, the watcher gets a record of its own for them.
     missed: u64,
@@ -48,7 +48,7 @@ impl Watchers {
     ///
     /// When a watcher drops the receiver, it leaves. The next record finds the
     /// watcher gone, and this module forgets it then. The watcher says nothing.
-    pub fn watch(&self) -> Receiver<Watched> {
+    pub fn watch(&self) -> Receiver<MonitorRecord> {
         let (to, from) = sync_channel(BACKLOG);
         self.held().push(Watcher { to, missed: 0 });
         from
@@ -58,14 +58,14 @@ impl Watchers {
     ///
     /// This method returns at once, whoever watches and however slowly they
     /// read. When nobody watches, nothing builds the record at all.
-    pub fn saw(&self, what: impl FnOnce() -> What) {
+    pub fn saw(&self, event: impl FnOnce() -> MonitorEvent) {
         let mut who = self.held();
         if who.is_empty() {
             return;
         }
-        let record = Watched {
+        let record = MonitorRecord {
             at: crate::now(),
-            what: what(),
+            event: event(),
         };
         who.retain_mut(|watcher| watcher.tell(&record));
     }
@@ -77,11 +77,11 @@ impl Watcher {
     /// The watcher gets what it missed before it gets the new record. The run
     /// that it reads then shows where the hole is, and not only that a hole
     /// exists.
-    fn tell(&mut self, record: &Watched) -> bool {
+    fn tell(&mut self, record: &MonitorRecord) -> bool {
         if self.missed > 0 {
-            let missed = Watched {
+            let missed = MonitorRecord {
                 at: record.at,
-                what: What::Missed {
+                event: MonitorEvent::Missed {
                     records: self.missed,
                 },
             };
@@ -109,8 +109,8 @@ impl Watcher {
 mod tests {
     use super::*;
 
-    fn asked() -> What {
-        What::Asked
+    fn asked() -> MonitorEvent {
+        MonitorEvent::Asked
     }
 
     #[test]
@@ -124,7 +124,7 @@ mod tests {
         let watchers = Watchers::default();
         let from = watchers.watch();
         watchers.saw(asked);
-        assert_eq!(from.recv().unwrap().what, What::Asked);
+        assert_eq!(from.recv().unwrap().event, MonitorEvent::Asked);
     }
 
     #[test]
@@ -144,12 +144,15 @@ mod tests {
             watchers.saw(asked);
         }
         for _ in 0..BACKLOG {
-            assert_eq!(from.recv().unwrap().what, What::Asked);
+            assert_eq!(from.recv().unwrap().event, MonitorEvent::Asked);
         }
         // The daemon owes the hole, and hands it over before the next record.
         watchers.saw(asked);
-        assert_eq!(from.recv().unwrap().what, What::Missed { records: 1 });
-        assert_eq!(from.recv().unwrap().what, What::Asked);
+        assert_eq!(
+            from.recv().unwrap().event,
+            MonitorEvent::Missed { records: 1 }
+        );
+        assert_eq!(from.recv().unwrap().event, MonitorEvent::Asked);
     }
 
     #[test]
@@ -160,7 +163,7 @@ mod tests {
         let staying = watchers.watch();
         drop(watchers.watch());
         watchers.saw(asked);
-        assert_eq!(staying.recv().unwrap().what, What::Asked);
+        assert_eq!(staying.recv().unwrap().event, MonitorEvent::Asked);
         assert_eq!(watchers.held().len(), 1);
     }
 }

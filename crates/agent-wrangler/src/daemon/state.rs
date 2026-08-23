@@ -16,7 +16,7 @@ use agent_wrangler_core::payload::directory_name;
 use agent_wrangler_core::registry::Registry;
 use agent_wrangler_core::titles;
 
-use crate::proto::{Hook, Sink};
+use crate::proto::{DeliveryTarget, Hook};
 
 /// Where a session's own account of itself is kept. The daemon can read it
 /// again without a new message from the agent.
@@ -110,7 +110,7 @@ pub fn event(agent: &str, name: &str, recoverable: Option<bool>) -> Event {
 /// raises each call once for every client that holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Client {
-    pub sink: Sink,
+    pub sink: DeliveryTarget,
     pub notify: Option<Notifier>,
 }
 
@@ -129,7 +129,7 @@ pub struct State {
     /// A client that says nothing for [`SILENCE`] is a client that the daemon
     /// gives up on. This map holds one entry for each client, and never an
     /// entry for a client that left.
-    spoke: BTreeMap<Sink, Instant>,
+    spoke: BTreeMap<DeliveryTarget, Instant>,
 }
 
 /// How long a client may say nothing before the daemon gives up on it.
@@ -389,14 +389,14 @@ impl State {
     /// A line from a sink that no client holds is passed over. That is a client
     /// that the daemon already gave up on, and a late line does not bring it
     /// back. It registers again or it stays gone.
-    pub fn spoke(&mut self, sink: &Sink, now: Instant) {
+    pub fn spoke(&mut self, sink: &DeliveryTarget, now: Instant) {
         if self.clients.iter().any(|held| &held.sink == sink) {
             self.spoke.insert(sink.clone(), now);
         }
     }
 
     /// Every client that has said nothing for [`SILENCE`].
-    pub fn silent(&self, now: Instant) -> Vec<Sink> {
+    pub fn silent(&self, now: Instant) -> Vec<DeliveryTarget> {
         self.spoke
             .iter()
             .filter(|(_, spoke)| now.duration_since(**spoke) >= SILENCE)
@@ -406,7 +406,7 @@ impl State {
 
     /// This method gives up on one client, whatever the daemon knew about it.
     /// It returns whether there was one to give up on.
-    pub fn retire(&mut self, sink: &Sink) -> bool {
+    pub fn retire(&mut self, sink: &DeliveryTarget) -> bool {
         self.spoke.remove(sink);
         let held = self.clients.iter().any(|held| &held.sink == sink);
         self.clients.retain(|held| &held.sink != sink);
@@ -685,7 +685,7 @@ mod tests {
 
     fn client(session: &str, notify: Option<Notifier>) -> Client {
         Client {
-            sink: Sink::Zellij {
+            sink: DeliveryTarget::Zellij {
                 session: session.to_string(),
             },
             notify,

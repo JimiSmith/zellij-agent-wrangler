@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 
 use agent_wrangler_core::agent::ProcessStartStamp;
 
-use super::Row;
+use super::ProcessTableRow;
 
 /// A program to run and wait for, which here is nothing but the program. A unix
 /// process starts with no window in either case.
@@ -128,7 +128,7 @@ pub fn started(pid: u32) -> Option<ProcessStartStamp> {
 /// and on macOS, so one command serves both systems without `/proc`. One call,
 /// and not two calls, reads the parent of a process and its name at the same
 /// moment. Between two moments either one can change.
-pub fn processes() -> HashMap<u32, Row> {
+pub fn processes() -> HashMap<u32, ProcessTableRow> {
     let out = Command::new("ps")
         .args(["-e", "-o", "pid=", "-o", "ppid=", "-o", "comm="])
         .stdin(Stdio::null())
@@ -144,14 +144,14 @@ pub fn processes() -> HashMap<u32, Row> {
 ///
 /// The command is the rest of the line. `comm` prints a path on macOS and a bare
 /// name on Linux, and neither form is always one word.
-fn parse_processes(text: &str) -> HashMap<u32, Row> {
+fn parse_processes(text: &str) -> HashMap<u32, ProcessTableRow> {
     text.lines()
         .filter_map(|line| {
             let mut columns = line.split_whitespace();
             let pid = columns.next()?.parse().ok()?;
             let ppid = columns.next()?.parse().ok()?;
             let name = columns.collect::<Vec<&str>>().join(" ");
-            Some((pid, Row { ppid, name }))
+            Some((pid, ProcessTableRow { ppid, name }))
         })
         .collect()
 }
@@ -160,8 +160,8 @@ fn parse_processes(text: &str) -> HashMap<u32, Row> {
 mod tests {
     use super::*;
 
-    fn process(ppid: u32, name: &str) -> Row {
-        Row {
+    fn process(ppid: u32, name: &str) -> ProcessTableRow {
+        ProcessTableRow {
             ppid,
             name: name.to_string(),
         }

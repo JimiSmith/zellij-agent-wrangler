@@ -403,6 +403,34 @@ the one that caused it. And every sidebar left behind still believed it was the
 one in the tab you are in, which is the rule that decides who acts: three tabs
 raised three desktop notifications for one call.
 
+**A rename reaches a type name and stops there.** The shared crates and
+`proto.rs` were renamed so that a name says what it is. Not one variant and not
+one field moved. No type in `proto.rs` carries a `#[serde(rename)]`, so serde
+derives every `kind` value from a variant name and every JSON key from a field
+name, and a rename of either would move the bytes on a wire that a daemon and a
+sidebar of different builds share. A type name serializes nowhere, so every type
+name was free. `MonitorRecord::event` was free for the same reason:
+`#[serde(flatten)]` lifts the tag and the fields of the `MonitorEvent` to the top
+level, so that field name never reaches the wire. Adding a `#[serde(rename)]`
+would have bought a few better variant names for a permanent second spelling
+that every future reader has to keep in step. That is the cost the rename set out
+to remove.
+
+**Some names were seen and left.** The renames covered every name that the rule
+plainly forbids. These break it too, and each one needs a decision that a rename
+cannot make on its own. In `agent-wrangler-core`: `Record::None` shadows
+`Option::None`; `Agent::agent` holds the agent product name on a type called
+`Agent` in a module called `agent`; `Registry::start` and `Registry::report`
+differ only in which fields the arriving record wins. In `agent-wrangler-ui`:
+`render::wrap`, `render::notification_body_field`, `Frame::lines` returns `Row`
+values, and `build_tree` returns a flat list. In `agent-wrangler-sidebar`:
+`Decision` wraps one `Vec<Effect>` and decides nothing; `Application::render`
+takes `&mut self`, caches and renders nothing; `leave_if_alone`, `where_it_is`,
+`Application::adopt`, and `UserAction::Click` carries an unlabelled line index.
+The daemon's own modules were left whole, `daemon/sink/` included: the wire calls
+a delivery target a `sink`, so the field and the module agree with the bytes even
+though the type is now `DeliveryTarget`.
+
 **The daemon holds one pipe per session rather than running one per delivery.**
 A wasm plugin cannot hold a connection, so the daemon must reach out to it, and
 for a long time that meant a process per publish and a process for every word a

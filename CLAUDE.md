@@ -52,7 +52,7 @@ Forbidden:
   `feed`, `rounds`, `keys`, `state`.
 - A metaphor in place of the value. `stand_down_to`, `left_behind_by`.
 - A name that is untrue. A type called `View` that holds options and draws
-  nothing.
+  nothing. A variant called `Focused` that names the pane which is not focused.
 - A cute name, a pun or an inside joke.
 
 Required:
@@ -63,9 +63,13 @@ Required:
   `ConnectionEnd`.
 - A constant says what it measures. `CONNECT_ATTEMPTS`, `TEST_TIMEOUT`.
 
-Riddle names remain in `agent-wrangler/src/proto.rs`. `Told`, `What` and `Sink`
-are the known ones. Remove them when you refactor the code they live in. Never
-add another.
+No riddle name remains in the shared crates or in `proto.rs`. Never add another.
+
+Two kinds of name are pinned and stay as they are. A variant name and a field
+name in `proto.rs` are the bytes on the wire, so `ClientMessage::Seen` keeps its
+spelling. A word that a user types stays as the user types it, so the layout
+keys and every command line word are fixed. Read "The wire" below before you
+rename anything in `proto.rs`.
 
 ## Rule two: every system
 
@@ -206,8 +210,25 @@ at the top of the pane.
 
 `FORMAT` in `agent-wrangler-core` is that number. Bump it when the records
 change shape, and when the daemon starts to need a message that an older client
-does not send. `ClientMessage::Beat` is the second kind: the records did not move, and a
-client too old to beat is dropped after a minute and a half with nothing on the
-pane to explain it. A rename is neither kind. Never write the number in a test.
-Read the constant, or the next bump breaks tests that the change did not
-touch.
+does not send. `ClientMessage::Beat` is the second kind: the records did not
+move, and a client too old to beat is dropped after a minute and a half with
+nothing on the pane to explain it. A rename is neither kind. Never write the
+number in a test. Read the constant, or the next bump breaks tests that the
+change did not touch.
+
+No type in `proto.rs` carries a `#[serde(rename)]`. So serde derives every
+`kind` value from a variant name, and every JSON key from a field name. Rename
+either one and the bytes move, and `read_message` skips a line it cannot decode
+without a word. The fault then shows as a pane that quietly stops updating.
+Rename a type freely. Nothing serializes a type name.
+
+Three things depend on those names beyond the live wire.
+
+1. `DeliveryTarget` tags are written to `agents.json`. A rename there breaks
+   restore on restart.
+2. `MonitorEvent` variant names are what a user reads in `agent-wrangler
+   monitor`, and what a script that greps that stream matches.
+3. `ClientMessage` in `proto.rs` must match the literals that
+   `ClientMessage::encode` in `agent-wrangler-core` writes by hand. The wasm
+   sidebar takes that crate without a JSON writer, so the two ends are held in
+   step by one test in `proto.rs` and by nothing else.

@@ -27,7 +27,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 use agent_wrangler_core::agent::escape_record_breaks;
 
-use crate::proto::{read_message, Sink, Told};
+use crate::proto::{read_message, ClientMessage, DeliveryTarget};
 
 /// Every transport that the daemon holds open, keyed by the client it reaches.
 ///
@@ -42,15 +42,15 @@ pub struct Transports {
     /// about whether the client behind it works, so there is nobody to tell. A
     /// client is kept for as long as it speaks, and the lines it speaks arrive
     /// on `told`.
-    reported: Sender<Sink>,
-    failures: Receiver<Sink>,
+    reported: Sender<DeliveryTarget>,
+    failures: Receiver<DeliveryTarget>,
     /// Where a line from a client goes, with the client that said it. The
     /// readers all share this end.
-    told: Sender<(Sink, Told)>,
+    told: Sender<(DeliveryTarget, ClientMessage)>,
 }
 
 impl Transports {
-    pub fn new(told: Sender<(Sink, Told)>) -> Self {
+    pub fn new(told: Sender<(DeliveryTarget, ClientMessage)>) -> Self {
         let (reported, failures) = channel();
         Transports {
             zellij: BTreeMap::new(),
@@ -79,7 +79,7 @@ impl Transports {
         }
         if !self.zellij.contains_key(session) {
             let Some(held) = zellij::open(session, &self.reported, &self.told) else {
-                self.report(&Sink::Zellij {
+                self.report(&DeliveryTarget::Zellij {
                     session: session.to_string(),
                 });
                 return;
@@ -104,7 +104,7 @@ impl Transports {
     fn socket(&mut self, name: &str, payload: &str) {
         if !self.sockets.contains_key(name) {
             let Some(bound) = socket::bind(name, &self.told) else {
-                self.report(&Sink::Socket {
+                self.report(&DeliveryTarget::Socket {
                     name: name.to_string(),
                 });
                 return;
@@ -116,7 +116,7 @@ impl Transports {
 
     /// Records one delivery that did not land, and that this thread already
     /// knows about.
-    fn report(&self, sink: &Sink) {
+    fn report(&self, sink: &DeliveryTarget) {
         let _ = self.reported.send(sink.clone());
     }
 
@@ -125,10 +125,10 @@ impl Transports {
     /// Side effect: a failed delivery closes the pipe that it was for. A child
     /// that died is therefore replaced by the next delivery to that session,
     /// rather than written to for as long as the daemon runs.
-    pub fn failures(&mut self) -> Vec<Sink> {
-        let failures: Vec<Sink> = self.failures.try_iter().collect();
+    pub fn failures(&mut self) -> Vec<DeliveryTarget> {
+        let failures: Vec<DeliveryTarget> = self.failures.try_iter().collect();
         for sink in &failures {
-            if let Sink::Zellij { session } = sink {
+            if let DeliveryTarget::Zellij { session } = sink {
                 if let Some(held) = self.zellij.remove(session) {
                     zellij::shut(&held);
                 }
@@ -170,9 +170,9 @@ impl Transports {
     /// a name that nothing releases is a name that a later client cannot bind. A
     /// daemon that only forgets the client leaves both behind, for as long as
     /// the user stays logged in.
-    pub fn retain(&mut self, live: &BTreeSet<Sink>) {
+    pub fn retain(&mut self, live: &BTreeSet<DeliveryTarget>) {
         self.zellij.retain(|session, held| {
-            if live.contains(&Sink::Zellij {
+            if live.contains(&DeliveryTarget::Zellij {
                 session: session.clone(),
             }) {
                 return true;
@@ -181,7 +181,7 @@ impl Transports {
             false
         });
         self.sockets.retain(|name, bound| {
-            if live.contains(&Sink::Socket { name: name.clone() }) {
+            if live.contains(&DeliveryTarget::Socket { name: name.clone() }) {
                 return true;
             }
             socket::shut(bound);
@@ -199,9 +199,13 @@ impl Transports {
 /// The end of the stream is the end of this thread. Nothing else stops it, and
 /// nothing needs to. A killed child closes its stdout, and a peer that goes
 /// closes its socket.
-fn read_until_ended<R: Read>(sink: &Sink, reader: R, told: &Sender<(Sink, Told)>) {
+fn read_until_ended<R: Read>(
+    sink: &DeliveryTarget,
+    reader: R,
+    told: &Sender<(DeliveryTarget, ClientMessage)>,
+) {
     let mut reader = BufReader::new(reader);
-    while let Ok(Some(message)) = read_message::<_, Told>(&mut reader) {
+    while let Ok(Some(message)) = read_message::<_, ClientMessage>(&mut reader) {
         if told.send((sink.clone(), message)).is_err() {
             return;
         }
@@ -213,10 +217,10 @@ fn read_until_ended<R: Read>(sink: &Sink, reader: R, told: &Sender<(Sink, Told)>
 /// Side effect: this function queues a write, and can start the transport that
 /// carries it. Neither one waits for the client to take the payload. A write
 /// that did not land arrives later, on [`Transports::failures`].
-pub fn deliver(transports: &mut Transports, sink: &Sink, payload: &str) {
+pub fn deliver(transports: &mut Transports, sink: &DeliveryTarget, payload: &str) {
     match sink {
-        Sink::Zellij { session } => transports.zellij(session, payload),
-        Sink::Socket { name } => transports.socket(name, payload),
+        DeliveryTarget::Zellij { session } => transports.zellij(session, payload),
+        DeliveryTarget::Socket { name } => transports.socket(name, payload),
     }
 }
 
@@ -239,7 +243,7 @@ mod tests {
         // No delivery decides whether the daemon keeps a client, so there is
         // nobody to tell that a delivery landed.
         let mut transports = transports();
-        let sink = Sink::Socket {
+        let sink = DeliveryTarget::Socket {
             name: name("delivery"),
         };
         deliver(&mut transports, &sink, "wrangler 3\nfirst");
@@ -257,7 +261,7 @@ mod tests {
         let taken = name("cannot-bind");
         let (told, _heard) = channel();
         let held = socket::bind(&taken, &told).expect("a bound name");
-        let sink = Sink::Socket { name: taken };
+        let sink = DeliveryTarget::Socket { name: taken };
         deliver(&mut transports, &sink, "wrangler 3");
         assert_eq!(transports.failures(), vec![sink]);
         socket::shut(&held);
@@ -275,7 +279,7 @@ mod tests {
 
         let mut transports = transports();
         let taken = name("one-line");
-        let sink = Sink::Socket {
+        let sink = DeliveryTarget::Socket {
             name: taken.clone(),
         };
         deliver(&mut transports, &sink, "first\nsecond");
@@ -295,7 +299,7 @@ mod tests {
     fn a_client_that_is_no_longer_a_client_gives_up_its_name() {
         let mut transports = transports();
         let taken = name("released");
-        let sink = Sink::Socket {
+        let sink = DeliveryTarget::Socket {
             name: taken.clone(),
         };
         deliver(&mut transports, &sink, "wrangler 3");
@@ -314,7 +318,7 @@ mod tests {
         let taken = name("stays-refused");
         let (told, _heard) = channel();
         let held = socket::bind(&taken, &told).expect("a bound name");
-        let sink = Sink::Socket {
+        let sink = DeliveryTarget::Socket {
             name: taken.clone(),
         };
         deliver(&mut transports, &sink, "wrangler 3");

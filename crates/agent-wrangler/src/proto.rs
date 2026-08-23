@@ -5,6 +5,26 @@
 //! is therefore a run of independent lines. A reader that loses its place at
 //! one message finds it again at the next line. A `kind` field tags each enum,
 //! so a decoder dispatches on the tag and not on the shape.
+//!
+//! # A variant name and a field name are the bytes
+//!
+//! No type in this module carries a `#[serde(rename)]`. So serde derives every
+//! `kind` value from the variant name, and every JSON key from the field name.
+//! Rename either one and the bytes on the wire move. A daemon and a sidebar are
+//! installed separately, so the two ends can be different builds, and
+//! `read_message` skips a line that it cannot decode without a word. A mismatch
+//! therefore shows as a pane that quietly stops updating.
+//!
+//! Three things depend on these names beyond the live wire. `DeliveryTarget`
+//! tags are written to `agents.json`, so a rename there breaks restore on
+//! restart. `MonitorEvent` variant names are what a user reads in
+//! `agent-wrangler monitor`. `ClientMessage` variant names must match the
+//! literals that `agent_wrangler_core::client_message::ClientMessage::encode`
+//! writes by hand, and one test below is all that holds the two in step.
+//!
+//! A type name is free. Nothing serializes it. `MonitorRecord::event` is free
+//! for the same reason: `#[serde(flatten)]` lifts the `MonitorEvent` tag and
+//! its fields to the top level, so that field name never reaches the wire.
 
 use std::io::{self, BufRead, Write};
 
@@ -51,7 +71,7 @@ pub struct Hook {
 /// delivery. Nothing else in the daemon knows about it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Sink {
+pub enum DeliveryTarget {
     /// A zellij session. The daemon reaches it with a pipe to its name.
     Zellij { session: String },
     /// A local socket that the daemon binds and listens on. A client that can
@@ -79,7 +99,7 @@ pub enum Inbound {
     /// stands now.
     Register {
         format: u32,
-        sink: Sink,
+        sink: DeliveryTarget,
         /// The words that this client runs to announce a call for the user.
         /// Empty for a client that wants no announcement.
         ///
@@ -115,7 +135,7 @@ pub enum Inbound {
 /// to no client, so there is nothing there for a beat to say anything about.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Told {
+pub enum ClientMessage {
     /// The user reached a session that called for them.
     Seen { session: String },
     /// The client is there and can still send a message. This says nothing
@@ -134,11 +154,11 @@ pub enum Told {
 /// in between is its own business and is not a record here. A watcher of that
 /// reads the daemon's diary rather than its post.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Watched {
+pub struct MonitorRecord {
     /// Milliseconds since the epoch, read where the message was.
     pub at: u64,
     #[serde(flatten)]
-    pub what: What,
+    pub event: MonitorEvent,
 }
 
 /// A message, and the direction it went in.
@@ -149,7 +169,7 @@ pub struct Watched {
 /// does not move.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum What {
+pub enum MonitorEvent {
     /// In: an agent's hook reported.
     Hook {
         agent: String,
@@ -158,7 +178,7 @@ pub enum What {
         told: bool,
     },
     /// In: a client asked for every delivery from now on.
-    Registered { sink: Sink },
+    Registered { sink: DeliveryTarget },
     /// In: a client said that the user reached a session that called for them.
     Seen { session: String, told: bool },
     /// In: a client said that it is there and can still send a message.
@@ -167,7 +187,7 @@ pub enum What {
     /// says how fast the circle turns while nothing else happens. A client with
     /// something to report sends no separate beat, so a `Seen` counts as one of
     /// these and no record here follows it.
-    Beat { sink: Sink },
+    Beat { sink: DeliveryTarget },
     /// In: something asked for the state on its own connection.
     Asked,
     /// Out: the state goes to this client, with this many agents in it.
@@ -175,19 +195,19 @@ pub enum What {
     /// One of these is written for each state that goes out. A delivery is a
     /// write and not a process run. There is nothing to say afterwards about a
     /// delivery that landed, and no time to measure.
-    Delivering { sink: Sink, agents: usize },
+    Delivering { sink: DeliveryTarget, agents: usize },
     /// Out: a delivery to this client did not land.
     ///
     /// Only a failure is worth a second record. The daemon learns of it after
     /// the state went out, because nothing waits on a write. No count of these
     /// retires a client. A client leaves for going quiet and for nothing else.
-    Failed { sink: Sink },
+    Failed { sink: DeliveryTarget },
     /// Out: the daemon gave up on this client and delivers to it no more.
     ///
     /// A client of either kind leaves for one reason. It said nothing for
     /// longer than the daemon waits. Without this record, a feed that stopped
     /// has no explanation anywhere.
-    Retired { sink: Sink },
+    Retired { sink: DeliveryTarget },
     /// Records that the daemon cannot hand over fast enough. A watcher that
     /// falls behind loses records and does not hold the daemon up. The daemon
     /// tells the watcher how many records it lost, so the watcher does not
@@ -284,14 +304,14 @@ mod tests {
         });
         round_trip(Inbound::Register {
             format: 3,
-            sink: Sink::Zellij {
+            sink: DeliveryTarget::Zellij {
                 session: "proto".to_string(),
             },
             notify: vec!["notify-send".to_string(), "--urgency".to_string()],
         });
         round_trip(Inbound::Register {
             format: 3,
-            sink: Sink::Socket {
+            sink: DeliveryTarget::Socket {
                 name: "agent-wrangler-tmux-work.sock".to_string(),
             },
             notify: Vec::new(),
@@ -333,10 +353,10 @@ mod tests {
 
     #[test]
     fn a_client_the_daemon_gave_up_on_says_so() {
-        round_trip(Watched {
+        round_trip(MonitorRecord {
             at: 1_700_000_000_000,
-            what: What::Retired {
-                sink: Sink::Socket {
+            event: MonitorEvent::Retired {
+                sink: DeliveryTarget::Socket {
                     name: "agent-wrangler-tmux-work.sock".to_string(),
                 },
             },
@@ -345,10 +365,10 @@ mod tests {
 
     #[test]
     fn a_delivery_that_failed_says_which_client_refused_it() {
-        round_trip(Watched {
+        round_trip(MonitorRecord {
             at: 1_700_000_000_000,
-            what: What::Failed {
-                sink: Sink::Zellij {
+            event: MonitorEvent::Failed {
+                sink: DeliveryTarget::Zellij {
                     session: "proto".to_string(),
                 },
             },
@@ -366,8 +386,8 @@ mod tests {
         .encode();
         let session = "9f3c-1a".to_string();
         assert_eq!(
-            read_message::<_, Told>(&mut line.as_bytes()).unwrap(),
-            Some(Told::Seen {
+            read_message::<_, ClientMessage>(&mut line.as_bytes()).unwrap(),
+            Some(ClientMessage::Seen {
                 session: session.clone()
             })
         );
@@ -385,8 +405,8 @@ mod tests {
         // passed over.
         let line = agent_wrangler_core::client_message::ClientMessage::Beat.encode();
         assert_eq!(
-            read_message::<_, Told>(&mut line.as_bytes()).unwrap(),
-            Some(Told::Beat)
+            read_message::<_, ClientMessage>(&mut line.as_bytes()).unwrap(),
+            Some(ClientMessage::Beat)
         );
         assert_eq!(
             read_message::<_, Inbound>(&mut line.as_bytes()).unwrap(),
@@ -405,7 +425,7 @@ mod tests {
             &mut written,
             &Inbound::Register {
                 format: 3,
-                sink: Sink::Zellij {
+                sink: DeliveryTarget::Zellij {
                     session: "proto".to_string(),
                 },
                 notify: Vec::new(),
@@ -421,8 +441,8 @@ mod tests {
         .unwrap();
         let mut reader = written.as_slice();
         assert_eq!(
-            read_message::<_, Told>(&mut reader).unwrap(),
-            Some(Told::Seen {
+            read_message::<_, ClientMessage>(&mut reader).unwrap(),
+            Some(ClientMessage::Seen {
                 session: "one".to_string()
             }),
             "the two before it were passed over"
@@ -440,7 +460,7 @@ mod tests {
             read_message::<_, Inbound>(&mut reader).unwrap(),
             Some(Inbound::Register {
                 format: 3,
-                sink: Sink::Zellij {
+                sink: DeliveryTarget::Zellij {
                     session: "proto".to_string()
                 },
                 notify: Vec::new(),

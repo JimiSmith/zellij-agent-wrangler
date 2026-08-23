@@ -20,7 +20,7 @@ use windows_sys::Win32::System::Threading::{
 
 use agent_wrangler_core::agent::ProcessStartStamp;
 
-use super::Row;
+use super::ProcessTableRow;
 
 /// A program to run and wait for. A run of this program cannot make a window
 /// appear.
@@ -167,7 +167,7 @@ fn moment(time: FILETIME) -> u64 {
 /// uses pids again, so a long climb can arrive at a process that only inherited
 /// the number. A climb by name over a bounded number of hops makes that
 /// harmless.
-pub fn processes() -> HashMap<u32, Row> {
+pub fn processes() -> HashMap<u32, ProcessTableRow> {
     // SAFETY: `TH32CS_SNAPPROCESS` with pid 0 asks for the process list. That
     // call takes no buffer from this, and returns either a handle that this
     // owns or `INVALID_HANDLE_VALUE`.
@@ -191,7 +191,7 @@ pub fn processes() -> HashMap<u32, Row> {
     while more != FALSE {
         table.insert(
             entry.th32ProcessID,
-            Row {
+            ProcessTableRow {
                 ppid: entry.th32ParentProcessID,
                 name: image_name(&entry.szExeFile),
             },

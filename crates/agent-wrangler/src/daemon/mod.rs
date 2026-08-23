@@ -42,7 +42,9 @@ use crate::daemon::sink::Transports;
 use crate::daemon::state::{look, read_hook, Call, Client, Real, State};
 use crate::daemon::watch::Watchers;
 use crate::paths;
-use crate::proto::{read_message, write_message, Inbound, Outbound, Sink, Told, What};
+use crate::proto::{
+    read_message, write_message, ClientMessage, DeliveryTarget, Inbound, MonitorEvent, Outbound,
+};
 
 /// How often the daemon looks at every held transcript again, and at every
 /// held pid.
@@ -194,14 +196,14 @@ fn publish(
     let agents = saved.len();
     persist::save(dir, &saved, &clients);
     for client in &clients {
-        watchers.saw(|| What::Delivering {
+        watchers.saw(|| MonitorEvent::Delivering {
             sink: client.sink.clone(),
             agents,
         });
         sink::deliver(transports, &client.sink, &payload);
     }
     for sink in transports.failures() {
-        watchers.saw(|| What::Failed { sink: sink.clone() });
+        watchers.saw(|| MonitorEvent::Failed { sink: sink.clone() });
     }
     // The pipe process does not exit when its session dies, and a socket name
     // that nothing releases is a name that a later client cannot bind. A client
@@ -211,7 +213,7 @@ fn publish(
 }
 
 /// Every client that the daemon still delivers to.
-fn live(state: &State) -> BTreeSet<Sink> {
+fn live(state: &State) -> BTreeSet<DeliveryTarget> {
     state
         .clients()
         .into_iter()
@@ -250,7 +252,7 @@ fn retire_silent(
         let mut state = held(shared);
         for sink in &silent {
             if state.retire(sink) {
-                watchers.saw(|| What::Retired { sink: sink.clone() });
+                watchers.saw(|| MonitorEvent::Retired { sink: sink.clone() });
             }
         }
         live(&state)
@@ -266,7 +268,7 @@ fn retire_silent(
 /// the message means.
 fn seen(shared: &Arc<Mutex<State>>, owed: &Owed, watchers: &Watchers, session: &str) {
     let told = held(shared).on_seen(session);
-    watchers.saw(|| What::Seen {
+    watchers.saw(|| MonitorEvent::Seen {
         session: session.to_string(),
         told,
     });
@@ -348,7 +350,7 @@ fn serve(
                 // other event on the machine carries on meanwhile.
                 let reading = read_hook(&hook, &Real);
                 let applied = held(shared).apply_hook(&hook, reading);
-                watchers.saw(|| What::Hook {
+                watchers.saw(|| MonitorEvent::Hook {
                     agent: hook.agent.clone(),
                     event: hook.event.clone(),
                     session: hook.session_id.clone(),
@@ -367,7 +369,7 @@ fn serve(
                 }
             }
             Inbound::Register { sink, notify, .. } => {
-                watchers.saw(|| What::Registered { sink: sink.clone() });
+                watchers.saw(|| MonitorEvent::Registered { sink: sink.clone() });
                 held(shared).register(Client {
                     sink,
                     notify: Notifier::new(notify),
@@ -388,7 +390,7 @@ fn serve(
             }
             Inbound::Seen { session } => seen(shared, owed, watchers, &session),
             Inbound::Snapshot => {
-                watchers.saw(|| What::Asked);
+                watchers.saw(|| MonitorEvent::Asked);
                 let payload = held(shared).payload();
                 let mut writer = BufWriter::new(&stream);
                 let _ = write_message(
@@ -491,12 +493,14 @@ pub fn run() -> std::io::Result<()> {
                 // something to report therefore sends no separate beat.
                 held(&shared).spoke(&sink, Instant::now());
                 match told {
-                    Told::Seen { session } => seen(&shared, &owed, &watchers, &session),
+                    ClientMessage::Seen { session } => seen(&shared, &owed, &watchers, &session),
                     // A beat says only that the client is there, and the line
                     // above already recorded that. What is left is to make the
                     // beat visible to whoever watches, because a client that
                     // stops beating is retired and nothing else explains why.
-                    Told::Beat => watchers.saw(|| What::Beat { sink: sink.clone() }),
+                    ClientMessage::Beat => {
+                        watchers.saw(|| MonitorEvent::Beat { sink: sink.clone() })
+                    }
                 }
             }
         });
@@ -630,7 +634,7 @@ mod tests {
 
     fn sidebar() -> Client {
         Client {
-            sink: Sink::Zellij {
+            sink: DeliveryTarget::Zellij {
                 session: "proto".to_string(),
             },
             notify: None,
@@ -653,7 +657,7 @@ mod tests {
 
     fn native() -> Client {
         Client {
-            sink: Sink::Socket {
+            sink: DeliveryTarget::Socket {
                 name: "wrangler-tmux-work.sock".to_string(),
             },
             notify: None,
@@ -729,7 +733,7 @@ mod tests {
         let (told, _heard) = channel();
         let mut transports = Transports::new(told);
         let client = Client {
-            sink: Sink::Socket { name: name.clone() },
+            sink: DeliveryTarget::Socket { name: name.clone() },
             notify: None,
         };
         held(&shared).register(client.clone());
@@ -749,7 +753,7 @@ mod tests {
         // The name is released, so a later client can bind it.
         let (told, _heard) = channel();
         let mut after = Transports::new(told);
-        let sink = Sink::Socket { name };
+        let sink = DeliveryTarget::Socket { name };
         let until = Instant::now() + Duration::from_secs(5);
         loop {
             sink::deliver(&mut after, &sink, "wrangler 3");
@@ -779,7 +783,7 @@ mod tests {
         let (told, _heard) = channel();
         let mut transports = Transports::new(told);
         let client = Client {
-            sink: Sink::Socket { name: name.clone() },
+            sink: DeliveryTarget::Socket { name: name.clone() },
             notify: None,
         };
         held(&shared).register(client);
@@ -830,7 +834,7 @@ mod tests {
         let (told, _heard) = channel();
         let mut transports = Transports::new(told);
         let client = Client {
-            sink: Sink::Socket { name },
+            sink: DeliveryTarget::Socket { name },
             notify: None,
         };
         held(&shared).register(client.clone());

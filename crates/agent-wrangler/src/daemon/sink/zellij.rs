@@ -16,7 +16,7 @@ use agent_wrangler_core::agent::AGENTS_MESSAGE;
 
 use super::slot::Slot;
 use crate::platform::command;
-use crate::proto::{Sink, Told};
+use crate::proto::{ClientMessage, DeliveryTarget};
 
 /// One `zellij pipe` that the daemon holds open, and the slot that feeds it.
 ///
@@ -57,7 +57,11 @@ impl Held {
 /// Side effect: this function spawns a process and two threads. The command
 /// carries no payload argument, which is what makes it read its stdin and stay
 /// open.
-pub fn open(session: &str, reported: &Sender<Sink>, told: &Sender<(Sink, Told)>) -> Option<Held> {
+pub fn open(
+    session: &str,
+    reported: &Sender<DeliveryTarget>,
+    told: &Sender<(DeliveryTarget, ClientMessage)>,
+) -> Option<Held> {
     let mut piping = command("zellij");
     piping
         .args(["--session", session, "pipe", "--name", AGENTS_MESSAGE])
@@ -69,7 +73,7 @@ pub fn open(session: &str, reported: &Sender<Sink>, told: &Sender<(Sink, Told)>)
     let stdout = child.stdout.take()?;
     let child = Arc::new(Mutex::new(child));
     let slot = Arc::new(Slot::default());
-    let sink = Sink::Zellij {
+    let sink = DeliveryTarget::Zellij {
         session: session.to_string(),
     };
 
@@ -114,11 +118,11 @@ pub fn shut(held: &Held) {
 /// such a session exits within milliseconds. The write before that still lands
 /// in the buffer of a process that is on its way out.
 fn write_until_closed(
-    sink: &Sink,
+    sink: &DeliveryTarget,
     mut stdin: ChildStdin,
     slot: &Slot,
     child: &Arc<Mutex<Child>>,
-    reported: &Sender<Sink>,
+    reported: &Sender<DeliveryTarget>,
 ) {
     use std::io::Write;
     while let Some(line) = slot.take() {
