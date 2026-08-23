@@ -124,7 +124,7 @@ fn open(attrs: Attrs) -> String {
 ///
 /// There is no trailing line break. The pane is exactly as tall as the buffer,
 /// and one more line scrolls the first row off.
-pub fn draw(buffer: &Buffer) -> String {
+fn buffer_to_ansi(buffer: &Buffer) -> String {
     let area = buffer.area();
     let mut out = String::new();
     for y in area.top()..area.bottom() {
@@ -161,7 +161,7 @@ pub fn draw(buffer: &Buffer) -> String {
 /// The function makes a buffer of its own every time, because a client that can
 /// only print has no previous frame to diff against. Such a client reprints the
 /// whole pane or nothing at all.
-pub fn pane(frame: &Frame, selected: Option<&RowKey>) -> String {
+pub fn frame_to_ansi(frame: &Frame, selected: Option<&RowKey>) -> String {
     let area = frame.area();
     let mut buffer = Buffer::empty(area);
     Sidebar {
@@ -169,7 +169,7 @@ pub fn pane(frame: &Frame, selected: Option<&RowKey>) -> String {
         selected,
     }
     .render(area, &mut buffer);
-    draw(&buffer)
+    buffer_to_ansi(&buffer)
 }
 
 #[cfg(test)]
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn a_pane_of_nothing_is_blanks_and_no_sequences() {
-        let drawn = draw(&buffer(3, 2));
+        let drawn = buffer_to_ansi(&buffer(3, 2));
         assert_eq!(drawn, "   \r\n   ");
         assert!(!drawn.contains('\u{1b}'));
     }
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn rows_are_separated_and_the_last_one_is_not_ended() {
         // A line break after the last row scrolls the pane by one.
-        let drawn = draw(&buffer(1, 3));
+        let drawn = buffer_to_ansi(&buffer(1, 3));
         assert_eq!(drawn.matches("\r\n").count(), 2);
         assert!(!drawn.ends_with("\r\n"));
         assert!(!drawn.contains('\n') || drawn.contains("\r\n"));
@@ -203,7 +203,7 @@ mod tests {
     fn a_run_drawn_the_same_way_opens_once_and_is_closed_once() {
         let mut buf = buffer(6, 1);
         buf.set_string(0, 0, "abcdef", Style::new().add_modifier(Modifier::BOLD));
-        assert_eq!(draw(&buf), "\u{1b}[1mabcdef\u{1b}[0m");
+        assert_eq!(buffer_to_ansi(&buf), "\u{1b}[1mabcdef\u{1b}[0m");
     }
 
     #[test]
@@ -213,7 +213,10 @@ mod tests {
         let mut buf = buffer(4, 1);
         buf.set_string(0, 0, "ab", Style::new().add_modifier(Modifier::BOLD));
         buf.set_string(2, 0, "cd", Style::new().add_modifier(Modifier::DIM));
-        assert_eq!(draw(&buf), "\u{1b}[1mab\u{1b}[0m\u{1b}[2mcd\u{1b}[0m");
+        assert_eq!(
+            buffer_to_ansi(&buf),
+            "\u{1b}[1mab\u{1b}[0m\u{1b}[2mcd\u{1b}[0m"
+        );
     }
 
     #[test]
@@ -221,7 +224,7 @@ mod tests {
         let mut buf = buffer(4, 1);
         buf.set_string(0, 0, "ab", Style::new().fg(Color::Cyan));
         buf.set_string(2, 0, "cd", Style::new());
-        assert_eq!(draw(&buf), "\u{1b}[36mab\u{1b}[0mcd");
+        assert_eq!(buffer_to_ansi(&buf), "\u{1b}[36mab\u{1b}[0mcd");
     }
 
     #[test]
@@ -241,7 +244,7 @@ mod tests {
             let mut buf = buffer(1, 1);
             buf.set_string(0, 0, "x", Style::new().fg(color));
             assert_eq!(
-                draw(&buf),
+                buffer_to_ansi(&buf),
                 format!("\u{1b}[{param}mx\u{1b}[0m"),
                 "{color:?}"
             );
@@ -252,13 +255,13 @@ mod tests {
     fn a_background_is_the_same_table_ten_higher() {
         let mut buf = buffer(1, 1);
         buf.set_string(0, 0, "x", Style::new().bg(Color::Cyan));
-        assert_eq!(draw(&buf), "\u{1b}[46mx\u{1b}[0m");
+        assert_eq!(buffer_to_ansi(&buf), "\u{1b}[46mx\u{1b}[0m");
         let mut extended = buffer(1, 1);
         extended.set_string(0, 0, "x", Style::new().fg(Color::Indexed(200)));
-        assert_eq!(draw(&extended), "\u{1b}[38;5;200mx\u{1b}[0m");
+        assert_eq!(buffer_to_ansi(&extended), "\u{1b}[38;5;200mx\u{1b}[0m");
         let mut rgb = buffer(1, 1);
         rgb.set_string(0, 0, "x", Style::new().bg(Color::Rgb(1, 2, 3)));
-        assert_eq!(draw(&rgb), "\u{1b}[48;2;1;2;3mx\u{1b}[0m");
+        assert_eq!(buffer_to_ansi(&rgb), "\u{1b}[48;2;1;2;3mx\u{1b}[0m");
     }
 
     #[test]
@@ -273,13 +276,13 @@ mod tests {
                 .add_modifier(Modifier::REVERSED)
                 .add_modifier(Modifier::BOLD),
         );
-        assert_eq!(draw(&buf), "\u{1b}[1;7;36mx\u{1b}[0m");
+        assert_eq!(buffer_to_ansi(&buf), "\u{1b}[1;7;36mx\u{1b}[0m");
     }
 
     #[test]
     fn a_style_that_ends_a_row_does_not_run_into_the_next() {
         let mut buf = buffer(2, 2);
         buf.set_string(0, 0, "ab", Style::new().add_modifier(Modifier::REVERSED));
-        assert_eq!(draw(&buf), "\u{1b}[7mab\u{1b}[0m\r\n  ");
+        assert_eq!(buffer_to_ansi(&buf), "\u{1b}[7mab\u{1b}[0m\r\n  ");
     }
 }

@@ -63,9 +63,9 @@ Required:
   `ConnectionEnd`.
 - A constant says what it measures. `CONNECT_ATTEMPTS`, `TEST_TIMEOUT`.
 
-Riddle names remain in the shared crates. `What`, `Sink` and `Note` are the
-known ones. Remove them when you refactor the code they live in. Never add
-another.
+Riddle names remain in `agent-wrangler/src/proto.rs`. `Told`, `What` and `Sink`
+are the known ones. Remove them when you refactor the code they live in. Never
+add another.
 
 ## Rule two: every system
 

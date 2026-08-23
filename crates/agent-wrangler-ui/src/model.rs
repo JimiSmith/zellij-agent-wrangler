@@ -92,16 +92,17 @@ pub enum Branch {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placement {
     /// The focused pane of the focused tab, or that tab itself.
-    Here,
-    /// Elsewhere in the tab you are in.
-    Focused,
-    /// Under a tab you are not in.
-    Unfocused,
+    FocusedPane,
+    /// Another pane of the tab that the user is looking at. This pane is not
+    /// the focused one.
+    SameTab,
+    /// Under a tab that the user is not looking at.
+    OtherTab,
 }
 
 impl Placement {
-    pub fn here(self) -> bool {
-        matches!(self, Placement::Here)
+    pub fn is_focused_pane(self) -> bool {
+        matches!(self, Placement::FocusedPane)
     }
 }
 
@@ -127,7 +128,7 @@ impl NamedColor {
     /// on. The two colors with no name of their own are drawn in the bright form
     /// of their nearest neighbor. That keeps eight sessions eight colors apart,
     /// which is the whole purpose of the color.
-    pub fn agent(name: &str) -> Option<Self> {
+    pub fn from_color_word(name: &str) -> Option<Self> {
         Some(match name {
             "red" => NamedColor::Red,
             "green" => NamedColor::Green,
@@ -143,8 +144,8 @@ impl NamedColor {
 
     /// The color one session is drawn in, which is the color the agent gave it
     /// and nothing the client chose.
-    pub fn of(agent: &Agent) -> Option<Self> {
-        NamedColor::agent(&agent.meta.color)
+    pub fn for_agent(agent: &Agent) -> Option<Self> {
+        NamedColor::from_color_word(&agent.meta.color)
     }
 }
 
@@ -165,7 +166,7 @@ impl Indicator {
     /// Both glyphs are one column wide and share a shape, so the two states read
     /// as one channel. The glyph is filled for the agent that wants you, and
     /// hollow for the agent that still works.
-    pub fn resolve(self) -> Option<(char, Option<NamedColor>)> {
+    pub fn glyph_and_color(self) -> Option<(char, Option<NamedColor>)> {
         match self {
             Indicator::None => None,
             Indicator::Attention => Some(('●', Some(NamedColor::Yellow))),
@@ -230,7 +231,7 @@ pub enum RowContent {
         text: String,
     },
     Blank,
-    Window {
+    Tab {
         index: String,
         name: String,
         placement: Placement,
@@ -267,7 +268,7 @@ pub struct Notification {
     /// The agent session this entry points at. When the user opens the entry,
     /// the entry goes to this session. Two entries never name one session.
     pub session: SessionId,
-    pub agent: String,
+    pub agent_program: String,
     pub color: Option<NamedColor>,
     pub message: String,
 }
@@ -293,12 +294,12 @@ impl Row {
         }
     }
 
-    pub fn at(mut self, key: RowKey) -> Self {
+    pub fn with_key(mut self, key: RowKey) -> Self {
         self.key = Some(key);
         self
     }
 
-    pub fn with(mut self, indicator: Indicator) -> Self {
+    pub fn with_indicator(mut self, indicator: Indicator) -> Self {
         self.indicator = indicator;
         self
     }
@@ -338,15 +339,15 @@ mod tests {
             ("orange", NamedColor::BrightYellow),
             ("pink", NamedColor::BrightMagenta),
         ] {
-            assert_eq!(NamedColor::of(&colored(name)), Some(want), "{name}");
+            assert_eq!(NamedColor::for_agent(&colored(name)), Some(want), "{name}");
         }
     }
 
     #[test]
     fn a_session_with_no_color_of_its_own_is_drawn_in_none() {
-        assert_eq!(NamedColor::of(&colored("")), None);
+        assert_eq!(NamedColor::for_agent(&colored("")), None);
         // A name this palette does not hold is not a color to guess at.
-        assert_eq!(NamedColor::of(&colored("chartreuse")), None);
+        assert_eq!(NamedColor::for_agent(&colored("chartreuse")), None);
     }
 
     #[test]

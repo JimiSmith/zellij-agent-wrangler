@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use agent_wrangler_core::command::split_command_line;
 use agent_wrangler_core::notify::Notifier;
-use agent_wrangler_ui::options::{Label, View};
+use agent_wrangler_ui::options::{DrawingOptions, Label};
 
 const NOTIFY: &str = "notify-send";
 const CLIENT: &str = "agent-wrangler";
@@ -25,7 +25,7 @@ fn notifier(value: &str) -> Option<Notifier> {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Options {
-    pub view: View,
+    pub view: DrawingOptions,
     pub desktop: Option<Notifier>,
     pub install_hooks: Option<String>,
 }
@@ -40,7 +40,7 @@ impl Options {
                 .unwrap_or(default)
         };
         Options {
-            view: View {
+            view: DrawingOptions {
                 label: configuration
                     .get("label")
                     .and_then(|value| Label::read(value))

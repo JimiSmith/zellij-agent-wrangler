@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use agent_wrangler_core::agent::{Agent, SessionId, Turn};
 use agent_wrangler_core::label::label;
 use agent_wrangler_core::registry::Registry;
-use agent_wrangler_ui::frame::{compose, Frame, Note};
+use agent_wrangler_ui::frame::{build_frame, ClientProblem, Frame};
 use agent_wrangler_ui::model::{NamedColor, Notification, PaneId, RowKey, TabPosition};
 use agent_wrangler_ui::{selection, tree, Rect};
 
@@ -525,8 +525,8 @@ impl Application {
             .into_iter()
             .map(|agent| Notification {
                 session: agent.session.clone(),
-                agent: agent.agent.clone(),
-                color: NamedColor::of(agent),
+                agent_program: agent.agent.clone(),
+                color: NamedColor::for_agent(agent),
                 message: self.where_it_is(agent),
             })
             .collect()
@@ -556,7 +556,7 @@ impl Application {
             .iter()
             .map(|row| row.key.as_ref().map(interaction))
             .collect();
-        let visible = selection::keys(frame.lines());
+        let visible = selection::selectable_row_keys(frame.lines());
         let focused = matches!(
             session.focus,
             session::ReconciledFocus::Confirmed(Focus {
@@ -565,7 +565,7 @@ impl Application {
             })
         );
         let selection = focused
-            .then(|| selection::selected(&visible, self.selected.as_ref()))
+            .then(|| selection::resolve_selection(&visible, self.selected.as_ref()))
             .flatten();
         RenderedView {
             frame,
@@ -576,8 +576,8 @@ impl Application {
 
     fn frame(&self, area: Rect, session: &[tree::Tab]) -> Frame {
         if self.permission == Some(Permission::Denied) {
-            return compose(
-                &[Note {
+            return build_frame(
+                &[ClientProblem {
                     heading: "no permission",
                     text: REFUSED,
                 }],
@@ -588,22 +588,22 @@ impl Application {
             );
         }
         let unreachable = self.client.why().map(|why| format!("{UNREACHABLE}. {why}"));
-        let mut notes = Vec::new();
+        let mut problems = Vec::new();
         if self.mismatched {
-            notes.push(Note {
+            problems.push(ClientProblem {
                 heading: "out of step",
                 text: MISMATCH,
             });
         }
         if let Some(text) = &unreachable {
-            notes.push(Note {
+            problems.push(ClientProblem {
                 heading: "no client",
                 text,
             });
         }
         let rows = tree::build_tree(session, &self.options.view);
         let notices = self.notifications();
-        compose(&notes, &rows, &notices, area, &self.options.view)
+        build_frame(&problems, &rows, &notices, area, &self.options.view)
     }
 }
 
@@ -1227,8 +1227,8 @@ mod tests {
         let second = app.render(Rect::new(0, 0, 30, 8));
         assert_eq!(first, second);
         assert_eq!(
-            ansi::pane(&first.frame, first.selection.as_ref()),
-            ansi::pane(&second.frame, second.selection.as_ref())
+            ansi::frame_to_ansi(&first.frame, first.selection.as_ref()),
+            ansi::frame_to_ansi(&second.frame, second.selection.as_ref())
         );
     }
 

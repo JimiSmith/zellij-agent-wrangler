@@ -14,7 +14,7 @@
 use ratatui_core::layout::Rect;
 
 use crate::model::{Indicator, Notification, Row, RowContent, RowKey};
-use crate::options::View;
+use crate::options::DrawingOptions;
 use crate::render::{notification_body_field, wrap};
 
 /// The heading the notification area is drawn under.
@@ -26,16 +26,16 @@ const NOTIFICATION_SHARE: usize = 4;
 /// Something a client has to say about itself, where every other row says
 /// something about the session.
 ///
-/// A client is the only thing that knows it is broken, and a note is how it
-/// says so. What the client failed to do leads the pane, because that failure is
-/// why the tree under the note lacks rows.
-pub struct Note<'a> {
+/// A client is the only thing that knows it is broken, and this is how it says
+/// so. What the client failed to do leads the pane, because that failure is why
+/// the tree under it lacks rows.
+pub struct ClientProblem<'a> {
     pub heading: &'a str,
     pub text: &'a str,
 }
 
 /// A heading over a wrapped message.
-fn notice(heading: &str, text: &str, width: usize) -> Vec<Row> {
+fn heading_over_message(heading: &str, text: &str, width: usize) -> Vec<Row> {
     let mut rows = vec![Row::new(RowContent::Header {
         text: heading.to_string(),
     })];
@@ -53,13 +53,13 @@ fn notice(heading: &str, text: &str, width: usize) -> Vec<Row> {
 fn notification_rows(entry: &Notification, width: usize) -> Vec<Row> {
     let key = RowKey::Notification(entry.session.clone());
     let mut rows = vec![Row::new(RowContent::NotificationTitle {
-        title: entry.agent.clone(),
+        title: entry.agent_program.clone(),
         color: entry.color,
     })
-    .with(Indicator::Attention)
-    .at(key.clone())];
+    .with_indicator(Indicator::Attention)
+    .with_key(key.clone())];
     for line in wrap(&entry.message, notification_body_field(width)) {
-        rows.push(Row::new(RowContent::NotificationBody { text: line }).at(key.clone()));
+        rows.push(Row::new(RowContent::NotificationBody { text: line }).with_key(key.clone()));
     }
     rows
 }
@@ -75,7 +75,7 @@ fn notification_area(
     notices: &[Notification],
     width: usize,
     cap: usize,
-    options: &View,
+    options: &DrawingOptions,
 ) -> Vec<Row> {
     if !options.notifications {
         return Vec::new();
@@ -115,35 +115,27 @@ impl Frame {
     pub fn area(&self) -> Rect {
         self.area
     }
-
-    /// What each row points at, in screen order.
-    ///
-    /// A client holds this from one frame to the next. A click therefore
-    /// resolves against the frame it landed on rather than against a tree that
-    /// moved since then.
-    pub fn keys(&self) -> Vec<Option<RowKey>> {
-        self.lines.iter().map(|row| row.key.clone()).collect()
-    }
 }
 
 /// The pane, divided between what the client has to say about itself, the tree,
 /// and the calls at the foot.
 ///
-/// The notes lead, the tree follows, and the calls are pinned to the foot. Blank
-/// rows fill whatever is left between the tree and the calls.
-pub fn compose(
-    notes: &[Note<'_>],
+/// What the client says about itself leads, the tree follows, and the calls are
+/// pinned to the foot. Blank rows fill whatever is left between the tree and the
+/// calls.
+pub fn build_frame(
+    problems: &[ClientProblem<'_>],
     tree: &[Row],
     notices: &[Notification],
     area: Rect,
-    options: &View,
+    options: &DrawingOptions,
 ) -> Frame {
     let width = area.width as usize;
     let height = area.height as usize;
     let calls = notification_area(notices, width, height / NOTIFICATION_SHARE, options);
-    let mut lines: Vec<Row> = notes
+    let mut lines: Vec<Row> = problems
         .iter()
-        .flat_map(|note| notice(note.heading, note.text, width))
+        .flat_map(|problem| heading_over_message(problem.heading, problem.text, width))
         .collect();
     lines.extend(tree.iter().cloned());
     let room = height.saturating_sub(calls.len());
@@ -164,20 +156,20 @@ mod tests {
     fn call(id: &str, message: &str) -> Notification {
         Notification {
             session: SessionId::new(id).unwrap(),
-            agent: "claude".to_string(),
+            agent_program: "claude".to_string(),
             color: None,
             message: message.to_string(),
         }
     }
 
     fn tree() -> Vec<Row> {
-        vec![Row::new(RowContent::Window {
+        vec![Row::new(RowContent::Tab {
             index: "1".to_string(),
             name: "editor".to_string(),
-            placement: Placement::Here,
+            placement: Placement::FocusedPane,
             color: None,
         })
-        .at(RowKey::Tab(TabId::new("editor")))]
+        .with_key(RowKey::Tab(TabId::new("editor")))]
     }
 
     /// A pane 24 columns wide, which is about what a sidebar is given.
@@ -186,7 +178,13 @@ mod tests {
     }
 
     fn compose_into(height: u16, notices: &[Notification]) -> Frame {
-        compose(&[], &tree(), notices, pane(height), &View::default())
+        build_frame(
+            &[],
+            &tree(),
+            notices,
+            pane(height),
+            &DrawingOptions::default(),
+        )
     }
 
     #[test]
@@ -245,7 +243,7 @@ mod tests {
     #[test]
     fn every_line_of_an_entry_points_at_the_same_thing() {
         let frame = compose_into(24, &[call("one", "a message long enough to wrap")]);
-        let keys = frame.keys();
+        let keys: Vec<Option<RowKey>> = frame.lines().iter().map(|row| row.key.clone()).collect();
         assert_eq!(
             keys.iter().filter(|key| **key == entry("one")).count(),
             3,
@@ -279,11 +277,11 @@ mod tests {
 
     #[test]
     fn a_client_told_not_to_list_the_calls_lists_none() {
-        let quiet = View {
+        let quiet = DrawingOptions {
             notifications: false,
-            ..View::default()
+            ..DrawingOptions::default()
         };
-        let frame = compose(&[], &tree(), &[call("one", "editor")], pane(12), &quiet);
+        let frame = build_frame(&[], &tree(), &[call("one", "editor")], pane(12), &quiet);
         assert!(frame
             .lines()
             .iter()
@@ -292,11 +290,11 @@ mod tests {
 
     #[test]
     fn what_a_client_says_about_itself_leads_the_pane() {
-        let note = Note {
+        let note = ClientProblem {
             heading: "no client",
             text: "the sidebar could not run its client",
         };
-        let frame = compose(&[note], &tree(), &[], pane(12), &View::default());
+        let frame = build_frame(&[note], &tree(), &[], pane(12), &DrawingOptions::default());
         assert_eq!(
             frame.lines()[0].content,
             RowContent::Header {
@@ -311,12 +309,12 @@ mod tests {
     #[test]
     fn a_tree_taller_than_the_pane_is_cut_rather_than_pushing_the_calls_off() {
         let tall: Vec<Row> = std::iter::repeat_n(tree()[0].clone(), 40).collect();
-        let frame = compose(
+        let frame = build_frame(
             &[],
             &tall,
             &[call("one", "editor")],
             pane(12),
-            &View::default(),
+            &DrawingOptions::default(),
         );
         assert_eq!(frame.lines().len(), 12);
         assert_eq!(

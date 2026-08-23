@@ -317,7 +317,7 @@ impl ZellijPlugin for Plugin {
         let rendered = self.application.render(area);
         print!(
             "{}",
-            ansi::pane(&rendered.frame, rendered.selection.as_ref())
+            ansi::frame_to_ansi(&rendered.frame, rendered.selection.as_ref())
         );
     }
 }

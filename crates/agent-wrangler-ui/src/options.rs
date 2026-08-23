@@ -8,7 +8,7 @@ pub use agent_wrangler_core::label::Label;
 
 /// Everything that the drawing can be asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct View {
+pub struct DrawingOptions {
     pub label: Label,
     /// Whether a block per agent follows the tree. A block holds the same
     /// sessions, gathered by the agent they are rather than by the place they
@@ -20,9 +20,9 @@ pub struct View {
     pub notifications: bool,
 }
 
-impl Default for View {
+impl Default for DrawingOptions {
     fn default() -> Self {
-        View {
+        DrawingOptions {
             label: Label::default(),
             sections: false,
             turn_state: true,

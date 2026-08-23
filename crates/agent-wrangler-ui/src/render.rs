@@ -102,7 +102,7 @@ fn child_parts(
     Parts::Split {
         head: format!(
             "{} {}─ {index}: ",
-            gutter(placement.here()),
+            gutter(placement.is_focused_pane()),
             branch(position)
         ),
         icon,
@@ -119,12 +119,15 @@ fn parts(content: &RowContent) -> Parts {
         // The single leading space is necessary. It aligns the underline.
         RowContent::Header { text } => Parts::Whole(format!(" {}", text.to_uppercase())),
         RowContent::Blank => Parts::Whole(String::new()),
-        RowContent::Window {
+        RowContent::Tab {
             index,
             name,
             placement,
             ..
-        } => Parts::Whole(format!("{} {index}: {name}", gutter(placement.here()))),
+        } => Parts::Whole(format!(
+            "{} {index}: {name}",
+            gutter(placement.is_focused_pane())
+        )),
         RowContent::Pane {
             index,
             title,
@@ -199,7 +202,7 @@ pub fn base_style(content: &RowContent) -> Style {
             .add_modifier(Modifier::BOLD)
             .add_modifier(Modifier::UNDERLINED),
         RowContent::Blank => Style::new().add_modifier(Modifier::DIM),
-        RowContent::Window {
+        RowContent::Tab {
             placement, color, ..
         } => own_color(intensity(*placement), *color),
         RowContent::Pane { placement, .. } | RowContent::Agent { placement, .. } => {
@@ -221,9 +224,9 @@ pub fn base_style(content: &RowContent) -> Style {
 /// user finds the current tab at a glance in a long list.
 fn intensity(placement: Placement) -> Style {
     match placement {
-        Placement::Here => Style::new().add_modifier(Modifier::BOLD),
-        Placement::Focused => Style::new(),
-        Placement::Unfocused => Style::new().add_modifier(Modifier::DIM),
+        Placement::FocusedPane => Style::new().add_modifier(Modifier::BOLD),
+        Placement::SameTab => Style::new(),
+        Placement::OtherTab => Style::new().add_modifier(Modifier::DIM),
     }
 }
 
@@ -337,7 +340,7 @@ impl Sidebar<'_> {
         let base = base_style(&row.content);
         let line = elide(row_line(&row.content), field as usize);
         buf.set_line(area.x, area.y, &line, field);
-        if let Some((glyph, color)) = row.indicator.resolve() {
+        if let Some((glyph, color)) = row.indicator.glyph_and_color() {
             if let Some(cell) = buf.cell_mut((area.x + field, area.y)) {
                 cell.set_char(glyph).set_style(own_color(base, color));
             }
@@ -402,7 +405,7 @@ mod tests {
     use crate::model::Indicator;
 
     fn tab(index: &str, name: &str, placement: Placement) -> RowContent {
-        RowContent::Window {
+        RowContent::Tab {
             index: index.to_string(),
             name: name.to_string(),
             placement,
@@ -456,11 +459,11 @@ mod tests {
     #[test]
     fn a_tab_row_leads_with_its_gutter() {
         assert_eq!(
-            row_text(&tab("1", "editor", Placement::Here)),
+            row_text(&tab("1", "editor", Placement::FocusedPane)),
             "▌ 1: editor"
         );
         assert_eq!(
-            row_text(&tab("2", "shell", Placement::Unfocused)),
+            row_text(&tab("2", "shell", Placement::OtherTab)),
             "  2: shell"
         );
     }
@@ -468,11 +471,11 @@ mod tests {
     #[test]
     fn a_child_row_is_indented_under_its_tab() {
         assert_eq!(
-            row_text(&pane("0", "nvim", Branch::More, Placement::Focused)),
+            row_text(&pane("0", "nvim", Branch::More, Placement::SameTab)),
             "  ├─ 0: \u{f489}  nvim"
         );
         assert_eq!(
-            row_text(&pane("1", "bash", Branch::Last, Placement::Here)),
+            row_text(&pane("1", "bash", Branch::Last, Placement::FocusedPane)),
             "▌ └─ 1: \u{f489}  bash"
         );
     }
@@ -481,8 +484,8 @@ mod tests {
     fn a_pane_and_an_agent_land_in_the_same_columns() {
         // A change in which pane of a tab runs an agent must not shift the
         // tree. The two forms therefore differ only in the icon and the name.
-        let pane_row = row_text(&pane("0", "name", Branch::Last, Placement::Here));
-        let agent_row = row_text(&agent("0", "name", Branch::Last, Placement::Here));
+        let pane_row = row_text(&pane("0", "name", Branch::Last, Placement::FocusedPane));
+        let agent_row = row_text(&agent("0", "name", Branch::Last, Placement::FocusedPane));
         assert_ne!(pane_row, agent_row);
         assert_eq!(pane_row.chars().count(), agent_row.chars().count());
         assert_eq!(
@@ -499,11 +502,11 @@ mod tests {
         // every name in the pane one place right.
         for (content, icon) in [
             (
-                pane("1", "nvim", Branch::Last, Placement::Focused),
+                pane("1", "nvim", Branch::Last, Placement::SameTab),
                 ICON_PANE,
             ),
             (
-                agent("1", "nvim", Branch::Last, Placement::Focused),
+                agent("1", "nvim", Branch::Last, Placement::SameTab),
                 ICON_AGENT,
             ),
         ] {
@@ -521,7 +524,7 @@ mod tests {
             index: "0".to_string(),
             label: "a".to_string(),
             branch: Branch::Last,
-            placement: Placement::Unfocused,
+            placement: Placement::OtherTab,
             color: Some(NamedColor::Cyan),
         };
         let buf = drawn(&Row::new(content), 20, false);
@@ -539,16 +542,16 @@ mod tests {
 
     #[test]
     fn only_a_row_you_are_on_is_bold_and_only_a_tab_you_are_not_in_is_dim() {
-        assert!(base_style(&tab("1", "w", Placement::Here))
+        assert!(base_style(&tab("1", "w", Placement::FocusedPane))
             .add_modifier
             .contains(Modifier::BOLD));
-        assert!(!base_style(&tab("1", "w", Placement::Unfocused))
+        assert!(!base_style(&tab("1", "w", Placement::OtherTab))
             .add_modifier
             .contains(Modifier::BOLD));
         for content in [
-            tab("2", "w", Placement::Unfocused),
-            pane("0", "p", Branch::Last, Placement::Unfocused),
-            agent("0", "a", Branch::More, Placement::Unfocused),
+            tab("2", "w", Placement::OtherTab),
+            pane("0", "p", Branch::Last, Placement::OtherTab),
+            agent("0", "a", Branch::More, Placement::OtherTab),
         ] {
             assert!(
                 base_style(&content).add_modifier.contains(Modifier::DIM),
@@ -556,9 +559,9 @@ mod tests {
             );
         }
         for content in [
-            tab("1", "w", Placement::Here),
-            pane("0", "p", Branch::Last, Placement::Here),
-            agent("0", "a", Branch::More, Placement::Focused),
+            tab("1", "w", Placement::FocusedPane),
+            pane("0", "p", Branch::Last, Placement::FocusedPane),
+            agent("0", "a", Branch::More, Placement::SameTab),
         ] {
             assert!(
                 !base_style(&content).add_modifier.contains(Modifier::DIM),
@@ -574,11 +577,11 @@ mod tests {
             index: "0".to_string(),
             label: "a".to_string(),
             branch: Branch::Last,
-            placement: Placement::Unfocused,
+            placement: Placement::OtherTab,
             color: Some(NamedColor::Cyan),
         })
-        .at(RowKey::Pane(1.into()))
-        .with(Indicator::Attention);
+        .with_key(RowKey::Pane(1.into()))
+        .with_indicator(Indicator::Attention);
         let buf = drawn(&row, 20, true);
         for x in 0..20 {
             let cell = &buf[(x, 0)];
@@ -603,10 +606,10 @@ mod tests {
             "1",
             "claude · a rather long session label",
             Branch::More,
-            Placement::Here,
+            Placement::FocusedPane,
         ))
-        .at(RowKey::Pane(1.into()))
-        .with(Indicator::Attention);
+        .with_key(RowKey::Pane(1.into()))
+        .with_indicator(Indicator::Attention);
         for width in [10u16, 24, 60] {
             let buf = drawn(&row, width, true);
             assert_eq!(text(&buf, 0).chars().count(), width as usize);
@@ -621,7 +624,7 @@ mod tests {
     #[test]
     fn a_name_too_long_for_the_pane_ends_in_an_ellipsis() {
         let tab = drawn(
-            &Row::new(tab("1", "a very long tab name", Placement::Here)),
+            &Row::new(tab("1", "a very long tab name", Placement::FocusedPane)),
             12,
             false,
         );
@@ -631,7 +634,7 @@ mod tests {
                 "0",
                 "some rather long title",
                 Branch::Last,
-                Placement::Focused,
+                Placement::SameTab,
             )),
             20,
             false,
@@ -643,7 +646,7 @@ mod tests {
     fn a_name_that_fills_the_field_exactly_is_drawn_whole() {
         // The ellipsis stands for text that was dropped, so a name with nothing
         // dropped never draws one.
-        let row = Row::new(tab("1", "editor", Placement::Here));
+        let row = Row::new(tab("1", "editor", Placement::FocusedPane));
         let width = row_text(&row.content).chars().count() as u16 + 1;
         let buf = drawn(&row, width, false);
         assert_eq!(text(&buf, 0), "▌ 1: editor ");
@@ -657,7 +660,7 @@ mod tests {
             index: "0".to_string(),
             label: "a rather long session label".to_string(),
             branch: Branch::Last,
-            placement: Placement::Unfocused,
+            placement: Placement::OtherTab,
             color: Some(NamedColor::Cyan),
         });
         let buf = drawn(&row, 20, false);
@@ -670,9 +673,9 @@ mod tests {
     fn a_pane_too_narrow_for_the_tree_still_leaves_the_markers_column_alone() {
         // The width takes the name first and the tree in front of it after, and
         // neither can reach the column the marker is drawn in.
-        let row = Row::new(pane("0", "nvim", Branch::Last, Placement::Here))
-            .at(RowKey::Pane(1.into()))
-            .with(Indicator::Working);
+        let row = Row::new(pane("0", "nvim", Branch::Last, Placement::FocusedPane))
+            .with_key(RowKey::Pane(1.into()))
+            .with_indicator(Indicator::Working);
         for width in [1u16, 2, 4, 6] {
             let buf = drawn(&row, width, false);
             let line = text(&buf, 0);
@@ -685,7 +688,11 @@ mod tests {
 
     #[test]
     fn a_row_with_no_marker_leaves_its_column_blank() {
-        let buf = drawn(&Row::new(tab("1", "editor", Placement::Here)), 12, false);
+        let buf = drawn(
+            &Row::new(tab("1", "editor", Placement::FocusedPane)),
+            12,
+            false,
+        );
         assert_eq!(buf[(11, 0)].symbol(), " ");
     }
 
