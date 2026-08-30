@@ -149,6 +149,10 @@ fn write_until_closed(
 
 #[cfg(test)]
 mod tests {
+    // The one test below needs a unix program, so on Windows this module is
+    // empty. An import gated any other way has nothing to bring in there, and
+    // the Windows job fails on the unused one.
+    #[cfg(unix)]
     use super::*;
 
     // A held child is a process, and the two systems share no spelling of one

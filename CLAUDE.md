@@ -97,10 +97,18 @@ three, and prove it.
 Check the Windows build from Linux with:
 
 ```
-cargo check -p agent-wrangler --target x86_64-pc-windows-msvc
+cargo clippy -p agent-wrangler -p agent-wrangler-core -p tmux-agent-wrangler \
+    --target x86_64-pc-windows-msvc --all-targets --locked -- -D warnings
 ```
 
-It needs no linker, so it catches everything except what fails at run time.
+That is the Windows CI job's own command, aimed at the Windows target. It needs
+no linker, so it catches everything except what fails at run time.
+
+`--all-targets` is necessary, and a plain `cargo check` is not enough. A test
+module whose every test is `#[cfg(unix)]` is empty on Windows, and an import at
+the top of it is then unused. Clippy fails on that, and a build of the library
+alone never looks at it. Only a tag runs the CI, so a fault of this kind waits
+until a release to appear.
 
 ## Rule three: no multiplexer in the shared crates
 
