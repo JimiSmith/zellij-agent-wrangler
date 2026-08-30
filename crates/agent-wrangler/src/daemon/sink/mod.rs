@@ -180,13 +180,15 @@ impl Transports {
             zellij::shut(held);
             false
         });
-        self.sockets.retain(|name, bound| {
+        // `socket::shut` takes a `Bound`, and a retain lends no more than a
+        // reference. This moves each `Bound` out of the map instead.
+        for (name, bound) in std::mem::take(&mut self.sockets) {
             if live.contains(&DeliveryTarget::Socket { name: name.clone() }) {
-                return true;
+                self.sockets.insert(name, bound);
+            } else {
+                socket::shut(bound);
             }
-            socket::shut(bound);
-            false
-        });
+        }
     }
 }
 
@@ -227,7 +229,6 @@ pub fn deliver(transports: &mut Transports, sink: &DeliveryTarget, payload: &str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
 
     fn transports() -> Transports {
         let (told, _heard) = channel();
@@ -264,7 +265,7 @@ mod tests {
         let sink = DeliveryTarget::Socket { name: taken };
         deliver(&mut transports, &sink, "wrangler 3");
         assert_eq!(transports.failures(), vec![sink]);
-        socket::shut(&held);
+        socket::shut(held);
     }
 
     #[test]
@@ -323,11 +324,10 @@ mod tests {
         };
         deliver(&mut transports, &sink, "wrangler 3");
         assert_eq!(transports.failures(), vec![sink.clone()]);
-        socket::shut(&held);
-        let until = Instant::now() + Duration::from_secs(5);
-        while !transports.sockets.contains_key(&taken) && Instant::now() < until {
-            deliver(&mut transports, &sink, "wrangler 3");
-        }
+        socket::shut(held);
+        // `socket::shut` releases the name before it returns, so the publish
+        // after it binds the name.
+        deliver(&mut transports, &sink, "wrangler 3");
         assert!(
             transports.sockets.contains_key(&taken),
             "it bound in the end"

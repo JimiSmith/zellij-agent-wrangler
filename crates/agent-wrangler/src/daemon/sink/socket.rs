@@ -39,6 +39,9 @@ pub struct Bound {
     /// it after each accept.
     stop: Arc<AtomicBool>,
     peers: Arc<Peers>,
+    /// The accept thread. That thread owns the listener, so the name stays
+    /// bound until the thread returns. [`shut`] waits for it.
+    accepting: thread::JoinHandle<()>,
 }
 
 impl Bound {
@@ -128,35 +131,54 @@ pub fn bind(name: &str, told: &Sender<(DeliveryTarget, ClientMessage)>) -> Optio
     let sink = DeliveryTarget::Socket {
         name: name.to_string(),
     };
-    let accepting = (Arc::clone(&peers), Arc::clone(&stop), told.clone());
-    thread::spawn(move || {
-        let (peers, stop, told) = accepting;
-        accept_until_stopped(&sink, &listener, &peers, &stop, &told);
-    });
+    let accepting = {
+        let peers = Arc::clone(&peers);
+        let stop = Arc::clone(&stop);
+        let told = told.clone();
+        thread::spawn(move || accept_until_stopped(&sink, &listener, &peers, &stop, &told))
+    };
 
     Some(Bound {
         name: name.to_string(),
         stop,
         peers,
+        accepting,
     })
 }
 
-/// Releases one name and every peer on it.
+/// Releases one name and every peer on it. The name is free when this function
+/// returns.
 ///
-/// Side effect: this function connects to the name once. The accept thread is
-/// blocked inside `accept`, and a connection is the only thing that returns
-/// from there. The thread then finds the flag, returns, and drops the listener,
-/// which is what releases the name.
+/// Side effect: this function connects to the name once, and waits for the
+/// accept thread. The accept thread is blocked inside `accept`, and a
+/// connection is the only thing that returns from there. The thread then finds
+/// the flag, returns, and drops the listener, which is what releases the name.
+///
+/// The connection stays open until the thread ends. A Windows named pipe server
+/// clears a connection whose client already went, and then waits again. A
+/// connection that closes too early therefore wakes nothing, and the accept
+/// thread keeps the name for the life of the daemon.
+///
+/// This function takes the `Bound`, so nothing can shut one name twice.
+///
+/// The wait is short in both cases. A connect that succeeded wakes the thread
+/// at once. A connect that failed says that no pipe answers the name, and only
+/// a thread that already returned leaves that behind.
 ///
 /// The reader of a peer that is still connected ends when that peer
 /// disconnects. Nothing here shuts a peer's stream. A peer that reads a name
 /// the daemon released reads nothing more, and gives up on the daemon by
 /// itself.
-pub fn shut(bound: &Bound) {
+pub fn shut(bound: Bound) {
     bound.stop.store(true, Ordering::Relaxed);
-    if let Ok(name) = bound.name.as_str().to_ns_name::<GenericNamespaced>() {
-        let _ = Stream::connect(name);
-    }
+    let waker = bound
+        .name
+        .as_str()
+        .to_ns_name::<GenericNamespaced>()
+        .ok()
+        .and_then(|name| Stream::connect(name).ok());
+    let _ = bound.accepting.join();
+    drop(waker);
     bound.peers.close_all();
 }
 
@@ -276,7 +298,7 @@ mod tests {
         bound.fill("wrangler 3".to_string());
         assert_eq!(line(&one), "wrangler 3");
         assert_eq!(line(&two), "wrangler 3");
-        shut(&bound);
+        shut(bound);
     }
 
     #[test]
@@ -290,7 +312,7 @@ mod tests {
         bound.fill("wrangler 3".to_string());
         let peer = connect(&name);
         assert_eq!(line(&peer), "wrangler 3");
-        shut(&bound);
+        shut(bound);
     }
 
     #[test]
@@ -313,7 +335,7 @@ mod tests {
             bound.peers.held().slots.is_empty(),
             "the end of the stream says that the peer has gone"
         );
-        shut(&bound);
+        shut(bound);
     }
 
     #[test]
@@ -324,7 +346,7 @@ mod tests {
         let name = name("taken");
         let first = bind(&name, &told).expect("a bound name");
         assert!(bind(&name, &told).is_none());
-        shut(&first);
+        shut(first);
     }
 
     #[test]
@@ -335,20 +357,14 @@ mod tests {
         let (told, _heard) = channel();
         let name = name("left-behind");
         let dead = bind(&name, &told).expect("a bound name");
-        shut(&dead);
-        // The accept thread returns and drops the listener, which is what
-        // releases the name.
-        let until = Instant::now() + Duration::from_secs(5);
-        let mut bound = bind(&name, &told);
-        while bound.is_none() && Instant::now() < until {
-            thread::sleep(Duration::from_millis(20));
-            bound = bind(&name, &told);
-        }
-        let bound = bound.expect("the name was taken over");
+        shut(dead);
+        // No wait, and no second try. `shut` returns after the accept thread
+        // dropped the listener, so the name is free already.
+        let bound = bind(&name, &told).expect("the name was taken over");
         let peer = connect(&name);
         bound.fill("wrangler 3".to_string());
         assert_eq!(line(&peer), "wrangler 3");
-        shut(&bound);
+        shut(bound);
     }
 
     #[test]
@@ -360,7 +376,7 @@ mod tests {
         bound.fill("second".to_string());
         let peer = connect(&name);
         assert_eq!(line(&peer), "second");
-        shut(&bound);
+        shut(bound);
     }
 
     #[test]
@@ -384,7 +400,7 @@ mod tests {
                 }
             ))
         );
-        shut(&bound);
+        shut(bound);
     }
 
     #[test]
@@ -410,6 +426,6 @@ mod tests {
                 ClientMessage::Beat
             ))
         );
-        shut(&bound);
+        shut(bound);
     }
 }
