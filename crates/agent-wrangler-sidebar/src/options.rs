@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use agent_wrangler_core::command::split_command_line;
 use agent_wrangler_core::notify::Notifier;
-use agent_wrangler_ui::options::{DrawingOptions, Label};
+use agent_wrangler_ui::options::{DrawingOptions, Label, StatusTemplate};
 
 const NOTIFY: &str = "notify-send";
 const CLIENT: &str = "agent-wrangler";
@@ -48,6 +48,9 @@ impl Options {
                 sections: flag("sections", default.view.sections),
                 turn_state: flag("turn_state", default.view.turn_state),
                 notifications: flag("notifications", default.view.notifications),
+                status_line: configuration
+                    .get("status_line")
+                    .and_then(|value| StatusTemplate::new(value)),
             },
             desktop: configuration
                 .get("desktop_notification")
@@ -87,6 +90,22 @@ mod tests {
         assert_eq!(read(&[]), Options::default());
         assert!(read(&[("sections", "yes")]).view.sections);
         assert!(!read(&[("turn_state", "off")]).view.turn_state);
+    }
+
+    #[test]
+    fn a_status_line_is_read_from_the_template_the_user_wrote() {
+        let options = read(&[("status_line", "{branch} · {model}")]);
+        assert_eq!(
+            options.view.status_line,
+            StatusTemplate::new("{branch} · {model}")
+        );
+    }
+
+    #[test]
+    fn no_template_and_an_empty_one_both_ask_for_no_status_line() {
+        assert_eq!(read(&[]).view.status_line, None);
+        assert_eq!(read(&[("status_line", "")]).view.status_line, None);
+        assert_eq!(read(&[("status_line", "   ")]).view.status_line, None);
     }
 
     #[test]

@@ -251,6 +251,22 @@ pub enum RowContent {
         placement: Placement,
         color: Option<NamedColor>,
     },
+    /// The status line that hangs under an agent's row.
+    ///
+    /// The row starts its text in the column where the label of that agent
+    /// starts, and it draws under the same branch. The tree therefore reads as
+    /// one structure, and the indent says that the line describes the row above
+    /// it.
+    ///
+    /// The row carries the `index` and the `branch` of that agent row rather
+    /// than a copy of its indent. Both rows then follow one rule, and neither
+    /// can drift.
+    AgentStatus {
+        index: String,
+        text: String,
+        branch: Branch,
+        placement: Placement,
+    },
     NotificationTitle {
         title: String,
         color: Option<NamedColor>,

@@ -160,6 +160,7 @@ plugin location="..." {
     sections false               // one section for each agent, below the tree
     turn_state true              // '○' mid-turn, '●' when the agent wants you
     notifications true           // the calls for you, at the foot
+    status_line ""               // a second line under each agent row
     desktop_notification "off"   // 'off' | 'on' (notify-send) | a command line
     install_hooks "off"          // 'off' | 'on' | a path to the client
 }
@@ -178,6 +179,49 @@ installed from. The install script and `dev.sh` write the path in for you.
 
 `sections on` draws the tree. Below the tree it draws the same sessions again,
 in a group for each agent, not in a group for each tab.
+
+### The status line
+
+`status_line` draws a second line under each agent row. You write a template,
+and the sidebar spells it from what the session reports. An empty template
+draws no second line, which is the default.
+
+```kdl
+status_line "{branch} · {model} · {context_tokens}"
+```
+
+That template draws this:
+
+```
+▌ └─ 1: 󰙺  the zellij port
+▌          main · opus-5 · 196k
+```
+
+Three values are available.
+
+| Name | What it draws |
+| --- | --- |
+| `{branch}` | The branch that the agent had checked out at its last answer. |
+| `{model}` | The model of the last answer, without the `claude-` in front and without any date at the end. |
+| `{context_tokens}` | What the last answer counted against the context window. A count above 999 draws in thousands, as `196k`. |
+
+Everything outside the braces draws as you wrote it, so you choose the
+separators. A name that the sidebar does not know stays on the line with its
+braces, which is how you see a typo.
+
+The status line follows the agent row above it. It carries the same gutter and
+the same brightness, and a click on it goes to the same pane.
+
+Three rules decide when a line is drawn.
+
+- A value that the session has not reported draws nothing. The separators
+  around it stay.
+- A template whose values are all missing draws no line at all.
+- Claude reports all three values. Copilot reports none of them, so a Copilot
+  session draws no status line.
+
+The values come from the agent's own transcript, and they are as recent as its
+last answer. A session that has answered nothing yet has no status line.
 
 ### Desktop notifications
 

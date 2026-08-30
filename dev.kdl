@@ -20,14 +20,19 @@ layout {
         pane split_direction="vertical" {
             pane size=32 borderless=true {
                 plugin location="PLUGIN_LOCATION" {
-                    // Every option, at its default value. The path of the
-                    // client is the exception, because it has no default. Both
-                    // templates carry the same block, because a later tab takes
-                    // its configuration from its own template.
+                    // Every option. Both templates carry the same block,
+                    // because a later tab takes its configuration from its own
+                    // template.
+                    //
+                    // Three of these are not at their default value. The client
+                    // has no default path. The status line and the desktop
+                    // notification are off by default, and a development
+                    // session turns both on so that they can be judged by eye.
                     label "name"
                     sections false
                     turn_state true
                     notifications true
+                    status_line "{branch} · {model} · {context_tokens}"
                     desktop_notification "on"
                     install_hooks "CLIENT_LOCATION"
                 }
@@ -45,14 +50,19 @@ layout {
         pane split_direction="vertical" {
             pane size=32 borderless=true {
                 plugin location="PLUGIN_LOCATION" {
-                    // Every option, at its default value. The path of the
-                    // client is the exception, because it has no default. Both
-                    // templates carry the same block, because a later tab takes
-                    // its configuration from its own template.
+                    // Every option. Both templates carry the same block,
+                    // because a later tab takes its configuration from its own
+                    // template.
+                    //
+                    // Three of these are not at their default value. The client
+                    // has no default path. The status line and the desktop
+                    // notification are off by default, and a development
+                    // session turns both on so that they can be judged by eye.
                     label "name"
                     sections false
                     turn_state true
                     notifications true
+                    status_line "{branch} · {model} · {context_tokens}"
                     desktop_notification "off"
                     install_hooks "CLIENT_LOCATION"
                 }

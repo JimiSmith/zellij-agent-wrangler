@@ -23,6 +23,11 @@ sh: cargo build --target wasm32-wasip1 -p zellij-agent-wrangler
 sh: cargo build -p agent-wrangler
 sh: tests/scripts/make-layout.sh tests/out/e2e.kdl
 
+# One answer, so the session has a branch, a model and a count to report. The
+# layout asks for a status line, and a session that has answered nothing draws
+# none. The counts add up to 4200, which the row draws as `4k`.
+sh: printf '%s\n' '{"type":"assistant","gitBranch":"main","message":{"model":"claude-opus-5","usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":4000,"output_tokens":198}}}' >> tests/out/e2e-transcript.jsonl
+
 spawn: zellij --session wrangler-test-e2e --new-session-with-layout tests/out/e2e.kdl
 
 # The sidebar draws the tabs of the session. The name of its own tab is the
@@ -48,6 +53,12 @@ sh?: sh -c 'sleep 1; ./target/debug/agent-wrangler agents > tests/out/agents.txt
 # at all, the hook reached the daemon and the daemon reached this session. The
 # plugin also put the record under the pane that the hook named.
 wait: QUARRYMARK @ 20
+
+# The status line, under the row it describes. Reaching the screen proves the
+# whole path: the daemon read one answer out of the transcript, the three values
+# rode the wire, and the template spelled them. The line is short enough for the
+# sidebar of this layout, so nothing here is cut.
+wait: main · opus-5 · 4k @ 20
 dump: agent_row_start
 
 # The user already sits in the pane that raises the call, so the call is

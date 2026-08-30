@@ -42,6 +42,18 @@ placeholder.
 - [x] Agent label from the session title, when it has one
 - [x] Teammates labelled `@name - title`
 - [x] An agent keeps its row while a stack or a scrollback editor hides its pane
+- [x] A status line under an agent row, spelled from a template the user writes
+
+The status line names `{branch}`, `{model}` and `{context_tokens}`. All three
+ride on the last record of type `assistant` in the transcript. That record
+carries the branch at its top level, and the model and the token counts under
+`message`. One record therefore gives all three, and the three always describe
+the same moment. The daemon reads them in the same pass that reads the title, so
+a status line costs no second read and no second file.
+
+A value that a session has not reported draws nothing, and a template whose
+values are all missing draws no row. Copilot reports none of the three. Without
+that rule, every Copilot session draws a row of bare separators.
 
 A session's title is in neither agent's hook body, so it is read off disk:
 Claude's from the transcript the hook names, Copilot's from the workspace file
@@ -224,6 +236,7 @@ rather than installed again beside itself.
 - [x] Every user-facing option the original exposes that means anything here, as
       plugin configuration: label mode, sections, turn state, notification area,
       desktop notification, installing the hooks on load
+- [x] A status line template, as plugin configuration
 
 Width is the layout's. A plugin cannot size its own pane, and the pane the
 sidebar is in is declared where every other pane of the tab is declared, so a

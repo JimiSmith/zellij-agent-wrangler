@@ -649,9 +649,10 @@ fn said(stderr: &[u8]) -> &str {
 mod tests {
     use super::*;
     use crate::model::{PaneReport, PaneVisibility, SidebarPaneReport, TabId, TabLayout};
-    use agent_wrangler_core::agent::LabelFacts;
+    use agent_wrangler_core::agent::{LabelFacts, StatusFacts};
     use agent_wrangler_core::origin::Origin;
     use agent_wrangler_ui::ansi;
+    use agent_wrangler_ui::options::{DrawingOptions, StatusTemplate};
 
     fn tab(id: &str, position: usize) -> TabReport {
         TabReport {
@@ -719,6 +720,20 @@ mod tests {
             panes.insert(agent.session.clone(), PaneId::new(*pane));
             registry.report(agent);
         }
+        AgentSnapshot::Compatible { registry, panes }
+    }
+
+    /// One agent that reports the branch it works on, so a template has
+    /// something to spell.
+    fn working(id: &str, pane: &str, branch: &str) -> AgentSnapshot {
+        let mut registry = Registry::default();
+        let mut panes = BTreeMap::new();
+        let agent = agent(id, Turn::Idle).with_status(StatusFacts {
+            branch: branch.to_string(),
+            ..StatusFacts::default()
+        });
+        panes.insert(agent.session.clone(), PaneId::new(pane));
+        registry.report(agent);
         AgentSnapshot::Compatible { registry, panes }
     }
 
@@ -1464,6 +1479,39 @@ mod tests {
                 Effect::Repaint,
             ]
         );
+    }
+
+    #[test]
+    fn a_click_on_an_agents_status_line_reaches_that_agent() {
+        // The status line carries the key of the agent above it, so the pair
+        // behaves as one thing under the mouse and under the selection.
+        let mut app = Application::new(Options {
+            view: DrawingOptions {
+                status_line: StatusTemplate::new("{branch}"),
+                ..DrawingOptions::default()
+            },
+            ..Options::default()
+        });
+        app.reduce(Input::VisibilityChanged(true));
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["%7"])])));
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        app.reduce(Input::Agents(working("one", "%7", "main")));
+        app.render(Rect::new(0, 0, 30, 5));
+
+        let session = RowKey::Agent(SessionId::new("one").unwrap());
+        for line in [1, 2] {
+            let decision = app.reduce(Input::User(UserAction::Click(line)));
+            assert_eq!(
+                decision.effects,
+                vec![
+                    Effect::Broadcast(Broadcast::Selection(session.clone())),
+                    Effect::FocusPane(PaneId::new("%7")),
+                    Effect::Repaint,
+                ],
+                "line {line}"
+            );
+        }
     }
 
     #[test]

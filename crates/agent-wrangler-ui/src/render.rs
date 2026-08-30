@@ -48,6 +48,18 @@ fn branch(branch: Branch) -> char {
     }
 }
 
+/// The glyph that carries the tree past a row hanging under a child.
+///
+/// A child with siblings after it keeps the line going, so a status line does
+/// not break the tree it sits inside. The last child closes the tree, and
+/// nothing is drawn below it.
+fn continuation(branch: Branch) -> char {
+    match branch {
+        Branch::More => '│',
+        Branch::Last => ' ',
+    }
+}
+
 /// What kind of thing the row is, drawn immediately before its name. The glyphs
 /// come from Nerd Font, and each one is one column wide.
 ///
@@ -56,6 +68,18 @@ fn branch(branch: Branch) -> char {
 /// carries. Color therefore does not mean "this is an agent".
 const ICON_PANE: char = '\u{f489}';
 const ICON_AGENT: char = '\u{f167a}';
+
+/// The gap between the kind icon and the name it labels.
+///
+/// Two spaces, not one: the icons overhang the single column they are declared
+/// as. With one space, the name touches the glyph.
+const ICON_GAP: &str = "  ";
+
+/// The columns that the kind icon and the gap after it take together.
+///
+/// Every icon here is one column wide, which `an_icon_takes_the_one_column_it_is_drawn_as`
+/// pins.
+const ICON_AND_GAP: usize = 1 + ICON_GAP.len();
 
 /// A description row hangs under its title. The row is indented to the column
 /// where the text of the title starts, past the gutter, the icon and the gap
@@ -100,17 +124,46 @@ fn child_parts(
     color: Option<NamedColor>,
 ) -> Parts {
     Parts::Split {
-        head: format!(
-            "{} {}─ {index}: ",
-            gutter(placement.is_focused_pane()),
-            branch(position)
-        ),
+        head: child_head(placement, position, index),
         icon,
-        // Two spaces, not one: the icons overhang the single column they are
-        // declared as. With one space, the name touches the glyph.
-        tail: format!("  {name}"),
+        tail: format!("{ICON_GAP}{name}"),
         color,
     }
+}
+
+/// Everything a child row draws before its kind icon: the gutter, the branch
+/// and the index.
+fn child_head(placement: Placement, position: Branch, index: &str) -> String {
+    format!(
+        "{} {}─ {index}: ",
+        gutter(placement.is_focused_pane()),
+        branch(position)
+    )
+}
+
+/// The column that a child row starts its name in.
+///
+/// A status row pads to this column, so its text sits directly under the label
+/// it describes. Both rows read the column from here, so the two cannot drift
+/// apart.
+fn child_name_column(placement: Placement, position: Branch, index: &str) -> usize {
+    child_head(placement, position, index).chars().count() + ICON_AND_GAP
+}
+
+/// The pieces of the status row under an agent. The row draws the gutter, then
+/// the line that carries the tree past it, then spaces. The spaces reach the
+/// column where the label above starts.
+///
+/// The row draws no kind icon. It describes the row above rather than pointing
+/// at a thing of its own, so it takes no color and needs nothing to carry one.
+fn status_parts(placement: Placement, position: Branch, index: &str, text: &str) -> Parts {
+    let lead = format!(
+        "{} {}",
+        gutter(placement.is_focused_pane()),
+        continuation(position)
+    );
+    let indent = child_name_column(placement, position, index).saturating_sub(lead.chars().count());
+    Parts::Whole(format!("{lead}{:indent$}{text}", ""))
 }
 
 /// The pieces one row is drawn as.
@@ -142,6 +195,12 @@ fn parts(content: &RowContent) -> Parts {
             placement,
             color,
         } => child_parts(*placement, ICON_AGENT, *branch, index, label, *color),
+        RowContent::AgentStatus {
+            index,
+            text,
+            branch,
+            placement,
+        } => status_parts(*placement, *branch, index, text),
         // No gutter and no branch: the entry hangs off nothing, and the area it
         // sits in is never where you are.
         RowContent::NotificationTitle { title, color } => Parts::Split {
@@ -205,9 +264,12 @@ pub fn base_style(content: &RowContent) -> Style {
         RowContent::Tab {
             placement, color, ..
         } => own_color(intensity(*placement), *color),
-        RowContent::Pane { placement, .. } | RowContent::Agent { placement, .. } => {
-            intensity(*placement)
-        }
+        RowContent::Pane { placement, .. }
+        | RowContent::Agent { placement, .. }
+        // The status row takes the placement of the agent it hangs under. The
+        // intensity channel then keeps one meaning across every row, and the
+        // indent alone says that this line is detail.
+        | RowContent::AgentStatus { placement, .. } => intensity(*placement),
         RowContent::NotificationTitle { .. } => Style::new(),
         // Dimmed, so the title leads and the description reads as its detail.
         // Intensity is not available for that: it says where you are.
@@ -433,6 +495,15 @@ mod tests {
         }
     }
 
+    fn status(index: &str, text: &str, position: Branch, placement: Placement) -> RowContent {
+        RowContent::AgentStatus {
+            index: index.to_string(),
+            text: text.to_string(),
+            branch: position,
+            placement,
+        }
+    }
+
     /// The cells of one row, as a client `width` columns wide draws them.
     fn drawn(row: &Row, width: u16, selected: bool) -> Buffer {
         let area = Rect::new(0, 0, width, 1);
@@ -538,6 +609,67 @@ mod tests {
         for x in 0..12 {
             assert!(buf[(x, 0)].modifier.contains(Modifier::DIM), "{x}");
         }
+    }
+
+    /// The column that `needle` starts in, counted the way the drawing counts.
+    /// A byte offset is not a column: the kind icons take four bytes each.
+    fn column_of(line: &str, needle: &str) -> Option<usize> {
+        line.find(needle).map(|byte| line[..byte].chars().count())
+    }
+
+    #[test]
+    fn a_status_row_starts_its_text_under_the_label_above_it() {
+        // The pair reads as one thing only while the two columns agree. A wider
+        // index moves both of them together.
+        for index in ["1", "12", "345"] {
+            let above = row_text(&agent(index, "wrangler", Branch::Last, Placement::SameTab));
+            let below = row_text(&status(index, "main", Branch::Last, Placement::SameTab));
+            assert_eq!(
+                column_of(&above, "wrangler"),
+                column_of(&below, "main"),
+                "index {index}: {above:?} against {below:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_status_row_carries_the_tree_past_itself_only_where_the_tree_goes_on() {
+        // A status line under a middle child must not break the branch that
+        // runs down to the children after it.
+        assert_eq!(
+            row_text(&status("1", "main", Branch::More, Placement::SameTab)),
+            "  │        main"
+        );
+        assert_eq!(
+            row_text(&status("1", "main", Branch::Last, Placement::SameTab)),
+            "           main"
+        );
+    }
+
+    #[test]
+    fn a_status_row_takes_the_gutter_and_the_intensity_of_its_agent() {
+        let here = status("1", "main", Branch::Last, Placement::FocusedPane);
+        assert!(row_text(&here).starts_with('▌'));
+        assert!(base_style(&here).add_modifier.contains(Modifier::BOLD));
+        let elsewhere = status("1", "main", Branch::More, Placement::OtherTab);
+        assert!(base_style(&elsewhere).add_modifier.contains(Modifier::DIM));
+        assert!(
+            !base_style(&status("1", "main", Branch::More, Placement::SameTab))
+                .add_modifier
+                .intersects(Modifier::BOLD | Modifier::DIM)
+        );
+    }
+
+    #[test]
+    fn a_status_row_too_long_for_the_pane_ends_in_an_ellipsis_and_spares_the_marker() {
+        let row = Row::new(status(
+            "1",
+            "a-very-long-branch-name · opus-5 · 196k",
+            Branch::More,
+            Placement::SameTab,
+        ));
+        let buf = drawn(&row, 24, false);
+        assert_eq!(text(&buf, 0), "  │        a-very-long… ");
     }
 
     #[test]

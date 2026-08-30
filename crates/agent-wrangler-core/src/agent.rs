@@ -26,7 +26,7 @@ pub(crate) const RECORD: char = '\n';
 /// daemon keeps a client for as long as it speaks, so a client too old to beat
 /// is dropped after a minute and a half, and the pane says nothing about why. A
 /// reader that meets a number it does not know says so instead.
-pub const FORMAT: u32 = 5;
+pub const FORMAT: u32 = 6;
 
 /// The character that stands in for a record break on a transport that frames
 /// its messages by the line.
@@ -183,6 +183,27 @@ pub struct LabelFacts {
     pub title: String,
 }
 
+/// What a session is working with: the branch it is on, the model it answers
+/// with, and the context that its last answer spent. Every field is empty until
+/// the agent's own files say otherwise.
+///
+/// These are facts, and not the line that a sidebar draws from them.
+/// `StatusTemplate` spells that line, the way that [`label`] spells a label from
+/// [`LabelFacts`].
+///
+/// [`label`]: crate::label::label
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StatusFacts {
+    /// The branch that the working directory has checked out.
+    pub branch: String,
+    /// The model that the agent last answered with, under the name that the
+    /// agent writes. How to spell that name for a reader is not settled here.
+    pub model: String,
+    /// The tokens that the last answer counted against the context window. Zero
+    /// for a session that has answered nothing yet.
+    pub context_tokens: u64,
+}
+
 /// When a process started, as the system that runs it counts time.
 ///
 /// The number means nothing anywhere else. It is ticks since boot on Linux,
@@ -235,6 +256,9 @@ pub struct Agent {
     pub session: SessionId,
     pub agent: String,
     pub meta: LabelFacts,
+    /// What the session works with. Empty until the agent's own files say
+    /// otherwise. [`Agent::with_status`] attaches these facts.
+    pub status: StatusFacts,
     /// Where the agent's own hook was invoked, as its environment described it.
     pub origin: Origin,
     /// The agent's own process, as its hook found it by a climb up its ancestry.
@@ -267,11 +291,26 @@ impl Agent {
                 color: field(&meta.color),
                 title: field(&meta.title),
             },
+            status: StatusFacts::default(),
             origin,
             process: None,
             turn: Turn::default(),
             raised: 0,
         }
+    }
+
+    /// This method attaches what the session is working with.
+    ///
+    /// Every text field loses the characters that can split a record, the same
+    /// way that [`Agent::new`] treats a label fact. The token count is a number
+    /// and can split nothing.
+    pub fn with_status(mut self, status: StatusFacts) -> Self {
+        self.status = StatusFacts {
+            branch: field(&status.branch),
+            model: field(&status.model),
+            context_tokens: status.context_tokens,
+        };
+        self
     }
 
     /// The record as one line: the format, then everything about the session.
@@ -293,7 +332,7 @@ impl Agent {
             None => (String::new(), String::new()),
         };
         format!(
-            "{FORMAT}{FIELD}{}{FIELD}{}{FIELD}{pid}{FIELD}{started}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}",
+            "{FORMAT}{FIELD}{}{FIELD}{}{FIELD}{pid}{FIELD}{started}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}",
             self.session.as_str(),
             self.agent,
             self.turn.encode(),
@@ -302,6 +341,9 @@ impl Agent {
             self.meta.name,
             self.meta.color,
             self.origin.encode(),
+            self.status.branch,
+            self.status.model,
+            self.status.context_tokens,
             self.meta.title,
         )
     }
@@ -312,7 +354,7 @@ impl Agent {
     /// character in it still parses. No such title exists, because the
     /// constructor takes that character out.
     pub fn decode(line: &str) -> Record {
-        let mut fields = line.splitn(12, FIELD);
+        let mut fields = line.splitn(15, FIELD);
         match fields.next().and_then(|format| format.parse::<u32>().ok()) {
             Some(FORMAT) => {}
             Some(other) => return Record::Foreign(other),
@@ -336,6 +378,9 @@ impl Agent {
         let name = fields.next()?.to_string();
         let color = fields.next()?.to_string();
         let origin = Origin::decode(fields.next()?);
+        let branch = fields.next()?.to_string();
+        let model = fields.next()?.to_string();
+        let context_tokens = fields.next()?.parse().ok()?;
         let title = fields.next()?.to_string();
         // A start time says nothing without the process that it belongs to. A
         // record that names no process therefore names none, whatever the start
@@ -350,22 +395,29 @@ impl Agent {
                 },
             }),
         };
-        Some(Agent {
-            process,
-            turn,
-            raised,
-            ..Agent::new(
-                session,
-                agent,
-                LabelFacts {
-                    dir,
-                    name,
-                    color,
-                    title,
-                },
-                origin,
-            )
-        })
+        Some(
+            Agent {
+                process,
+                turn,
+                raised,
+                ..Agent::new(
+                    session,
+                    agent,
+                    LabelFacts {
+                        dir,
+                        name,
+                        color,
+                        title,
+                    },
+                    origin,
+                )
+            }
+            .with_status(StatusFacts {
+                branch,
+                model,
+                context_tokens,
+            }),
+        )
     }
 }
 
@@ -373,6 +425,27 @@ impl Agent {
 pub(crate) mod tests {
     use super::*;
     use crate::origin::Origin;
+
+    /// A record line built from the fields that follow the format number. The
+    /// helper counts the separators, so a test states what it means and a
+    /// change to the number of fields lands in one place.
+    pub(crate) fn record_line(fields: &[&str]) -> String {
+        let mut line = FORMAT.to_string();
+        for value in fields {
+            line.push(FIELD);
+            line.push_str(value);
+        }
+        line
+    }
+
+    /// The fields of a record that decodes, for a test that then spoils one of
+    /// them. The record names a process, because a start time is read only for a
+    /// record that names one.
+    fn whole() -> Vec<&'static str> {
+        vec![
+            "one", "claude", "42", "918273", "idle", "0", "dir", "", "", "", "", "", "0", "title",
+        ]
+    }
 
     pub(crate) fn session(text: &str) -> SessionId {
         SessionId::new(text).unwrap()
@@ -489,7 +562,9 @@ pub(crate) mod tests {
     fn a_start_time_without_a_process_is_no_process() {
         // Nothing writes this. A record that arrived with a start time and no
         // process names a moment with nothing to attach it to.
-        let orphan = format!("{FORMAT}\tone\tclaude\t\t918273\tidle\t0\tdir\t\t\t\t");
+        let orphan = record_line(&[
+            "one", "claude", "", "918273", "idle", "0", "dir", "", "", "", "", "", "0", "",
+        ]);
         let Record::Known(read) = Agent::decode(&orphan) else {
             panic!("not a record");
         };
@@ -523,13 +598,20 @@ pub(crate) mod tests {
 
     #[test]
     fn a_line_that_is_not_a_record_decodes_to_nothing() {
+        let spoiled = |position: usize, value: &str| {
+            let mut fields = whole();
+            fields[position] = value;
+            record_line(&fields)
+        };
         for line in [
             String::new(),
             "one".to_string(),
-            format!("{FORMAT}\tone\tclaude"),
-            format!("{FORMAT}\tone\tclaude\t\t\tidle\t0\tdir"),
-            format!("{FORMAT}\tone\tclaude\tx\t\tidle\t0\tdir\t\t\t\ttitle"),
-            format!("{FORMAT}\tone\tclaude\t42\tnot-a-moment\tidle\t0\tdir\t\t\t\ttitle"),
+            record_line(&["one", "claude"]),
+            record_line(&["one", "claude", "", "", "idle", "0", "dir"]),
+            spoiled(2, "x"),            // a pid that is not a number
+            spoiled(3, "not-a-moment"), // a start time that is not a moment
+            spoiled(12, ""),            // no count of the context spent
+            spoiled(12, "many"),        // a count that is not a number
         ] {
             assert_eq!(Agent::decode(&line), Record::None, "{line}");
         }
@@ -546,9 +628,9 @@ pub(crate) mod tests {
     #[test]
     fn a_record_with_no_turn_it_recognises_decodes_to_nothing() {
         assert_eq!(
-            Agent::decode(&format!(
-                "{FORMAT}\tone\tclaude\t\t\tdozing\t0\tdir\t\t\t\t"
-            )),
+            Agent::decode(&record_line(&[
+                "one", "claude", "", "", "dozing", "0", "dir", "", "", "", "", "", "0", "",
+            ])),
             Record::None
         );
     }
@@ -594,6 +676,31 @@ pub(crate) mod tests {
     #[test]
     fn a_color_survives_the_round_trip() {
         let record = colored("one", "purple");
+        assert_eq!(Agent::decode(&record.encode()), Record::Known(record));
+    }
+
+    #[test]
+    fn a_status_survives_the_round_trip_and_so_does_having_none() {
+        let working = agent("one", 3).with_status(StatusFacts {
+            branch: "main".to_string(),
+            model: "claude-opus-5".to_string(),
+            context_tokens: 195_547,
+        });
+        assert_eq!(Agent::decode(&working.encode()), Record::Known(working));
+        let quiet = agent("two", 3);
+        assert_eq!(quiet.status, StatusFacts::default());
+        assert_eq!(Agent::decode(&quiet.encode()), Record::Known(quiet));
+    }
+
+    #[test]
+    fn a_status_fact_cannot_split_the_record_it_sits_in() {
+        let record = agent("one", 3).with_status(StatusFacts {
+            branch: "a\tb\nc".to_string(),
+            model: "d\te".to_string(),
+            context_tokens: 7,
+        });
+        assert_eq!(record.status.branch, "a b c");
+        assert_eq!(record.status.model, "d e");
         assert_eq!(Agent::decode(&record.encode()), Record::Known(record));
     }
 

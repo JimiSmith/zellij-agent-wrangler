@@ -13,7 +13,22 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::agent::LabelFacts;
+use crate::agent::{LabelFacts, StatusFacts};
+
+/// Everything that an agent's own files say about one session: what it is
+/// called by, and what it works with.
+///
+/// The two travel together because one read finds both. A caller that wants
+/// only a label still pays for one read and not two.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionFacts {
+    pub label: LabelFacts,
+    pub status: StatusFacts,
+}
+
+/// The model that Claude writes for a message it composed itself rather than
+/// asked a model for. Such a message reports no model that the user ran.
+const SYNTHETIC: &str = "<synthetic>";
 
 /// How much of a transcript's end is read. A fixed amount keeps the cost of a
 /// hook the same, however long the session runs.
@@ -44,7 +59,42 @@ fn text<'a>(record: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|text| !text.is_empty())
 }
 
-/// What a Claude session is called, read from its transcript.
+/// What a session works with, read out of one record of type `assistant`.
+///
+/// Claude writes one such record for every reply it gives. The record names the
+/// branch that the working directory had checked out, the model that composed
+/// the reply, and what the reply counted against the context window. The count
+/// adds every kind of token that the window holds, cached ones included.
+///
+/// The answer is `None` for a record that no model composed. A record of
+/// another type names no model, and Claude writes the synthetic model on a
+/// message that it composed for itself after a request failed. Neither one says
+/// what the session works with.
+fn status_from_assistant_record(record: &Value) -> Option<StatusFacts> {
+    let message = record.get("message")?;
+    let model = text(message, "model")?;
+    if model == SYNTHETIC {
+        return None;
+    }
+    let counted = |key: &str| {
+        message
+            .get("usage")
+            .and_then(|usage| usage.get(key))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    };
+    Some(StatusFacts {
+        branch: text(record, "gitBranch").unwrap_or_default().to_string(),
+        model: model.to_string(),
+        context_tokens: counted("input_tokens")
+            + counted("cache_creation_input_tokens")
+            + counted("cache_read_input_tokens")
+            + counted("output_tokens"),
+    })
+}
+
+/// What a Claude session is called, and what it works with, read from its
+/// transcript.
 ///
 /// The transcript records two kinds of title: the title that the user gave, and
 /// the title that Claude wrote for itself. A given title wins wherever both
@@ -59,9 +109,14 @@ fn text<'a>(record: &'a Value, key: &str) -> Option<&'a str> {
 /// teammate carries the same field, and the reader passes over it. That record
 /// says what the name became, and the conversation records after it already say
 /// so.
-pub fn claude(transcript: &str) -> LabelFacts {
+///
+/// What the session works with comes from the last `assistant` record in the
+/// window. All three of those values ride on that one record, so the three
+/// always describe the same moment. A window holding no such record reports none
+/// of them, which is what a session that has replied nothing reports.
+pub fn claude(transcript: &str) -> SessionFacts {
     let Some((bytes, cut)) = tail(Path::new(transcript)) else {
-        return LabelFacts::default();
+        return SessionFacts::default();
     };
     let mut lines = bytes.split(|byte| *byte == b'\n');
     // The first line of a window that starts mid-file is half a record.
@@ -71,6 +126,7 @@ pub fn claude(transcript: &str) -> LabelFacts {
 
     let (mut given, mut written) = (String::new(), String::new());
     let (mut name, mut color) = (String::new(), String::new());
+    let mut status = StatusFacts::default();
     for line in lines {
         // A JSON parse of every record parses the whole conversation. The
         // records that matter name themselves in bytes, and a search for those
@@ -80,6 +136,7 @@ pub fn claude(transcript: &str) -> LabelFacts {
             b"\"ai-title\"",
             b"\"agent-color\"",
             b"\"agentName\"",
+            b"\"assistant\"",
         ]
         .iter()
         .any(|marker| find(line, marker));
@@ -94,16 +151,28 @@ pub fn claude(transcript: &str) -> LabelFacts {
             Some("ai-title") => written = text(&record, "aiTitle").unwrap_or("").to_string(),
             Some("agent-color") => color = text(&record, "agentColor").unwrap_or("").to_string(),
             Some("agent-name") => {}
+            Some("assistant") => {
+                if name.is_empty() {
+                    name = text(&record, "agentName").unwrap_or("").to_string();
+                }
+                // The later record wins, the way the later title does.
+                if let Some(found) = status_from_assistant_record(&record) {
+                    status = found;
+                }
+            }
             _ if name.is_empty() => name = text(&record, "agentName").unwrap_or("").to_string(),
             _ => {}
         }
     }
 
-    LabelFacts {
-        dir: String::new(),
-        name,
-        color,
-        title: if given.is_empty() { written } else { given },
+    SessionFacts {
+        label: LabelFacts {
+            dir: String::new(),
+            name,
+            color,
+            title: if given.is_empty() { written } else { given },
+        },
+        status,
     }
 }
 
@@ -127,17 +196,23 @@ fn workspace(home: &Path, session: &str) -> PathBuf {
 ///
 /// Copilot has no teammates of its own, so a session read here is always a
 /// session of its own.
-pub fn copilot(home: &Path, session: &str) -> LabelFacts {
+///
+/// Copilot records none of the values that a status line draws, so the status
+/// of a Copilot session is empty.
+pub fn copilot(home: &Path, session: &str) -> SessionFacts {
     let Ok(text) = std::fs::read_to_string(workspace(home, session)) else {
-        return LabelFacts::default();
+        return SessionFacts::default();
     };
     let title = match field(&text, "name") {
         title if title.is_empty() => field(&text, "summary"),
         title => title,
     };
-    LabelFacts {
-        title,
-        ..LabelFacts::default()
+    SessionFacts {
+        label: LabelFacts {
+            title,
+            ..LabelFacts::default()
+        },
+        status: StatusFacts::default(),
     }
 }
 
@@ -218,7 +293,7 @@ mod tests {
 
     #[test]
     fn a_transcript_that_is_not_there_says_nothing() {
-        assert_eq!(claude("/no/such/transcript.jsonl"), LabelFacts::default());
+        assert_eq!(claude("/no/such/transcript.jsonl"), SessionFacts::default());
     }
 
     #[test]
@@ -231,7 +306,7 @@ mod tests {
                 r#"{"type":"ai-title","aiTitle":"porting the sidebar"}"#,
             ],
         );
-        assert_eq!(claude(&path).title, "porting the sidebar");
+        assert_eq!(claude(&path).label.title, "porting the sidebar");
     }
 
     #[test]
@@ -244,7 +319,7 @@ mod tests {
                 r#"{"type":"ai-title","aiTitle":"second guess"}"#,
             ],
         );
-        assert_eq!(claude(&path).title, "second guess");
+        assert_eq!(claude(&path).label.title, "second guess");
     }
 
     #[test]
@@ -257,7 +332,7 @@ mod tests {
                 r#"{"type":"ai-title","aiTitle":"a guess made after it"}"#,
             ],
         );
-        assert_eq!(claude(&path).title, "the port");
+        assert_eq!(claude(&path).label.title, "the port");
     }
 
     #[test]
@@ -273,7 +348,7 @@ mod tests {
                 r#"{"type":"assistant","agentName":"scout","teamName":"port"}"#,
             ],
         );
-        assert_eq!(claude(&path).name, "scout");
+        assert_eq!(claude(&path).label.name, "scout");
     }
 
     #[test]
@@ -288,7 +363,7 @@ mod tests {
             ],
         );
         // The last one in the window is the one in force, as for a title.
-        assert_eq!(claude(&path).color, "purple");
+        assert_eq!(claude(&path).label.color, "purple");
     }
 
     #[test]
@@ -306,23 +381,88 @@ mod tests {
         let path = transcript(scratch.path(), &borrowed);
 
         assert!(std::fs::metadata(&path).unwrap().len() > TAIL);
-        let meta = claude(&path);
-        assert_eq!(meta.title, "the long one");
-        assert_eq!(meta.color, "");
+        let facts = claude(&path);
+        assert_eq!(facts.label.title, "the long one");
+        assert_eq!(facts.label.color, "");
     }
 
     #[test]
     fn a_session_given_no_color_reports_none() {
         let scratch = Scratch::new("no-color");
         let path = transcript(scratch.path(), &[r#"{"type":"user","message":"hi"}"#]);
-        assert_eq!(claude(&path).color, "");
+        assert_eq!(claude(&path).label.color, "");
     }
 
     #[test]
     fn a_session_of_its_own_has_no_teammate_name() {
         let scratch = Scratch::new("top-level");
         let path = transcript(scratch.path(), &[r#"{"type":"user","message":"hi"}"#]);
-        assert_eq!(claude(&path).name, "");
+        assert_eq!(claude(&path).label.name, "");
+    }
+
+    /// One record of type `assistant`, as Claude writes it: the branch it ran
+    /// on, the model that composed the reply, and what the reply counted
+    /// against the window.
+    fn assistant_record(branch: &str, model: &str, cached: u64, out: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","gitBranch":"{branch}","message":{{"model":"{model}","usage":{{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":{cached},"output_tokens":{out}}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn what_a_session_works_with_comes_off_the_last_assistant_record() {
+        let scratch = Scratch::new("assistant-record");
+        let lines = [
+            assistant_record("old-branch", "claude-haiku-4-5", 10, 1),
+            r#"{"type":"user","message":"and again"}"#.to_string(),
+            assistant_record("main", "claude-opus-5", 162_227, 6_540),
+        ];
+        let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let path = transcript(scratch.path(), &borrowed);
+        assert_eq!(
+            claude(&path).status,
+            StatusFacts {
+                branch: "main".to_string(),
+                model: "claude-opus-5".to_string(),
+                context_tokens: 168_769,
+            }
+        );
+    }
+
+    #[test]
+    fn a_window_with_no_assistant_record_reports_nothing_worked_with() {
+        // The same report as a session that has replied nothing yet.
+        let scratch = Scratch::new("no-assistant-record");
+        let path = transcript(scratch.path(), &[r#"{"type":"user","message":"hi"}"#]);
+        assert_eq!(claude(&path).status, StatusFacts::default());
+    }
+
+    #[test]
+    fn a_message_that_no_model_composed_says_nothing() {
+        // Claude writes such a message for itself when a request fails. It
+        // names no model that the user ran, so the record before it stands.
+        let scratch = Scratch::new("synthetic");
+        let lines = [
+            assistant_record("main", "claude-opus-5", 100, 10),
+            assistant_record("main", "<synthetic>", 0, 0),
+        ];
+        let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let path = transcript(scratch.path(), &borrowed);
+        assert_eq!(claude(&path).status.model, "claude-opus-5");
+        assert_eq!(claude(&path).status.context_tokens, 112);
+    }
+
+    #[test]
+    fn a_reply_that_counted_nothing_spends_nothing() {
+        let scratch = Scratch::new("uncounted");
+        let path = transcript(
+            scratch.path(),
+            &[r#"{"type":"assistant","message":{"model":"claude-opus-5"}}"#],
+        );
+        let status = claude(&path).status;
+        assert_eq!(status.model, "claude-opus-5");
+        assert_eq!(status.context_tokens, 0);
+        assert_eq!(status.branch, "");
     }
 
     #[test]
@@ -335,7 +475,7 @@ mod tests {
                 r#"{"type":"ai-title","aiTitle":"whole"}"#,
             ],
         );
-        assert_eq!(claude(&path).title, "whole");
+        assert_eq!(claude(&path).label.title, "whole");
     }
 
     fn workspace_at(home: &Path, session: &str, text: &str) {
@@ -352,14 +492,14 @@ mod tests {
             "abc",
             "name: the port\nsummary: something\n",
         );
-        assert_eq!(copilot(scratch.path(), "abc").title, "the port");
+        assert_eq!(copilot(scratch.path(), "abc").label.title, "the port");
     }
 
     #[test]
     fn a_copilot_session_with_no_name_falls_back_to_its_summary() {
         let scratch = Scratch::new("copilot-summary");
         workspace_at(scratch.path(), "abc", "name: ~\nsummary: 'what it did'\n");
-        assert_eq!(copilot(scratch.path(), "abc").title, "what it did");
+        assert_eq!(copilot(scratch.path(), "abc").label.title, "what it did");
     }
 
     #[test]
@@ -370,13 +510,13 @@ mod tests {
             "abc",
             "summary: |\n  the first line\n  the second\nname:\n",
         );
-        assert_eq!(copilot(scratch.path(), "abc").title, "the first line");
+        assert_eq!(copilot(scratch.path(), "abc").label.title, "the first line");
     }
 
     #[test]
     fn a_workspace_that_is_not_there_says_nothing() {
         let scratch = Scratch::new("copilot-missing");
-        assert_eq!(copilot(scratch.path(), "abc"), LabelFacts::default());
+        assert_eq!(copilot(scratch.path(), "abc"), SessionFacts::default());
     }
 
     #[test]

@@ -14,7 +14,7 @@ use agent_wrangler_core::notify::Notifier;
 use agent_wrangler_core::origin::Origin;
 use agent_wrangler_core::payload::directory_name;
 use agent_wrangler_core::registry::Registry;
-use agent_wrangler_core::titles;
+use agent_wrangler_core::titles::{self, SessionFacts};
 
 use crate::proto::{DeliveryTarget, Hook};
 
@@ -35,8 +35,9 @@ pub struct Source {
 
 /// The reading, the clock and the process table, behind one seam.
 pub trait World {
-    /// What an agent's own files say this session is called.
-    fn meta(&self, agent: &str, transcript: &str, session: &str) -> LabelFacts;
+    /// What an agent's own files say about this session: what it is called by,
+    /// and what it works with.
+    fn read(&self, agent: &str, transcript: &str, session: &str) -> SessionFacts;
     /// When a file last changed, or `None` for one that is not there.
     fn mtime(&self, path: &str) -> Option<u64>;
     /// Whether a process still runs, and is still the intended one.
@@ -47,14 +48,14 @@ pub trait World {
 pub struct Real;
 
 impl World for Real {
-    fn meta(&self, agent: &str, transcript: &str, session: &str) -> LabelFacts {
+    fn read(&self, agent: &str, transcript: &str, session: &str) -> SessionFacts {
         match agent {
             "claude" => titles::claude(transcript),
             "copilot" => match crate::paths::home() {
                 Some(home) => titles::copilot(&home, session),
-                None => LabelFacts::default(),
+                None => SessionFacts::default(),
             },
-            _ => LabelFacts::default(),
+            _ => SessionFacts::default(),
         }
     }
 
@@ -156,7 +157,7 @@ pub const SILENCE: Duration = Duration::from_secs(90);
 /// is frozen, so nothing can take over from it either.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Reading {
-    meta: LabelFacts,
+    facts: SessionFacts,
     mtime: Option<u64>,
 }
 
@@ -226,7 +227,7 @@ pub struct Plan {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Look {
     /// Session, the transcript's new modification time, and what it now says.
-    pub moved: Vec<(SessionId, u64, LabelFacts)>,
+    pub moved: Vec<(SessionId, u64, SessionFacts)>,
     /// Sessions whose process no longer runs.
     pub dead: Vec<SessionId>,
 }
@@ -252,7 +253,7 @@ pub fn look(plan: &Plan, world: &dyn World, since: &BTreeMap<SessionId, Option<u
                 Some((
                     session.clone(),
                     mtime,
-                    world.meta(agent, transcript, session.as_str()),
+                    world.read(agent, transcript, session.as_str()),
                 ))
             })
             .collect(),
@@ -263,7 +264,7 @@ pub fn look(plan: &Plan, world: &dyn World, since: &BTreeMap<SessionId, Option<u
 /// nothing else.
 pub fn read_hook(hook: &Hook, world: &dyn World) -> Reading {
     Reading {
-        meta: world.meta(&hook.agent, &hook.transcript, &hook.session_id),
+        facts: world.read(&hook.agent, &hook.transcript, &hook.session_id),
         mtime: world.mtime(&hook.transcript),
     }
 }
@@ -283,7 +284,7 @@ impl State {
 
         let meta = LabelFacts {
             dir: directory_name(&hook.cwd),
-            ..reading.meta
+            ..reading.facts.label
         };
         let turn = match event {
             Event::Turn(turn) => turn,
@@ -306,7 +307,8 @@ impl State {
                 meta,
                 Origin::decode(&hook.origin),
             )
-        };
+        }
+        .with_status(reading.facts.status);
 
         self.sources.insert(
             session.clone(),
@@ -517,14 +519,17 @@ impl State {
                 continue;
             };
             // The directory is not in the transcript. The daemon keeps it from
-            // what the last hook said, because a scan never looks for it.
+            // what the last hook said, because a scan never looks for it. Every
+            // other fact is in the transcript, so the scan states all of them
+            // afresh.
             let record = Agent {
                 meta: LabelFacts {
                     dir: held.meta.dir.clone(),
-                    ..found
+                    ..found.label
                 },
                 ..held
-            };
+            }
+            .with_status(found.status);
             changed |= self.registry.report(record);
         }
 
@@ -603,14 +608,27 @@ mod tests {
     /// that one number went to another process.
     #[derive(Default)]
     struct Fake {
-        meta: RefCell<BTreeMap<String, LabelFacts>>,
+        facts: RefCell<BTreeMap<String, SessionFacts>>,
         mtime: RefCell<BTreeMap<String, u64>>,
         alive: RefCell<BTreeMap<u32, Option<ProcessStartStamp>>>,
     }
 
     impl Fake {
-        fn says(&self, transcript: &str, meta: LabelFacts, mtime: u64) {
-            self.meta.borrow_mut().insert(transcript.to_string(), meta);
+        fn says(&self, transcript: &str, label: LabelFacts, mtime: u64) {
+            self.reads(
+                transcript,
+                SessionFacts {
+                    label,
+                    ..SessionFacts::default()
+                },
+                mtime,
+            );
+        }
+
+        fn reads(&self, transcript: &str, facts: SessionFacts, mtime: u64) {
+            self.facts
+                .borrow_mut()
+                .insert(transcript.to_string(), facts);
             self.mtime
                 .borrow_mut()
                 .insert(transcript.to_string(), mtime);
@@ -626,8 +644,8 @@ mod tests {
     }
 
     impl World for Fake {
-        fn meta(&self, _agent: &str, transcript: &str, _session: &str) -> LabelFacts {
-            self.meta
+        fn read(&self, _agent: &str, transcript: &str, _session: &str) -> SessionFacts {
+            self.facts
                 .borrow()
                 .get(transcript)
                 .cloned()
@@ -1015,6 +1033,50 @@ mod tests {
         );
         // A file that did not move since then is not read again.
         assert!(!state.poll(&world));
+    }
+
+    fn works_with(branch: &str, model: &str, context_tokens: u64) -> SessionFacts {
+        SessionFacts {
+            label: LabelFacts::default(),
+            status: agent_wrangler_core::agent::StatusFacts {
+                branch: branch.to_string(),
+                model: model.to_string(),
+                context_tokens,
+            },
+        }
+    }
+
+    #[test]
+    fn a_hook_files_what_the_session_works_with() {
+        let world = Fake::default();
+        world.reads("/t/one.jsonl", works_with("main", "claude-opus-5", 4200), 1);
+        let mut state = State::default();
+        state.on_hook(&hook("start"), &world);
+        let held = state.registry().get(&session("one")).unwrap();
+        assert_eq!(held.status.branch, "main");
+        assert_eq!(held.status.model, "claude-opus-5");
+        assert_eq!(held.status.context_tokens, 4200);
+    }
+
+    #[test]
+    fn watching_states_afresh_what_the_session_works_with() {
+        // A branch changes, and a turn spends more of the window, with no hook
+        // between. The watch carries both to a row.
+        let world = Fake::default();
+        world.reads("/t/one.jsonl", works_with("main", "claude-opus-5", 4200), 1);
+        world.running(AGENT);
+        let mut state = State::default();
+        state.on_hook(&hook("start"), &world);
+
+        world.reads(
+            "/t/one.jsonl",
+            works_with("daemon", "claude-opus-5", 91_000),
+            2,
+        );
+        assert!(state.poll(&world));
+        let held = state.registry().get(&session("one")).unwrap();
+        assert_eq!(held.status.branch, "daemon");
+        assert_eq!(held.status.context_tokens, 91_000);
     }
 
     #[test]

@@ -306,7 +306,9 @@ could:
 
 - **Watch.** Every transcript it has been told about is looked at once a second,
   and re-read when it has moved. A session that titles itself, or is given a
-  colour, is drawn without any hook firing at all.
+  colour, is drawn without any hook firing at all. One read answers for both
+  halves of a record: what the session is called by, and what it works with. A
+  status line therefore costs no second read and no second file.
 - **Reap.** A session whose process has gone is dropped. An agent killed without
   an `end` event used to leave a row nothing would ever take away.
 

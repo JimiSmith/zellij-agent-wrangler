@@ -5,6 +5,7 @@
 //! reads a command line. Neither of those is a fact about the look of a row.
 
 pub use agent_wrangler_core::label::Label;
+pub use agent_wrangler_core::status_line::StatusTemplate;
 
 /// Everything that the drawing can be asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,6 +19,9 @@ pub struct DrawingOptions {
     pub turn_state: bool,
     /// Whether the calls for the user are listed at the foot of the pane.
     pub notifications: bool,
+    /// The line that hangs under an agent's row, spelled from the record.
+    /// `None` draws no such line, and `None` is the default.
+    pub status_line: Option<StatusTemplate>,
 }
 
 impl Default for DrawingOptions {
@@ -27,6 +31,7 @@ impl Default for DrawingOptions {
             sections: false,
             turn_state: true,
             notifications: true,
+            status_line: None,
         }
     }
 }

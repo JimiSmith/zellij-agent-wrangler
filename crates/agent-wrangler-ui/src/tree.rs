@@ -25,22 +25,47 @@ fn indicator(agent: &Agent, options: &DrawingOptions) -> Indicator {
     }
 }
 
-/// The row one agent draws, wherever it is drawn.
-fn agent_row(
+/// The rows one agent draws, wherever it is drawn: its own row, and the status
+/// line under it when the template spells one.
+///
+/// Both rows carry `key`. The selection bar therefore covers the pair, and a
+/// click anywhere in the pair reaches the agent. [`selectable_row_keys`] folds
+/// the two back to one thing to navigate.
+///
+/// [`selectable_row_keys`]: crate::selection::selectable_row_keys
+fn agent_rows(
     agent: &Agent,
     index: String,
     branch: Branch,
     placement: Placement,
     options: &DrawingOptions,
-) -> Row {
-    Row::new(RowContent::Agent {
-        index,
+    key: RowKey,
+) -> Vec<Row> {
+    let mut rows = vec![Row::new(RowContent::Agent {
+        index: index.clone(),
         label: label(agent, options.label),
         branch,
         placement,
         color: NamedColor::for_agent(agent),
     })
     .with_indicator(indicator(agent, options))
+    .with_key(key.clone())];
+    let spelled = options
+        .status_line
+        .as_ref()
+        .and_then(|template| template.spell(agent));
+    if let Some(text) = spelled {
+        rows.push(
+            Row::new(RowContent::AgentStatus {
+                index,
+                text,
+                branch,
+                placement,
+            })
+            .with_key(key),
+        );
+    }
+    rows
 }
 
 /// A pane, and the agent sessions that run in it.
@@ -162,26 +187,28 @@ fn tab_rows(tab: &Tab, options: &DrawingOptions) -> Vec<Row> {
     for (position, child) in children.iter().enumerate() {
         let index = (position + 1).to_string();
         let branch = branch_at(position, last);
-        rows.push(match child {
-            Child::Pane(pane) => Row::new(RowContent::Pane {
-                index,
-                title: pane.title.clone(),
-                branch,
-                placement: pane_placement(tab.active, pane.focused),
-                color: None,
-            })
-            .with_key(RowKey::Pane(pane.id.clone())),
+        match child {
+            Child::Pane(pane) => rows.push(
+                Row::new(RowContent::Pane {
+                    index,
+                    title: pane.title.clone(),
+                    branch,
+                    placement: pane_placement(tab.active, pane.focused),
+                    color: None,
+                })
+                .with_key(RowKey::Pane(pane.id.clone())),
+            ),
             // An agent takes the placement of its pane. The agent is where the
             // pane is, and the row takes you to that pane.
-            Child::Agent(pane, agent) => agent_row(
+            Child::Agent(pane, agent) => rows.extend(agent_rows(
                 agent,
                 index,
                 branch,
                 pane_placement(tab.active, pane.focused),
                 options,
-            )
-            .with_key(RowKey::Agent(agent.session.clone())),
-        });
+                RowKey::Agent(agent.session.clone()),
+            )),
+        }
     }
     rows
 }
@@ -222,16 +249,14 @@ fn kind_rows(tabs: &[Tab], kind: &str, options: &DrawingOptions) -> Vec<Row> {
         rows.push(window_row(tab));
         let last = agents.len() - 1;
         for (position, (pane, agent)) in agents.iter().enumerate() {
-            rows.push(
-                agent_row(
-                    agent,
-                    (position + 1).to_string(),
-                    branch_at(position, last),
-                    pane_placement(tab.active, pane.focused),
-                    options,
-                )
-                .with_key(RowKey::Section(agent.session.clone())),
-            );
+            rows.extend(agent_rows(
+                agent,
+                (position + 1).to_string(),
+                branch_at(position, last),
+                pane_placement(tab.active, pane.focused),
+                options,
+                RowKey::Section(agent.session.clone()),
+            ));
         }
     }
     rows
@@ -262,9 +287,10 @@ pub fn build_tree(tabs: &[Tab], options: &DrawingOptions) -> Vec<Row> {
 mod tests {
     use super::*;
 
-    use agent_wrangler_core::agent::{LabelFacts, SessionId};
+    use agent_wrangler_core::agent::{LabelFacts, SessionId, StatusFacts};
     use agent_wrangler_core::label::Label;
     use agent_wrangler_core::origin::Origin;
+    use agent_wrangler_core::status_line::StatusTemplate;
 
     fn pane(id: u32, title: &str, focused: bool) -> Pane {
         Pane::new(id, title, focused)
@@ -531,6 +557,114 @@ mod tests {
         };
         assert_eq!(label(Label::Name), "the zellij port");
         assert_eq!(label(Label::Dir), "one");
+    }
+
+    /// Options that ask for a status line spelled from the template.
+    fn showing(template: &str) -> DrawingOptions {
+        DrawingOptions {
+            status_line: StatusTemplate::new(template),
+            ..DrawingOptions::default()
+        }
+    }
+
+    /// One pane hosting one agent that reports what it works with.
+    fn working() -> Vec<Tab> {
+        let mut pane = hosting(pane(1, "bash", true), &["one"]);
+        pane.agents[0].status = StatusFacts {
+            branch: "main".to_string(),
+            model: "claude-opus-5".to_string(),
+            context_tokens: 41_000,
+        };
+        vec![tab(0, "editor", true, vec![pane])]
+    }
+
+    #[test]
+    fn a_status_row_follows_the_agent_it_describes() {
+        let rows = build_tree(
+            &working(),
+            &showing("{branch} · {model} · {context_tokens}"),
+        );
+        assert_eq!(rows.len(), 3, "the tab, the agent, and its status line");
+        assert_eq!(
+            rows[2].content,
+            RowContent::AgentStatus {
+                index: "1".to_string(),
+                text: "main · opus-5 · 41k".to_string(),
+                branch: Branch::Last,
+                placement: Placement::FocusedPane,
+            }
+        );
+    }
+
+    #[test]
+    fn a_status_row_takes_the_index_and_the_branch_of_its_agent() {
+        // A second pane makes the agent a child with a sibling after it, so the
+        // tree goes on below its status line.
+        let mut tabs = working();
+        tabs[0].panes.push(pane(2, "nvim", false));
+        let rows = build_tree(&tabs, &showing("{branch}"));
+        let RowContent::AgentStatus { index, branch, .. } = &rows[2].content else {
+            panic!("unexpected row: {:?}", rows[2].content);
+        };
+        assert_eq!(index, "1");
+        assert_eq!(*branch, Branch::More);
+    }
+
+    #[test]
+    fn no_status_row_is_drawn_without_a_template() {
+        let rows = build_tree(&working(), &DrawingOptions::default());
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn no_status_row_is_drawn_for_an_agent_that_reports_none_of_the_values() {
+        // The template names three fields and the record fills none of them. A
+        // row of bare separators says nothing, so no row is drawn.
+        let quiet = vec![tab(
+            0,
+            "editor",
+            true,
+            vec![hosting(pane(1, "bash", true), &["one"])],
+        )];
+        let rows = build_tree(&quiet, &showing("{branch} · {model} · {context_tokens}"));
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn a_status_row_carries_the_key_of_the_agent_above_it() {
+        // One key over the pair puts the selection bar across both rows and
+        // sends a click on either one to the same agent.
+        let rows = build_tree(&working(), &showing("{branch}"));
+        assert_eq!(rows[1].key, rows[2].key);
+        assert_eq!(
+            rows[2].key,
+            Some(RowKey::Agent(SessionId::new("one").unwrap()))
+        );
+    }
+
+    #[test]
+    fn a_status_row_in_a_block_carries_that_blocks_own_key() {
+        let rows = build_tree(
+            &working(),
+            &DrawingOptions {
+                sections: true,
+                ..showing("{branch}")
+            },
+        );
+        let section = Some(RowKey::Section(SessionId::new("one").unwrap()));
+        let keys: Vec<Option<RowKey>> = rows.iter().map(|row| row.key.clone()).collect();
+        assert_eq!(keys.iter().filter(|key| **key == section).count(), 2);
+    }
+
+    #[test]
+    fn a_status_row_never_carries_a_marker() {
+        // The turn state belongs to the agent's own row. Two markers for one
+        // agent say the state twice.
+        let mut tabs = working();
+        tabs[0].panes[0].agents[0].turn = Turn::Attention;
+        let rows = build_tree(&tabs, &showing("{branch}"));
+        assert_eq!(rows[1].indicator, Indicator::Attention);
+        assert_eq!(rows[2].indicator, Indicator::None);
     }
 
     fn sectioned() -> Vec<Tab> {
