@@ -32,7 +32,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use interprocess::local_socket::prelude::*;
-use interprocess::local_socket::{GenericNamespaced, Listener, ListenerOptions, Stream};
+use interprocess::local_socket::{
+    ConnectOptions, GenericNamespaced, Listener, ListenerOptions, Name, Stream,
+};
+use interprocess::ConnectWaitMode;
 
 use agent_wrangler_core::agent::FORMAT;
 use agent_wrangler_core::notify::Notifier;
@@ -144,30 +147,51 @@ impl Owed {
     }
 }
 
+/// This function answers whether something holds `name` at this moment.
+///
+/// The probe waits for nothing. `Timeout(Duration::ZERO)` runs one connect
+/// attempt and gives up. The default mode, `Unbounded`, does not give up. On
+/// Windows that mode becomes `WaitNamedPipeW` with no deadline. A name whose
+/// every pipe instance is busy then neither answers nor refuses, and the caller
+/// waits for ever.
+///
+/// The probe reads three outcomes, and each means the same thing on every
+/// system.
+///
+/// - The connect lands. A listener is there.
+/// - The connect times out. Something holds the name and can take no further
+///   connection now. On Windows a pipe name dies with the process that made
+///   it, so a name that exists at all is a name in use. On unix a timeout is a
+///   listener whose backlog is full, which is a live listener too.
+/// - Any other error. Nothing holds the name. A unix socket file that a dead
+///   daemon left behind refuses the connect, and a Windows name that nobody
+///   holds is not found.
+fn something_holds_the_name(name: Name<'_>) -> bool {
+    match ConnectOptions::new()
+        .name(name)
+        .wait_mode(ConnectWaitMode::Timeout(Duration::ZERO))
+        .connect_sync()
+    {
+        Ok(_) => true,
+        Err(refusal) => refusal.kind() == std::io::ErrorKind::TimedOut,
+    }
+}
+
 /// This function claims one name, or finds that someone else holds it. `None`
 /// says that something answered the name, so it is not this process's to take.
 ///
-/// A connection attempt first tells a live listener from a name that a dead one
-/// left behind. To take the name over is then safe *because* of that. Nothing
-/// answered the name, so nothing listens on it. Without this attempt, a daemon
-/// that was killed outright leaves a name that nothing can bind again. This is
-/// true on every system where the name is a file rather than a name that the
-/// kernel drops with the process.
+/// A probe first tells a live listener from a name that a dead one left behind.
+/// To take the name over is then safe *because* of that. Nothing holds the
+/// name, so nothing listens on it. Without the probe, a daemon that was killed
+/// outright leaves a name that nothing can bind again. This is true on every
+/// system where the name is a file rather than a name that the kernel drops
+/// with the process.
 ///
 /// The daemon's own socket and every socket sink are claimed here, so there is
-/// one account of what a name that is already answered means.
-///
-/// TODO: this blocks for ever on Windows when the name exists and every one of
-/// its pipe instances is busy. `Stream::connect` takes
-/// `ConnectWaitMode::Unbounded` by default, and on Windows that becomes
-/// `WaitNamedPipeW` with no deadline, so a busy name never answers and never
-/// refuses. Unix fails fast and is unaffected. The cure is a bounded wait mode,
-/// which `local_socket` offers on every system, and reading the timeout as
-/// "something holds this name": a Windows name dies with the process that made
-/// it, so a name that is there at all is a name in use.
+/// one account of what a name that something else holds means.
 pub(crate) fn claim(name: &str) -> std::io::Result<Option<Listener>> {
     let ns = name.to_ns_name::<GenericNamespaced>()?;
-    if Stream::connect(ns.clone()).is_ok() {
+    if something_holds_the_name(ns.clone()) {
         return Ok(None);
     }
     ListenerOptions::new()
@@ -825,11 +849,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // This test holds the name with a listener of its own, so every probe after
-    // the first one meets a name with no free instance. That is exactly the case
-    // that `claim` blocks for ever on, so the test hangs on Windows rather than
-    // failing. The rule under test is not unix-only. Holding a name this way is.
-    #[cfg(unix)]
+    // This test holds the name with a listener of its own, and accepts nothing
+    // on it. Every probe after the first one therefore meets a name with no
+    // free connection. On Windows that case made `claim` wait for ever. The
+    // probe now gives up at once, and reads the refusal as "something holds
+    // it", which is the answer that this test needs.
     #[test]
     fn a_run_of_deliveries_that_did_not_land_never_retires_a_client() {
         // A delivery that did not land says nothing about the client. The old
@@ -859,6 +883,17 @@ mod tests {
         drop(taken);
         transports.retain(&BTreeSet::new());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_name_that_a_listener_holds_is_claimed_by_nobody_else() {
+        let name = format!("agent-wrangler-claim-test-{}.sock", std::process::id());
+        let held = claim(&name).expect("a name").expect("nothing holds it yet");
+        assert!(
+            claim(&name).expect("a name").is_none(),
+            "a listener holds the name, so a second claim takes nothing"
+        );
+        drop(held);
     }
 
     #[test]
