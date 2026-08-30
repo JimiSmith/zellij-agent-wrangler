@@ -484,8 +484,12 @@ mod tests {
         let sink = test_socket_name("unbound");
         let at = Instant::now();
         assert!(connect_with_retry(&sink).is_err());
+        // The rule is that the retry ends. `connect_with_retry` sleeps between
+        // its tries, so the ceiling is that sleep and the wait of a test on top
+        // of it. Every other test of this binary runs beside this one, and a
+        // ceiling that leaves out the sleep fails on a loaded machine.
         assert!(
-            at.elapsed() < test_daemon::TEST_TIMEOUT,
+            at.elapsed() < CONNECT_ATTEMPTS * PAUSE_BETWEEN_ATTEMPTS + test_daemon::TEST_TIMEOUT,
             "{:?}",
             at.elapsed()
         );
