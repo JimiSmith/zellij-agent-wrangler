@@ -18,6 +18,8 @@ use windows_sys::Win32::System::Threading::{
     DETACHED_PROCESS, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
+use interprocess::local_socket::{Listener, ListenerOptions, Name};
+
 use agent_wrangler_core::agent::ProcessStartStamp;
 
 use super::ProcessTableRow;
@@ -219,6 +221,33 @@ pub fn processes() -> HashMap<u32, ProcessTableRow> {
 fn image_name(raw: &[u16]) -> String {
     let end = raw.iter().position(|unit| *unit == 0).unwrap_or(raw.len());
     String::from_utf16_lossy(&raw[..end])
+}
+
+/// Binds `name`, or answers `None` because another process already holds it.
+///
+/// `create_sync` asks Windows for the first instance of the pipe. Windows
+/// refuses that with `ERROR_ACCESS_DENIED` for a name that already exists. The
+/// refusal is the whole answer, so this runs no probe of its own.
+///
+/// A probe hangs. A connect to a name whose every pipe instance is busy waits
+/// for ever, because `Stream::connect` becomes `WaitNamedPipeW` with no
+/// deadline. The wait mode on `ConnectOptions` does not help. Interprocess
+/// 2.4.3 drops that mode on Windows and always connects unbounded.
+///
+/// A named pipe dies with the process that made it, so there is no name of a
+/// dead daemon to overwrite. The unix half faces the opposite problem, and
+/// `claim_socket_name` there explains it.
+///
+/// Windows also reports `ERROR_ACCESS_DENIED` for a name that this user cannot
+/// reach. That is rare, because the socket name carries the name of the user.
+/// Such a name reads here as a name that something else holds. The daemon then
+/// gives it up, and reports no failure.
+pub fn claim_socket_name(name: Name<'_>) -> io::Result<Option<Listener>> {
+    match ListenerOptions::new().name(name).create_sync() {
+        Ok(listener) => Ok(Some(listener)),
+        Err(refusal) if refusal.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => Ok(None),
+        Err(refusal) => Err(refusal),
+    }
 }
 
 #[cfg(test)]

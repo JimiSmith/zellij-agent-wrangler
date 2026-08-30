@@ -11,6 +11,9 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use interprocess::local_socket::prelude::*;
+use interprocess::local_socket::{Listener, ListenerOptions, Name, Stream};
+
 use agent_wrangler_core::agent::ProcessStartStamp;
 
 use super::ProcessTableRow;
@@ -154,6 +157,27 @@ fn parse_processes(text: &str) -> HashMap<u32, ProcessTableRow> {
             Some((pid, ProcessTableRow { ppid, name }))
         })
         .collect()
+}
+
+/// Binds `name`, or answers `None` because a live listener already holds it.
+///
+/// A unix socket is a file, and it outlives the process that bound it. A daemon
+/// that was killed outright therefore leaves a file that nothing can bind
+/// again, so this overwrites one. An overwrite is safe only after a connect
+/// that nothing answered. Nothing answered the name, so nothing listens on it.
+///
+/// A connect to a unix socket lands or is refused inside one system call, so
+/// the probe waits for nothing. Windows answers this question in another way,
+/// and `claim_socket_name` there explains it.
+pub fn claim_socket_name(name: Name<'_>) -> io::Result<Option<Listener>> {
+    if Stream::connect(name.clone()).is_ok() {
+        return Ok(None);
+    }
+    ListenerOptions::new()
+        .name(name)
+        .try_overwrite(true)
+        .create_sync()
+        .map(Some)
 }
 
 #[cfg(test)]

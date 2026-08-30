@@ -1,19 +1,27 @@
 //! The process primitives this needs, chosen at compile time.
 //!
-//! Each supported system provides the same five functions. The rest of the
+//! Each supported system provides the same six functions. The rest of the
 //! crate calls the re-exported ones with no `cfg` of its own. A build for a
 //! system with no module here fails to find them, which is the intended
 //! answer. A missing port must not become a daemon that cannot tell a live
 //! agent from a dead one.
 //!
-//! The start of a program is one of the five for the same reason. What it takes
+//! The start of a program is one of the six for the same reason. What it takes
 //! to start one without disturbance to the user is the business of the system.
 //! A caller that built its own start is a caller that must know that business.
 //!
-//! Three things derive from those four. The first is the climb up the process
-//! table to the agent that a hook belongs to. The second is the start time of
-//! what the climb finds. The third is a wait for a program that lasts no longer
-//! than it is worth. All three are written once here for every system.
+//! The claim of a socket name is one of the six because the two systems answer
+//! it in different ways. A unix socket is a file, and it outlives the process
+//! that bound it. A claim there must first tell a live listener from a file
+//! that a dead daemon left behind. A named pipe dies with its process, and
+//! Windows refuses to create a name that exists, so the create is the whole
+//! claim.
+//!
+//! Three things derive from the process primitives. The first is the climb up
+//! the process table to the agent that a hook belongs to. The second is the
+//! start time of what the climb finds. The third is a wait for a program that
+//! lasts no longer than it is worth. All three are written once here for every
+//! system.
 
 use std::collections::HashMap;
 use std::process::{Child, Command};
@@ -25,12 +33,12 @@ use agent_wrangler_core::agent::Process;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{command, pid_alive, processes, spawn_detached, started};
+pub use unix::{claim_socket_name, command, pid_alive, processes, spawn_detached, started};
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{command, pid_alive, processes, spawn_detached, started};
+pub use windows::{claim_socket_name, command, pid_alive, processes, spawn_detached, started};
 
 /// One row of the process table: the process that started this process, and the
 /// image that this process runs.
