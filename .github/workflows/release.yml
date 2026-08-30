@@ -1,13 +1,26 @@
-name: release
+name: check and release
 
 # The two halves go out together, and carry the name of the same tag. A layout
 # can therefore pin the plugin to the version of the installed client. Zellij
 # caches a downloaded plugin under the last segment of its url, and never
 # fetches a name that it already holds again. A wasm with its version in the
 # name is therefore the only kind that an update can replace.
+#
+# Two triggers, one file. A tag checks, builds and releases. A push to `main`
+# checks and builds, and releases nothing.
+#
+# One file rather than two, because a separate check workflow drifts from the
+# one that a tag runs, and then a tag is still the first thing to meet a fault.
+# Exactly that happened: the Windows job broke three commits before v0.1.15 and
+# waited for the tag, because a tag was the only trigger there was.
+#
+# `startsWith(github.ref, 'refs/tags/v')` is the whole of the difference. Every
+# step that writes to a release carries it. Every step that only compiles or
+# tests carries nothing, and runs on both.
 on:
   push:
     tags: ["v*"]
+    branches: ["main"]
 
 permissions:
   contents: write
@@ -61,6 +74,10 @@ jobs:
       - run: cargo clippy -p agent-wrangler -p agent-wrangler-core -p tmux-agent-wrangler --all-targets --locked -- -D warnings
       - run: cargo test -p agent-wrangler -p agent-wrangler-core -p tmux-agent-wrangler --locked
 
+  # This job runs on a push too, and opens nothing there. It runs because
+  # `plugin` and `client` name it, and a skipped job skips everything that names
+  # it. A checkout and no release is the cheapest way to keep those two building
+  # on a push.
   release:
     needs: [check, check-windows, check-macos]
     runs-on: ubuntu-latest
@@ -71,6 +88,7 @@ jobs:
       # leaves an existing draft alone. The job runs again after every re-cut of
       # a tag, and the delete of a tag turns its release back into a draft.
       - name: Open the release this tag names, as a draft
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -78,6 +96,8 @@ jobs:
             gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
               --title "$GITHUB_REF_NAME" --generate-notes
 
+  # On a push this job proves that the released artifact still compiles for
+  # wasm. No other job builds the plugin that way.
   plugin:
     needs: release
     runs-on: ubuntu-latest
@@ -89,6 +109,7 @@ jobs:
           cargo build --release --locked --target wasm32-wasip1 \
             -p zellij-agent-wrangler
       - name: Attach it, named for this tag
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -97,6 +118,9 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" \
             "zellij-agent-wrangler-$GITHUB_REF_NAME.wasm" --clobber
 
+  # On a push this job proves that the client still compiles for every platform
+  # that a release ships it to. A target that fails here fails a tag, and a tag
+  # is the worst moment to learn it.
   client:
     needs: release
     strategy:
@@ -132,6 +156,7 @@ jobs:
           cargo build --release --locked --target ${{ matrix.target }} \
             -p agent-wrangler
       - name: Attach it, named for this tag and its platform
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -144,7 +169,9 @@ jobs:
       # program for Windows only. Everywhere else the program is the same file
       # as the one above, because only Windows has a console to give.
       - name: Attach the windowless client, which only Windows has a use for
-        if: matrix.target == 'x86_64-pc-windows-msvc'
+        if: >
+          startsWith(github.ref, 'refs/tags/v') &&
+          matrix.target == 'x86_64-pc-windows-msvc'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -157,6 +184,7 @@ jobs:
   # is worse than a release with none.
   publish:
     needs: [plugin, client]
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
