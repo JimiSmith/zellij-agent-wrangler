@@ -15,7 +15,9 @@ pub mod registry;
 pub mod status_line;
 
 /// What a session calls itself comes from the agent's own files. The modules
-/// that read those files are behind the feature that turns file reading on.
+/// that read those files are behind `native`, the feature that turns file
+/// reading on. A client takes `json` instead. The daemon hands a client its
+/// records, and the client reads them. It goes looking for no file.
 #[cfg(feature = "native")]
 pub mod payload;
 #[cfg(feature = "native")]

@@ -41,6 +41,11 @@ out every record. It draws nothing and it reads no tmux topology. The sidebar,
 the drawing and the tmux topology are later work. The release attaches no such
 binary yet, by decision.
 
+The daemon now reads two more things out of a transcript, in the pass it already
+runs. The first is the most recent record that says something. The second is the
+tool call that no result answers yet. Both travel as they were read, so nothing
+draws them yet. The record format is 7.
+
 Delivery no longer decides which clients the daemon keeps. A client of either
 kind is kept for as long as it speaks, and given up on after ninety seconds of
 silence. A client with nothing to report beats every thirty seconds, on the
@@ -453,6 +458,37 @@ same trap as the daemon socket, in a second form, and `tests/README.md` records
 both.
 
 ## Decisions
+
+**The daemon chooses the records, and the clients get them raw.** A preview off
+the last `assistant` record alone draws blank about half the time. Measured over
+six transcripts, 94 of 196 assistant records are a tool call and nothing else.
+An agent mid-turn is exactly the agent a user asks about. So the daemon
+selects two records rather than one. It extracts no field from either. A client
+that later wants a tool's input, the number of words or a second block reads it
+out of what it already holds. The wire does not move again.
+
+**A tool call is paired with its result by id, not by position.** The reader
+holds every call that the window shows and no result answers, and it drops
+one when a result names its id. Measured over 1,906 tool calls, 58 started in a
+pair, and only the pairing tells those two apart whichever one comes back first.
+The reader parses the result records to do this. That costs 0 extra bytes at the
+median window and 11,533 at the largest, once a second per agent. The window
+itself holds 39,670 bytes at the median. The byte prefilter that skips the rest
+of the window stays.
+
+**Every state message repeats both records.** The busiest of 25 recent sessions
+changed its records 3.7 times a minute. Six agents with one of them that busy
+cost 72 KiB a minute, which is 1.2 KiB a second. That is too little to buy a
+cache with. `Slot::fill` replaces a payload that still waits to go, so the
+transport drops deliveries on purpose. A message that carried each line once
+would therefore leave a slow client with a blank preview for good.
+
+**The plugin gained a parser and no file access.** The feature that read an
+agent's files also carried the JSON. It split in two: `json` turns on the parser,
+`native` turns on the file reading and takes `json` with it. The plugin takes
+`json` alone. The wasm release artifact went from 1,526,838 bytes to 1,528,893,
+which is 2,055 bytes for the parser. Nothing in the plugin calls it yet, so the
+linker drops nearly all of it, and the real cost lands with the drawing.
 
 **The control client signals, and a query answers.** Nothing decodes the layout
 string in `%layout-change`, which is a checksum and a nested geometry grammar.

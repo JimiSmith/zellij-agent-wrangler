@@ -4,13 +4,17 @@ version.workspace = true
 edition.workspace = true
 description = "What an agent session is, told apart from whatever draws it"
 
-# The multiplexer plugins are wasm and want the types alone. Reading an agent's
-# files is what the feature turns on, and with it the JSON that parsing them
-# needs, both for the files themselves and for naming a record's process in the
-# messages that carry one.
+# Two features, because a client and the daemon need different halves.
+#
+# `json` turns on the parser alone. A client is handed records and reads them.
+# It goes looking for no file, so it takes this one and stays off the disk.
+#
+# `native` turns on reading an agent's own files, and takes `json` with it,
+# because the reader parses those files with it.
 [features]
 default = ["native"]
-native = ["dep:serde", "dep:serde_json"]
+json = ["dep:serde", "dep:serde_json"]
+native = ["json"]
 
 [dependencies]
 serde = { version = "1", optional = true, features = ["derive"] }

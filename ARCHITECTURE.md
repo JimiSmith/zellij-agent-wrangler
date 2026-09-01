@@ -306,9 +306,15 @@ could:
 
 - **Watch.** Every transcript it has been told about is looked at once a second,
   and re-read when it has moved. A session that titles itself, or is given a
-  colour, is drawn without any hook firing at all. One read answers for both
-  halves of a record: what the session is called by, and what it works with. A
-  status line therefore costs no second read and no second file.
+  colour, is drawn without any hook firing at all. One read answers for all three
+  halves of a record. The halves are what the session is called by, what it works
+  with, and the two records that a client draws a preview from. A status line
+  therefore costs no second read and no second file, and neither does a preview.
+
+  The two records are the most recent one that says something, and the tool call
+  that no result answers yet. They travel as the daemon read them, and the daemon
+  extracts nothing. A client that later wants a tool's input or a second block
+  reads it out of what it already holds. The wire does not move again.
 - **Reap.** A session whose process has gone is dropped. An agent killed without
   an `end` event used to leave a row nothing would ever take away.
 

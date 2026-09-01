@@ -77,7 +77,8 @@ Every script that starts a daemon must give the run a user of its own:
 
 An `env:` step reaches the children that the harness spawns, and not a `sh:`
 step, which runs on the host. Any host script that runs the client must set the
-same name itself. `expect-turn.sh` and `raise-call.sh` are the examples.
+same name itself. `expect-turn.sh`, `expect-records.sh` and `raise-call.sh` are
+the examples.
 
 ### Which client a run reaches
 
@@ -188,6 +189,17 @@ needs another layout names one as its third argument, the way
 `dashboard_view.steps` names `tests/dashboard.kdl`. The harness owns both files.
 `dev.kdl` is where a developer tries the sidebar by hand, so a change there must
 not move what a run asserts on.
+
+## The largest payload
+
+`transcript_records.steps` is the only run that puts a large payload through
+`zellij pipe`. It appends a tool call of 40000 characters to the transcript, and
+the record that carries it runs to about 40 KiB. The run then asserts that the
+sidebar goes on drawing the agent row.
+
+A pipe that refused the line would leave the sidebar with the state that it last
+received, which holds no agent. So the row is the proof that the line landed.
+`append-tool-call.sh` writes the record, and its second argument is the size.
 
 ## What this cannot do yet
 

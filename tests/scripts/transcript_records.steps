@@ -1,0 +1,60 @@
+# The two transcript records, from the file that an agent writes to the state
+# that the daemon holds.
+#
+# Nothing draws these records yet, so the run reads them back from the daemon.
+# What the screen proves is the other half: a record of tens of kilobytes
+# travels through `zellij pipe` and the sidebar goes on drawing. No other run
+# puts a payload of that size through that pipe.
+
+env: ZELLIJ_CONFIG_DIR=$PWD/tests/zellij-config
+env: TERM=xterm-256color
+env: XDG_STATE_HOME=$PWD/tests/out/state
+env: XDG_CACHE_HOME=$PWD/tests/out/cache
+# The daemon socket is named for the user. Without a name of its own, a run
+# reports to the daemon of the client that the developer installed.
+env: USER=wrangler-test
+
+sh?: tests/scripts/reset.sh wrangler-test-records
+
+sh: cargo build --target wasm32-wasip1 -p zellij-agent-wrangler
+sh: cargo build -p agent-wrangler
+sh: tests/scripts/make-layout.sh tests/out/records.kdl
+
+# The transcript holds what the agent said, and the tool that the agent is part
+# way through. The tool call
+# carries 40000 characters, which is what a `Write` of a whole file looks like.
+sh: printf '%s\n' '{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"text","text":"the port is done"}]}}' >> tests/out/e2e-transcript.jsonl
+sh: tests/scripts/append-tool-call.sh toolu_e2e 40000
+
+spawn: zellij --session wrangler-test-records --new-session-with-layout tests/out/records.kdl
+
+wait: notes @ 25
+
+# This is what the hook of a real agent does, from the pane that a real agent
+# runs in.
+keys: printf '%s' '{"session_id":"e2e-records","cwd":"/home/u/quarry","transcript_path":"'"$PWD"'/tests/out/e2e-transcript.jsonl"}' | "$PWD/target/debug/agent-wrangler" hook claude start\r
+sleep: 2
+
+# The daemon read both records out of the one pass that it already runs.
+sh: tests/scripts/expect-records.sh e2e-records message "the port is done"
+sh: tests/scripts/expect-records.sh e2e-records tool toolu_e2e
+
+# The row still draws. The state message carried the whole tool call, and the
+# pipe took it. A pipe that refused the line would leave the sidebar with the
+# state that it last received, which holds no agent at all.
+wait: QUARRYMARK @ 20
+dump: transcript_records_running
+
+# The tool finishes. The watch re-reads the file within a second, and the record
+# that named the call goes.
+sh: tests/scripts/append-tool-result.sh toolu_e2e
+sleep: 3
+sh: tests/scripts/expect-records.sh e2e-records tool
+sh: tests/scripts/expect-records.sh e2e-records message "the port is done"
+
+# The row is still there after the large record left the wire.
+wait: QUARRYMARK @ 20
+dump: transcript_records_finished
+
+keys: <C-q>
+sleep: 1

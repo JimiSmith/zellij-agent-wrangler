@@ -17,9 +17,12 @@ test = false
 
 [dependencies]
 zellij-tile = "0.44.3"
-# The types alone. Off wasm, reading an agent's files pulls in JSON that the
-# sidebar has no use for: it is handed records, it does not find them.
-agent-wrangler-core = { path = "../agent-wrangler-core", default-features = false }
+# The types and a JSON reader. The sidebar is handed transcript records and
+# reads them where it draws. It goes looking for no file, so it leaves the
+# feature that reads an agent's files switched off.
+agent-wrangler-core = { path = "../agent-wrangler-core", default-features = false, features = [
+    "json",
+] }
 agent-wrangler-sidebar = { path = "../agent-wrangler-sidebar" }
 # What the sidebar draws, shared by the portable application and this adapter's
 # ANSI output boundary.

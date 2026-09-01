@@ -235,8 +235,13 @@ pub fn write_message<W: Write, T: Serialize>(writer: &mut W, message: &T) -> io:
 ///
 /// A reader with no limit grows to the size of its input. A sender that never
 /// writes a newline can therefore take the daemon down, and anything that
-/// connects can do it. This limit is far above any real message. The largest
-/// message is a run of records, and a record is a few hundred bytes.
+/// connects can do it. This limit is far above any real message.
+///
+/// The largest message is a run of records. A record carries two transcript
+/// records for a client to draw a preview from, so it runs a few kilobytes. It
+/// runs to tens of kilobytes for an agent that is part way through a write. Ten
+/// such agents at once come to a few hundred kilobytes. That is a spike rather
+/// than a steady state, and it is well under this limit.
 const LONGEST: u64 = 4 * 1024 * 1024;
 
 /// Read one message from a line, or `None` at the end of the stream.

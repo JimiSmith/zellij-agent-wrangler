@@ -26,7 +26,7 @@ pub(crate) const RECORD: char = '\n';
 /// daemon keeps a client for as long as it speaks, so a client too old to beat
 /// is dropped after a minute and a half, and the pane says nothing about why. A
 /// reader that meets a number it does not know says so instead.
-pub const FORMAT: u32 = 6;
+pub const FORMAT: u32 = 7;
 
 /// The character that stands in for a record break on a transport that frames
 /// its messages by the line.
@@ -204,6 +204,29 @@ pub struct StatusFacts {
     pub context_tokens: u64,
 }
 
+/// The two transcript records that a client draws a preview from, as the daemon
+/// read them. Each one is one line of JSON, or empty for a session that reports
+/// none.
+///
+/// The daemon extracts nothing from either record. A client that later wants the
+/// tool's input, the number of words or a second block reads it out of what it
+/// already holds. The wire does not move again.
+///
+/// These records live here, and not beside the reader that finds them, because
+/// [`titles`] is behind the feature that reads an agent's files. A client is
+/// handed these records and builds without that feature.
+///
+/// [`titles`]: crate::titles
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TranscriptRecords {
+    /// The most recent `assistant` record whose content holds a text block with
+    /// something in it.
+    pub last_message: String,
+    /// The `tool_use` record of the tool that runs now. Empty for an agent that
+    /// runs none.
+    pub running_tool: String,
+}
+
 /// When a process started, as the system that runs it counts time.
 ///
 /// The number means nothing anywhere else. It is ticks since boot on Linux,
@@ -259,6 +282,9 @@ pub struct Agent {
     /// What the session works with. Empty until the agent's own files say
     /// otherwise. [`Agent::with_status`] attaches these facts.
     pub status: StatusFacts,
+    /// What the session last said, and what it runs now. Empty until the agent's
+    /// own files say otherwise. [`Agent::with_records`] attaches these records.
+    pub records: TranscriptRecords,
     /// Where the agent's own hook was invoked, as its environment described it.
     pub origin: Origin,
     /// The agent's own process, as its hook found it by a climb up its ancestry.
@@ -292,6 +318,7 @@ impl Agent {
                 title: field(&meta.title),
             },
             status: StatusFacts::default(),
+            records: TranscriptRecords::default(),
             origin,
             process: None,
             turn: Turn::default(),
@@ -309,6 +336,21 @@ impl Agent {
             branch: field(&status.branch),
             model: field(&status.model),
             context_tokens: status.context_tokens,
+        };
+        self
+    }
+
+    /// This method attaches what the session last said, and what it runs now.
+    ///
+    /// Both records lose the characters that can split a record, the same way
+    /// that [`Agent::new`] treats a label fact. A valid JSON line holds no
+    /// control character, because JSON escapes every one of them, so this call
+    /// changes nothing that the reader found. The call is what makes the
+    /// guarantee hold for a line that turns out not to be JSON.
+    pub fn with_records(mut self, records: TranscriptRecords) -> Self {
+        self.records = TranscriptRecords {
+            last_message: field(&records.last_message),
+            running_tool: field(&records.running_tool),
         };
         self
     }
@@ -332,7 +374,7 @@ impl Agent {
             None => (String::new(), String::new()),
         };
         format!(
-            "{FORMAT}{FIELD}{}{FIELD}{}{FIELD}{pid}{FIELD}{started}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}",
+            "{FORMAT}{FIELD}{}{FIELD}{}{FIELD}{pid}{FIELD}{started}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}",
             self.session.as_str(),
             self.agent,
             self.turn.encode(),
@@ -344,6 +386,8 @@ impl Agent {
             self.status.branch,
             self.status.model,
             self.status.context_tokens,
+            self.records.last_message,
+            self.records.running_tool,
             self.meta.title,
         )
     }
@@ -354,7 +398,7 @@ impl Agent {
     /// character in it still parses. No such title exists, because the
     /// constructor takes that character out.
     pub fn decode(line: &str) -> Record {
-        let mut fields = line.splitn(15, FIELD);
+        let mut fields = line.splitn(17, FIELD);
         match fields.next().and_then(|format| format.parse::<u32>().ok()) {
             Some(FORMAT) => {}
             Some(other) => return Record::Foreign(other),
@@ -381,6 +425,8 @@ impl Agent {
         let branch = fields.next()?.to_string();
         let model = fields.next()?.to_string();
         let context_tokens = fields.next()?.parse().ok()?;
+        let last_message = fields.next()?.to_string();
+        let running_tool = fields.next()?.to_string();
         let title = fields.next()?.to_string();
         // A start time says nothing without the process that it belongs to. A
         // record that names no process therefore names none, whatever the start
@@ -416,6 +462,10 @@ impl Agent {
                 branch,
                 model,
                 context_tokens,
+            })
+            .with_records(TranscriptRecords {
+                last_message,
+                running_tool,
             }),
         )
     }
@@ -443,7 +493,8 @@ pub(crate) mod tests {
     /// record that names one.
     fn whole() -> Vec<&'static str> {
         vec![
-            "one", "claude", "42", "918273", "idle", "0", "dir", "", "", "", "", "", "0", "title",
+            "one", "claude", "42", "918273", "idle", "0", "dir", "", "", "", "", "", "0", "", "",
+            "title",
         ]
     }
 
@@ -563,7 +614,7 @@ pub(crate) mod tests {
         // Nothing writes this. A record that arrived with a start time and no
         // process names a moment with nothing to attach it to.
         let orphan = record_line(&[
-            "one", "claude", "", "918273", "idle", "0", "dir", "", "", "", "", "", "0", "",
+            "one", "claude", "", "918273", "idle", "0", "dir", "", "", "", "", "", "0", "", "", "",
         ]);
         let Record::Known(read) = Agent::decode(&orphan) else {
             panic!("not a record");
@@ -629,7 +680,7 @@ pub(crate) mod tests {
     fn a_record_with_no_turn_it_recognises_decodes_to_nothing() {
         assert_eq!(
             Agent::decode(&record_line(&[
-                "one", "claude", "", "", "dozing", "0", "dir", "", "", "", "", "", "0", "",
+                "one", "claude", "", "", "dozing", "0", "dir", "", "", "", "", "", "0", "", "", "",
             ])),
             Record::None
         );
@@ -690,6 +741,73 @@ pub(crate) mod tests {
         let quiet = agent("two", 3);
         assert_eq!(quiet.status, StatusFacts::default());
         assert_eq!(Agent::decode(&quiet.encode()), Record::Known(quiet));
+    }
+
+    /// One `assistant` record with one text block, as Claude writes it.
+    fn text_record(said: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"model":"claude-opus-5","content":[{{"type":"text","text":"{said}"}}]}}}}"#
+        )
+    }
+
+    #[test]
+    fn both_transcript_records_survive_the_round_trip_and_so_does_having_neither() {
+        let talking = agent("one", 3).with_records(TranscriptRecords {
+            last_message: text_record("the port is done"),
+            running_tool: r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Bash"}]}}"#.to_string(),
+        });
+        assert_eq!(Agent::decode(&talking.encode()), Record::Known(talking));
+        let quiet = agent("two", 3);
+        assert_eq!(quiet.records, TranscriptRecords::default());
+        assert_eq!(Agent::decode(&quiet.encode()), Record::Known(quiet));
+    }
+
+    #[test]
+    fn a_transcript_record_cannot_split_the_record_it_sits_in() {
+        // JSON escapes every character that can split a line, so a record
+        // that the reader found is already safe. A line that turns out not to
+        // be JSON is made safe here.
+        let record = agent("one", 3).with_records(TranscriptRecords {
+            last_message: "a\tb\nc".to_string(),
+            running_tool: "d\te".to_string(),
+        });
+        assert_eq!(record.records.last_message, "a b c");
+        assert_eq!(record.records.running_tool, "d e");
+        assert_eq!(Agent::decode(&record.encode()), Record::Known(record));
+    }
+
+    #[test]
+    fn a_title_after_two_transcript_records_is_still_the_rest_of_the_line() {
+        // The title is the remainder of the line, and the two records sit in
+        // front of it. A record that ended one field early would take the title
+        // with it.
+        let record = Agent::new(
+            session("one"),
+            "claude",
+            meta("d", "", "the port"),
+            at_pane(1),
+        )
+        .with_records(TranscriptRecords {
+            last_message: text_record("said something"),
+            running_tool: String::new(),
+        });
+        let Record::Known(read) = Agent::decode(&record.encode()) else {
+            panic!("not a record");
+        };
+        assert_eq!(read.meta.title, "the port");
+        assert_eq!(read.records.last_message, text_record("said something"));
+        assert_eq!(read.records.running_tool, "");
+    }
+
+    #[test]
+    fn a_record_of_the_format_before_this_one_says_which_format_it_is() {
+        // The two ends of the wire are installed separately. A reader that made
+        // nothing of the line cannot tell the user why the pane is empty.
+        let older =
+            agent("one", 3)
+                .encode()
+                .replacen(&FORMAT.to_string(), &(FORMAT - 1).to_string(), 1);
+        assert_eq!(Agent::decode(&older), Record::Foreign(FORMAT - 1));
     }
 
     #[test]

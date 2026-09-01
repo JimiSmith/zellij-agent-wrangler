@@ -308,7 +308,8 @@ impl State {
                 Origin::decode(&hook.origin),
             )
         }
-        .with_status(reading.facts.status);
+        .with_status(reading.facts.status)
+        .with_records(reading.facts.records);
 
         self.sources.insert(
             session.clone(),
@@ -529,7 +530,8 @@ impl State {
                 },
                 ..held
             }
-            .with_status(found.status);
+            .with_status(found.status)
+            .with_records(found.records);
             changed |= self.registry.report(record);
         }
 
@@ -598,7 +600,7 @@ mod tests {
     use agent_wrangler_core::client_message::HEARTBEAT_INTERVAL;
     use std::cell::RefCell;
 
-    use agent_wrangler_core::agent::ProcessStartStamp;
+    use agent_wrangler_core::agent::{ProcessStartStamp, TranscriptRecords};
 
     /// A world with no files and no processes. A test states three things
     /// outright: what a transcript says, the time it last changed, and what
@@ -1037,12 +1039,24 @@ mod tests {
 
     fn works_with(branch: &str, model: &str, context_tokens: u64) -> SessionFacts {
         SessionFacts {
-            label: LabelFacts::default(),
             status: agent_wrangler_core::agent::StatusFacts {
                 branch: branch.to_string(),
                 model: model.to_string(),
                 context_tokens,
             },
+            ..SessionFacts::default()
+        }
+    }
+
+    /// Facts holding the two transcript records alone: what the session last
+    /// said, and the tool that runs now.
+    fn facts_with_records(last_message: &str, running_tool: &str) -> SessionFacts {
+        SessionFacts {
+            records: TranscriptRecords {
+                last_message: last_message.to_string(),
+                running_tool: running_tool.to_string(),
+            },
+            ..SessionFacts::default()
         }
     }
 
@@ -1077,6 +1091,50 @@ mod tests {
         let held = state.registry().get(&session("one")).unwrap();
         assert_eq!(held.status.branch, "daemon");
         assert_eq!(held.status.context_tokens, 91_000);
+    }
+
+    #[test]
+    fn a_hook_files_what_the_session_last_said_and_what_it_runs() {
+        let world = Fake::default();
+        world.reads("/t/one.jsonl", facts_with_records("{said}", "{running}"), 1);
+        let mut state = State::default();
+        state.on_hook(&hook("start"), &world);
+        let held = state.registry().get(&session("one")).unwrap();
+        assert_eq!(held.records.last_message, "{said}");
+        assert_eq!(held.records.running_tool, "{running}");
+    }
+
+    #[test]
+    fn watching_states_afresh_what_the_session_last_said() {
+        // An agent answers with no hook between, and the watch carries the new
+        // answer to a client.
+        let world = Fake::default();
+        world.reads("/t/one.jsonl", facts_with_records("{first}", ""), 1);
+        world.running(AGENT);
+        let mut state = State::default();
+        state.on_hook(&hook("start"), &world);
+
+        world.reads("/t/one.jsonl", facts_with_records("{second}", ""), 2);
+        assert!(state.poll(&world));
+        let held = state.registry().get(&session("one")).unwrap();
+        assert_eq!(held.records.last_message, "{second}");
+    }
+
+    #[test]
+    fn a_tool_that_finished_leaves_the_record_that_named_it() {
+        // The scan states every transcript fact afresh. A record that kept the
+        // tool call would draw a tool that stopped running.
+        let world = Fake::default();
+        world.reads("/t/one.jsonl", facts_with_records("{said}", "{running}"), 1);
+        world.running(AGENT);
+        let mut state = State::default();
+        state.on_hook(&hook("start"), &world);
+
+        world.reads("/t/one.jsonl", facts_with_records("{said}", ""), 2);
+        assert!(state.poll(&world));
+        let held = state.registry().get(&session("one")).unwrap();
+        assert_eq!(held.records.running_tool, "");
+        assert_eq!(held.records.last_message, "{said}");
     }
 
     #[test]
