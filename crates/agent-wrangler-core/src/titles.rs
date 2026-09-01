@@ -14,6 +14,10 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::agent::{LabelFacts, StatusFacts, TranscriptRecords};
+// The reader that finds a record and the reader that draws it ask the same
+// three questions of it. Those three live beside the drawing's reader, which is
+// behind `json`, and `native` takes `json` with it.
+use crate::preview::{content_blocks, holds_text, string_field};
 
 /// Everything that an agent's own files say about one session: what it is
 /// called by, and what it works with.
@@ -50,36 +54,6 @@ fn read_tail(path: &Path) -> Option<(Vec<u8>, bool)> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).ok()?;
     Some((bytes, size > TAIL))
-}
-
-/// A record's string field, or `None` when it is absent or empty.
-fn string_field<'a>(record: &'a Value, key: &str) -> Option<&'a str> {
-    record
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-}
-
-/// The content blocks of one record, or nothing for a record that carries none.
-///
-/// Claude writes one block per record today. The reader still walks every block,
-/// because a record that carried two would otherwise report only the first one.
-fn content_blocks(record: &Value) -> &[Value] {
-    record
-        .get("message")
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-}
-
-/// Whether a block is text with something in it.
-///
-/// A thinking block is not text. Claude writes the signature of its reasoning
-/// and not the reasoning, so such a block carries nothing that a reader can
-/// draw.
-fn holds_text(block: &Value) -> bool {
-    string_field(block, "type") == Some("text") && string_field(block, "text").is_some()
 }
 
 /// The id of a tool call, for a block that is one.

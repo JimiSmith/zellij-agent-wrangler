@@ -10,8 +10,10 @@
 //! costs two sequences rather than thirty.
 
 use ratatui_core::buffer::{Buffer, Cell};
+use ratatui_core::layout::{Position, Rect};
 use ratatui_core::style::{Color, Modifier};
-use ratatui_core::widgets::Widget;
+use ratatui_core::widgets::{StatefulWidget, Widget};
+use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
 use crate::frame::Frame;
 use crate::model::RowKey;
@@ -156,19 +158,43 @@ fn buffer_to_ansi(buffer: &Buffer) -> String {
     out
 }
 
-/// One frame, as the bytes that put it on screen.
+/// One frame, as the bytes that put it on screen, with `scroll` naming the row
+/// that the top of the pane sits on.
 ///
 /// The function makes a buffer of its own every time, because a client that can
 /// only print has no previous frame to diff against. Such a client reprints the
 /// whole pane or nothing at all.
-pub fn frame_to_ansi(frame: &Frame, selected: Option<&RowKey>) -> String {
-    let area = frame.area();
-    let mut buffer = Buffer::empty(area);
-    Sidebar {
+///
+/// A frame can be taller than its pane, because the dashboard keeps every row.
+/// The rows are drawn into a buffer of the frame's own height, and the scroll
+/// view clips that buffer to the pane. Both scrollbars are switched off: a
+/// scrollbar takes a column from the right edge, and that column is the turn
+/// marker's.
+pub fn frame_to_ansi(frame: &Frame, selected: Option<&RowKey>, offset: usize) -> String {
+    let pane = frame.area();
+    let mut buffer = Buffer::empty(pane);
+    let drawn = Sidebar {
         lines: frame.lines(),
         selected,
+    };
+    // A scroll view of no height panics where it draws its scrollbars, and a
+    // frame of no rows has nothing to clip anyway.
+    let height = u16::try_from(frame.lines().len()).unwrap_or(u16::MAX);
+    if height == 0 || pane.width == 0 || pane.height == 0 {
+        return buffer_to_ansi(&buffer);
     }
-    .render(area, &mut buffer);
+    let content = Rect::new(0, 0, pane.width, height);
+    let mut view = ScrollView::new(content.as_size())
+        .vertical_scrollbar_visibility(ScrollbarVisibility::Never)
+        .horizontal_scrollbar_visibility(ScrollbarVisibility::Never);
+    drawn.render(content, view.buf_mut());
+    let top = Position::new(0, u16::try_from(offset).unwrap_or(u16::MAX));
+    StatefulWidget::render(
+        &view,
+        pane,
+        &mut buffer,
+        &mut ScrollViewState::with_offset(top),
+    );
     buffer_to_ansi(&buffer)
 }
 
@@ -176,11 +202,114 @@ pub fn frame_to_ansi(frame: &Frame, selected: Option<&RowKey>) -> String {
 mod tests {
     use super::*;
 
-    use ratatui_core::layout::Rect;
     use ratatui_core::style::Style;
+
+    use crate::frame::{build_frame, RowsPastTheFoot};
+    use crate::model::{Row, RowContent};
+    use crate::options::DrawingOptions;
 
     fn buffer(width: u16, height: u16) -> Buffer {
         Buffer::empty(Rect::new(0, 0, width, height))
+    }
+
+    /// The columns of the pane that the scrolling tests draw into.
+    const PANE_COLUMNS: u16 = 10;
+
+    /// A frame of `rows` header rows, each naming its own number, composed for
+    /// a pane `height` rows tall.
+    fn frame_of_numbered_rows(rows: usize, height: u16) -> Frame {
+        let lines: Vec<Row> = (0..rows)
+            .map(|at| {
+                Row::new(RowContent::Header {
+                    text: format!("row {at}"),
+                })
+            })
+            .collect();
+        build_frame(
+            &[],
+            &lines,
+            &[],
+            Rect::new(0, 0, PANE_COLUMNS, height),
+            RowsPastTheFoot::Keep,
+            &DrawingOptions::default(),
+        )
+    }
+
+    /// The rows of a drawn pane, with every escape sequence dropped and the
+    /// padding at the end of each row kept.
+    fn drawn_rows(text: &str) -> Vec<String> {
+        let mut plain = String::new();
+        let mut inside = false;
+        for c in text.chars() {
+            match (inside, c) {
+                (false, '\u{1b}') => inside = true,
+                (true, 'm') => inside = false,
+                (true, _) => {}
+                (false, _) => plain.push(c),
+            }
+        }
+        plain.split("\r\n").map(str::to_string).collect()
+    }
+
+    /// The rows of a drawn pane, with the padding at the end of each dropped.
+    fn rows_without_padding(text: &str) -> Vec<String> {
+        drawn_rows(text)
+            .iter()
+            .map(|row| row.trim().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_pane_draws_the_rows_that_the_offset_names() {
+        let frame = frame_of_numbered_rows(10, 3);
+        // A heading row draws its text in capitals, with the indent that
+        // every heading takes.
+        assert_eq!(
+            rows_without_padding(&frame_to_ansi(&frame, None, 0)),
+            ["ROW 0", "ROW 1", "ROW 2"]
+        );
+        assert_eq!(
+            rows_without_padding(&frame_to_ansi(&frame, None, 4)),
+            ["ROW 4", "ROW 5", "ROW 6"]
+        );
+    }
+
+    #[test]
+    fn an_offset_past_the_last_row_still_draws_a_whole_pane() {
+        // The application clamps the offset. A client that hands over a stale
+        // one must still get a pane rather than blanks or a panic.
+        let frame = frame_of_numbered_rows(10, 3);
+        assert_eq!(
+            rows_without_padding(&frame_to_ansi(&frame, None, 40)),
+            ["ROW 7", "ROW 8", "ROW 9"]
+        );
+    }
+
+    #[test]
+    fn the_scroll_draws_nothing_in_the_column_that_the_turn_marker_takes() {
+        // A scrollbar would take the rightmost column of the pane. That column
+        // belongs to the turn marker, so both scrollbars are switched off.
+        let frame = frame_of_numbered_rows(40, 4);
+        for offset in [0, 1, 20, 36] {
+            for row in drawn_rows(&frame_to_ansi(&frame, None, offset)) {
+                assert_eq!(row.chars().count(), PANE_COLUMNS as usize, "{offset}");
+                assert_eq!(row.chars().last(), Some(' '), "{offset}: {row}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_frame_shorter_than_its_pane_draws_what_it_has() {
+        assert_eq!(
+            rows_without_padding(&frame_to_ansi(&frame_of_numbered_rows(2, 5), None, 0)).len(),
+            5
+        );
+    }
+
+    #[test]
+    fn a_frame_of_no_rows_draws_a_blank_pane() {
+        let drawn = frame_to_ansi(&frame_of_numbered_rows(0, 3), None, 0);
+        assert_eq!(rows_without_padding(&drawn), ["", "", ""]);
     }
 
     #[test]

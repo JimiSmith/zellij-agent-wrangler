@@ -14,13 +14,17 @@
 
 use agent_wrangler_core::agent::{Agent, Turn};
 use agent_wrangler_core::label::label;
+use agent_wrangler_core::preview::{Preview, ToolCall};
 use agent_wrangler_core::status_line::{short_model_name, short_token_count};
 
-use crate::model::{CellAlignment, NamedColor, Row, RowContent, RowKey, TableCell};
+use crate::model::{
+    Branch, CellAlignment, NamedColor, OpenPreviews, Placement, Row, RowContent, RowKey,
+    RowPreview, TableCell,
+};
 use crate::options::DrawingOptions;
 use crate::render::{
-    cut_to_columns, DASHBOARD_CELL_GAP, DASHBOARD_MARKER_GAP, DASHBOARD_MARKER_INSET,
-    DASHBOARD_NAME_COLUMN,
+    cut_to_columns, wrap, DASHBOARD_CELL_GAP, DASHBOARD_MARKER_GAP, DASHBOARD_MARKER_INSET,
+    DASHBOARD_NAME_COLUMN, PREVIEW_TEXT_COLUMN,
 };
 use crate::tree::{indicator, pane_placement, Pane, Tab};
 
@@ -29,6 +33,33 @@ use crate::tree::{indicator, pane_placement, Pane, Tab};
 const WANTS_YOU: &str = "wants you";
 const WORKING: &str = "working";
 const IDLE: &str = "idle";
+
+/// What the block says for an agent that reports no message.
+///
+/// Every row opens. A block that drew nothing would leave the user to guess
+/// whether the agent said nothing or the sidebar failed to read it.
+const NO_MESSAGE: &str = "this agent reports no message";
+
+/// The word that leads the tool line, so the line reads as the present rather
+/// than as one more thing the agent said.
+const RUNNING_NOW: &str = "now: ";
+
+/// The widest that a message is wrapped to, whatever the pane can hold.
+///
+/// A line of prose that spans a whole wide pane is hard to read, because the
+/// eye loses the start of the next line. The table is dense and prose is not,
+/// so the measure is held here and does not grow with the pane.
+///
+/// A modern pane is wide. The measure is therefore set well above the width of
+/// a printed page, and it holds only the widest panes back.
+const PREVIEW_MEASURE: usize = 120;
+
+/// The widest that a tool's argument is drawn in.
+///
+/// An argument can hold a path, a URL or a secret. The name alone says that the
+/// agent is busy, and a short argument says what it is busy with. Neither needs
+/// the whole value, so a long one is cut and the cut is marked.
+const TOOL_ARGUMENT_COLUMNS: usize = 40;
 
 /// The fewest columns that the AGENT column is drawn in.
 ///
@@ -202,6 +233,107 @@ fn cell(text: &str, width: usize, alignment: CellAlignment) -> TableCell {
     }
 }
 
+/// The columns that one line of a block has for its text in a pane `width`
+/// columns wide.
+///
+/// The text starts past the tree glyph, and stops before the turn marker of the
+/// rows around it. The measure then holds the result down, so a wide pane does
+/// not draw one long line of prose.
+fn preview_field(width: usize) -> usize {
+    width
+        .saturating_sub(PREVIEW_TEXT_COLUMN + DASHBOARD_MARKER_GAP + 1 + DASHBOARD_MARKER_INSET)
+        .clamp(1, PREVIEW_MEASURE)
+}
+
+/// The tool line, spelled `now: Bash(cargo clippy --workspace --all-t…)`.
+///
+/// A tool that names no argument draws its name alone. The name says that the
+/// agent is busy, which is most of what the line is for.
+fn tool_line(call: &ToolCall, field: usize) -> String {
+    let name = cut_to_columns(
+        &call.name,
+        field.saturating_sub(RUNNING_NOW.chars().count()),
+    );
+    if call.argument.is_empty() {
+        return format!("{RUNNING_NOW}{name}");
+    }
+    let room = field
+        .saturating_sub(RUNNING_NOW.chars().count() + name.chars().count() + 2)
+        .min(TOOL_ARGUMENT_COLUMNS);
+    let argument = cut_to_columns(&call.argument, room);
+    format!("{RUNNING_NOW}{name}({argument})")
+}
+
+/// One line of a block, before the tree glyph of that line is decided. The
+/// glyph depends on how many lines follow, which is known only once every line
+/// is built.
+enum PreviewLine {
+    Message(String),
+    Time(String),
+    Tool(String),
+}
+
+impl PreviewLine {
+    /// The row content of this line. The line hangs from `branch`.
+    fn content(self, placement: Placement, branch: Branch) -> RowContent {
+        match self {
+            PreviewLine::Message(text) => RowContent::PreviewMessage {
+                placement,
+                branch,
+                text,
+            },
+            PreviewLine::Time(text) => RowContent::PreviewTime {
+                placement,
+                branch,
+                text,
+            },
+            PreviewLine::Tool(text) => RowContent::PreviewTool {
+                placement,
+                branch,
+                text,
+            },
+        }
+    }
+}
+
+/// The block that hangs under one open row: what the agent last said, when it
+/// said so, and the tool it runs now.
+///
+/// Every line carries the key of the agent it describes, the way a notification
+/// entry does. A click anywhere in the block therefore reaches the same pane,
+/// and the keys step over the block as one thing.
+fn preview_rows(place: &AgentPlace<'_>, field: usize) -> Vec<Row> {
+    let preview = Preview::from_records(&place.agent.records);
+    let placement = pane_placement(place.tab.active, place.pane.focused);
+    let key = RowKey::Agent(place.agent.session.clone());
+
+    let mut message = wrap(&preview.message, field);
+    if message.is_empty() {
+        message = vec![NO_MESSAGE.to_string()];
+    }
+    let mut lines: Vec<PreviewLine> = message.into_iter().map(PreviewLine::Message).collect();
+    if !preview.timestamp.is_empty() {
+        lines.push(PreviewLine::Time(preview.timestamp));
+    }
+    if let Some(call) = &preview.running_tool {
+        lines.push(PreviewLine::Tool(tool_line(call, field)));
+    }
+
+    // The last line closes the tree, and nothing is drawn below it.
+    let count = lines.len();
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(at, line)| {
+            let branch = match at + 1 == count {
+                true => Branch::Last,
+                false => Branch::More,
+            };
+            Row::new(line.content(placement, branch)).with_key(key.clone())
+        })
+        .collect()
+}
+
 /// The rows that a client draws for the dashboard, in the order they are drawn
 /// and navigated.
 ///
@@ -212,7 +344,12 @@ fn cell(text: &str, width: usize, alignment: CellAlignment) -> TableCell {
 /// waited longest".
 ///
 /// [`Registry::calling`]: agent_wrangler_core::registry::Registry::calling
-pub fn build_dashboard(tabs: &[Tab], width: usize, options: &DrawingOptions) -> Vec<Row> {
+pub fn build_dashboard(
+    tabs: &[Tab],
+    width: usize,
+    open: &OpenPreviews,
+    options: &DrawingOptions,
+) -> Vec<Row> {
     let mut places = agents_in_tree_order(tabs);
     if places.is_empty() {
         return vec![Row::new(RowContent::DashboardNoAgents)];
@@ -231,24 +368,35 @@ pub fn build_dashboard(tabs: &[Tab], width: usize, options: &DrawingOptions) -> 
             .map(|(column, width)| cell(column.heading(), *width, column.alignment()))
             .collect(),
     })];
-    rows.extend(places.iter().map(|place| {
-        Row::new(RowContent::DashboardAgent {
-            placement: pane_placement(place.tab.active, place.pane.focused),
-            turn: place.agent.turn,
-            color: NamedColor::for_agent(place.agent),
-            name: cell(
-                &label(place.agent, options.label),
-                name_width,
-                CellAlignment::Left,
-            ),
-            cells: columns
-                .iter()
-                .map(|(column, width)| cell(&column.spell(place), *width, column.alignment()))
-                .collect(),
-        })
-        .with_indicator(indicator(place.agent, options))
-        .with_key(RowKey::Agent(place.agent.session.clone()))
-    }));
+    let field = preview_field(width);
+    for place in &places {
+        let showing = match open.holds(&place.agent.session) {
+            true => RowPreview::Open,
+            false => RowPreview::Closed,
+        };
+        rows.push(
+            Row::new(RowContent::DashboardAgent {
+                placement: pane_placement(place.tab.active, place.pane.focused),
+                turn: place.agent.turn,
+                color: NamedColor::for_agent(place.agent),
+                preview: showing,
+                name: cell(
+                    &label(place.agent, options.label),
+                    name_width,
+                    CellAlignment::Left,
+                ),
+                cells: columns
+                    .iter()
+                    .map(|(column, width)| cell(&column.spell(place), *width, column.alignment()))
+                    .collect(),
+            })
+            .with_indicator(indicator(place.agent, options))
+            .with_key(RowKey::Agent(place.agent.session.clone())),
+        );
+        if showing == RowPreview::Open {
+            rows.extend(preview_rows(place, field));
+        }
+    }
     rows
 }
 
@@ -256,7 +404,7 @@ pub fn build_dashboard(tabs: &[Tab], width: usize, options: &DrawingOptions) -> 
 mod tests {
     use super::*;
 
-    use agent_wrangler_core::agent::{LabelFacts, SessionId, StatusFacts};
+    use agent_wrangler_core::agent::{LabelFacts, SessionId, StatusFacts, TranscriptRecords};
     use agent_wrangler_core::label::Label;
     use agent_wrangler_core::origin::Origin;
     use agent_wrangler_core::status_line::StatusTemplate;
@@ -353,7 +501,12 @@ mod tests {
     }
 
     fn dashboard(tabs: &[Tab], width: usize) -> Vec<Row> {
-        build_dashboard(tabs, width, &DrawingOptions::default())
+        build_dashboard(
+            tabs,
+            width,
+            &OpenPreviews::default(),
+            &DrawingOptions::default(),
+        )
     }
 
     /// The AGENT cell of every agent row, with the padding dropped.
@@ -591,7 +744,7 @@ mod tests {
             turn_state: false,
             ..DrawingOptions::default()
         };
-        let rows = build_dashboard(&session(), WIDE, &quiet);
+        let rows = build_dashboard(&session(), WIDE, &OpenPreviews::default(), &quiet);
         assert!(rows[1..].iter().all(|row| row.indicator == Indicator::None));
         assert_eq!(cell_text(&rows, 1, 0), WANTS_YOU);
     }
@@ -638,7 +791,240 @@ mod tests {
             true,
             vec![pane(1, "claude", true, vec![record])],
         )];
-        assert_eq!(names(&build_dashboard(&tabs, WIDE, &named)), ["wrangler"]);
+        assert_eq!(
+            names(&build_dashboard(
+                &tabs,
+                WIDE,
+                &OpenPreviews::default(),
+                &named
+            )),
+            ["wrangler"]
+        );
+    }
+
+    /// An agent that reports the two records the daemon sends. Each one is a
+    /// line of JSON: the message the agent wrote, and the tool that runs now.
+    fn agent_reporting_records(id: &str, message: &str, tool: &str) -> Agent {
+        let mut agent = working(id, "the zellij port");
+        agent = agent.with_records(TranscriptRecords {
+            last_message: match message.is_empty() {
+                true => String::new(),
+                false => format!(
+                    r#"{{"type":"assistant","timestamp":"2026-09-01T05:11:01.469Z","message":{{"content":[{{"type":"text","text":"{message}"}}]}}}}"#
+                ),
+            },
+            running_tool: match tool.is_empty() {
+                true => String::new(),
+                false => format!(
+                    r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"toolu_one","name":"Bash","input":{{"command":"{tool}"}}}}]}}}}"#
+                ),
+            },
+        });
+        agent
+    }
+
+    /// One tab holding one agent. A block is drawn under such an agent.
+    fn session_with_one_agent(agent: Agent) -> Vec<Tab> {
+        vec![tab(
+            0,
+            "wrangler",
+            true,
+            vec![pane(1, "claude", true, vec![agent])],
+        )]
+    }
+
+    /// Every session whose block is drawn.
+    fn open_previews(sessions: &[&str]) -> OpenPreviews {
+        let mut open = OpenPreviews::default();
+        for session in sessions {
+            open.open_or_close(&SessionId::new(session).unwrap());
+        }
+        open
+    }
+
+    /// The block rows of a dashboard, as the text of each line with the
+    /// trailing padding dropped.
+    fn block_lines(rows: &[Row]) -> Vec<String> {
+        rows.iter()
+            .filter(|row| {
+                matches!(
+                    row.content,
+                    RowContent::PreviewMessage { .. }
+                        | RowContent::PreviewTime { .. }
+                        | RowContent::PreviewTool { .. }
+                )
+            })
+            .map(|row| row_text(&row.content).trim_end().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_closed_row_draws_no_block() {
+        let tabs = session_with_one_agent(agent_reporting_records(
+            "two",
+            "the port is done",
+            "cargo test",
+        ));
+        assert!(block_lines(&dashboard(&tabs, WIDE)).is_empty());
+    }
+
+    #[test]
+    fn an_open_row_draws_the_message_then_the_time_then_the_tool() {
+        let tabs = session_with_one_agent(agent_reporting_records(
+            "two",
+            "the port is done",
+            "cargo test",
+        ));
+        let rows = build_dashboard(
+            &tabs,
+            WIDE,
+            &open_previews(&["two"]),
+            &DrawingOptions::default(),
+        );
+        assert_eq!(
+            block_lines(&rows),
+            [
+                // The gutter carries down the block, because the block belongs
+                // to the same pane as the row above it.
+                "\u{258c}   \u{2502}   the port is done",
+                "\u{258c}   \u{2502}   2026-09-01 05:11Z",
+                "\u{258c}   \u{2514}   now: Bash(cargo test)",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_tree_glyph_of_a_block_sits_under_the_kind_icon_of_its_row() {
+        // The block hangs off the row above it. A glyph in any other column
+        // reads as a row of its own rather than as detail of that row.
+        let tabs = session_with_one_agent(agent_reporting_records("two", "the port is done", ""));
+        let rows = build_dashboard(
+            &tabs,
+            WIDE,
+            &open_previews(&["two"]),
+            &DrawingOptions::default(),
+        );
+        let icon = DASHBOARD_NAME_COLUMN - 3;
+        for line in block_lines(&rows) {
+            let glyph = line.chars().nth(icon);
+            assert!(
+                glyph == Some('\u{2502}') || glyph == Some('\u{2514}'),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_line_of_a_block_carries_the_key_of_its_agent() {
+        // A click anywhere in the block reaches the same pane, and the keys
+        // step over the block as one thing.
+        let tabs = session_with_one_agent(agent_reporting_records(
+            "two",
+            "the port is done",
+            "cargo test",
+        ));
+        let rows = build_dashboard(
+            &tabs,
+            WIDE,
+            &open_previews(&["two"]),
+            &DrawingOptions::default(),
+        );
+        let key = Some(RowKey::Agent(SessionId::new("two").unwrap()));
+        assert_eq!(rows.iter().filter(|row| row.key == key).count(), 4);
+    }
+
+    #[test]
+    fn an_agent_that_reports_no_message_says_so_rather_than_drawing_nothing() {
+        // This is the Copilot case. The daemon never opens a Copilot
+        // transcript, so such a session reports no records at all.
+        let tabs = session_with_one_agent(agent_reporting_records("two", "", ""));
+        let rows = build_dashboard(
+            &tabs,
+            WIDE,
+            &open_previews(&["two"]),
+            &DrawingOptions::default(),
+        );
+        assert_eq!(
+            block_lines(&rows),
+            [format!("\u{258c}   \u{2514}   {NO_MESSAGE}")]
+        );
+    }
+
+    #[test]
+    fn an_agent_that_runs_no_tool_draws_no_tool_line() {
+        let tabs = session_with_one_agent(agent_reporting_records("two", "the port is done", ""));
+        let rows = build_dashboard(
+            &tabs,
+            WIDE,
+            &open_previews(&["two"]),
+            &DrawingOptions::default(),
+        );
+        assert_eq!(
+            block_lines(&rows).len(),
+            2,
+            "the message and the time alone"
+        );
+    }
+
+    #[test]
+    fn a_message_wraps_to_the_measure_and_the_measure_does_not_grow_with_the_pane() {
+        let long = "word ".repeat(80);
+        let tabs = session_with_one_agent(agent_reporting_records("two", long.trim(), ""));
+        let widest = |width: usize| {
+            let rows = build_dashboard(
+                &tabs,
+                width,
+                &open_previews(&["two"]),
+                &DrawingOptions::default(),
+            );
+            block_lines(&rows)
+                .iter()
+                .map(|line| line.chars().count())
+                .max()
+                .unwrap_or(0)
+        };
+        // A pane narrower than the measure wraps to what the pane holds.
+        assert!(widest(WIDE) <= WIDE, "{} drew {}", WIDE, widest(WIDE));
+        // Two panes wider than the measure wrap the same way, so the wrapping
+        // does not move when the pane grows. The measure holds the text, and
+        // the last word of a line can leave a few columns unused.
+        assert_eq!(widest(400), widest(800));
+        assert!(widest(400) <= PREVIEW_TEXT_COLUMN + PREVIEW_MEASURE);
+        assert!(widest(400) > PREVIEW_TEXT_COLUMN + PREVIEW_MEASURE - "word ".len());
+    }
+
+    #[test]
+    fn a_long_tool_argument_is_cut_and_the_cut_is_marked() {
+        let tabs = session_with_one_agent(agent_reporting_records(
+            "two",
+            "a message",
+            &"long ".repeat(40),
+        ));
+        let rows = build_dashboard(
+            &tabs,
+            WIDE,
+            &open_previews(&["two"]),
+            &DrawingOptions::default(),
+        );
+        let tool = block_lines(&rows).pop().unwrap();
+        assert!(tool.contains('\u{2026}'), "{tool}");
+        assert!(tool.chars().count() <= PREVIEW_TEXT_COLUMN + PREVIEW_MEASURE);
+    }
+
+    #[test]
+    fn a_row_marks_whether_its_block_is_open() {
+        let tabs = session_with_one_agent(agent_reporting_records("two", "the port is done", ""));
+        for (open, glyph) in [
+            (open_previews(&["two"]), '\u{25be}'),
+            (OpenPreviews::default(), '\u{25b8}'),
+        ] {
+            let rows = build_dashboard(&tabs, WIDE, &open, &DrawingOptions::default());
+            let row = row_text(&rows[1].content);
+            // The gutter, then a blank column, then the marker, then a
+            // blank column. The marker has room to breathe on each side.
+            let marks: Vec<char> = row.chars().take(4).collect();
+            assert_eq!(marks, ['\u{258c}', ' ', glyph, ' '], "{row}");
+        }
     }
 
     #[test]
@@ -649,6 +1035,9 @@ mod tests {
             status_line: StatusTemplate::new("{branch} · {model}"),
             ..DrawingOptions::default()
         };
-        assert_eq!(build_dashboard(&session(), WIDE, &lined).len(), 4);
+        assert_eq!(
+            build_dashboard(&session(), WIDE, &OpenPreviews::default(), &lined).len(),
+            4
+        );
     }
 }

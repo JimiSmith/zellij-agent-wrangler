@@ -1,0 +1,70 @@
+# Preview mode, end to end. The space key opens the row under the cursor. The
+# block then draws what the agent last said, when it said so, and the tool that
+# it runs now.
+#
+# Only this run proves that the plugin draws the block, because
+# `zellij action dump-screen` returns nothing for the pane of a plugin. This
+# run is also the only one that sends a key to the sidebar rather than to a
+# shell. So it moves the focus onto the sidebar pane first.
+
+env: ZELLIJ_CONFIG_DIR=$PWD/tests/zellij-config
+env: TERM=xterm-256color
+env: XDG_STATE_HOME=$PWD/tests/out/state
+env: XDG_CACHE_HOME=$PWD/tests/out/cache
+# The daemon socket is named for the user. Without a name of its own, a run
+# reports to the daemon of the client that the developer installed.
+env: USER=wrangler-test
+
+sh?: tests/scripts/reset.sh wrangler-test-preview
+
+sh: cargo build --target wasm32-wasip1 -p zellij-agent-wrangler
+sh: cargo build -p agent-wrangler
+sh: tests/scripts/make-layout.sh tests/out/preview.kdl off tests/dashboard.kdl
+
+# What the agent last said, with the timestamp that every real record carries.
+# The block draws the date and the minute of it, marked as UTC.
+sh: printf '%s\n' '{"type":"assistant","timestamp":"2026-09-01T05:11:01.469Z","gitBranch":"main","message":{"model":"claude-opus-5","content":[{"type":"text","text":"SPYGLASS is what the agent said"}]}}' >> tests/out/e2e-transcript.jsonl
+
+# The tool that runs now. Nothing answers this call, so the daemon reports it
+# for as long as the run lasts.
+sh: printf '%s\n' '{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_preview","name":"Bash","input":{"command":"cargo test --workspace"}}]}}' >> tests/out/e2e-transcript.jsonl
+
+# The table needs more room than a sidebar column. The default window is 80
+# columns, and the sidebar of this layout alone is 96.
+resize: 40x160
+
+spawn: zellij --session wrangler-test-preview --new-session-with-layout tests/out/preview.kdl
+
+wait: no agents @ 25
+
+# The hook of a real agent does exactly this, from the pane that a real agent
+# runs in.
+keys: printf '%s' '{"session_id":"preview-one","cwd":"/home/u/quarry","transcript_path":"'"$PWD"'/tests/out/e2e-transcript.jsonl"}' | "$PWD/target/debug/agent-wrangler" hook claude start\r
+sleep: 2
+wait: QUARRYMARK @ 20
+
+# Nothing is drawn under the row until the row is opened.
+wait: ▸ @ 20
+
+# `keys:` writes to the pty of the whole zellij client, so the keystroke lands
+# wherever the focus is. The sidebar is the left pane of the layout, and Alt-h
+# is the stock binding that moves the focus left.
+keys: \eh
+sleep: 1
+keys: \s
+sleep: 2
+
+# The three things the block holds, in the order it draws them.
+wait: SPYGLASS is what the agent said @ 20
+wait: 2026-09-01 05:11Z @ 20
+wait: now: Bash(cargo test --workspace) @ 20
+dump: preview_open
+
+# The same key closes the row again.
+keys: \s
+sleep: 2
+waitgone: SPYGLASS is what the agent said @ 20
+dump: preview_closed
+
+keys: <C-q>
+sleep: 1

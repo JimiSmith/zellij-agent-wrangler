@@ -81,17 +81,14 @@ layout {
     // The shell pane is where a developer starts an agent. Without it the tab
     // opens on a plugin pane, which takes no keys.
     tab name="dashboard" focus=true {
-        pane split_direction="vertical" {
-            pane {
-                plugin location="PLUGIN_LOCATION" {
-                    // Only what differs from the block above. Every other
-                    // option keeps its default, which is what a reader of this
-                    // tab wants to see the dashboard drawn with.
-                    dashboard true
-                    install_hooks "CLIENT_LOCATION"
-                }
+        pane focus=true {
+            plugin location="PLUGIN_LOCATION" {
+                // Only what differs from the block above. Every other
+                // option keeps its default, which is what a reader of this
+                // tab wants to see the dashboard drawn with.
+                dashboard true
+                install_hooks "CLIENT_LOCATION"
             }
-            pane size=32 focus=true
         }
     }
     tab name="wrangler" {

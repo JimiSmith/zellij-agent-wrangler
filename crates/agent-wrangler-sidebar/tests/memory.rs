@@ -199,7 +199,11 @@ fn step(app: &mut Application, step: usize) {
     app.reduce(Input::EventSettled);
 
     let rendered = app.render(area());
-    let drawn = ansi::frame_to_ansi(&rendered.frame, rendered.selection.as_ref());
+    let drawn = ansi::frame_to_ansi(
+        &rendered.frame,
+        rendered.selection.as_ref(),
+        rendered.offset,
+    );
     std::hint::black_box(&drawn);
 }
 

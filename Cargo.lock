@@ -51,6 +51,7 @@ version = "0.1.16"
 dependencies = [
  "agent-wrangler-core",
  "ratatui-core",
+ "tui-scrollview",
 ]
 
 [[package]]
@@ -2543,6 +2544,17 @@ checksum = "97d095ae15e245a057c8e8451bab9b3ee1e1f68e9ba2b4fbc18d0ac5237835f2"
 dependencies = [
  "pin-project",
  "tracing",
+]
+
+[[package]]
+name = "tui-scrollview"
+version = "0.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04907b1a2a41660933df8e64205abc7de4a4b320e808abcb00b9377069ac9d31"
+dependencies = [
+ "indoc",
+ "ratatui-core",
+ "ratatui-widgets",
 ]
 
 [[package]]

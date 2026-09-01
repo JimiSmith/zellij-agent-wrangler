@@ -96,6 +96,17 @@ fn notification_area(
     rows
 }
 
+/// What a frame does with the rows that the pane cannot hold.
+///
+/// The tree cuts, so a frame is exactly as tall as the pane and the calls stay
+/// pinned to its foot. The dashboard keeps, because a row that opens its block
+/// pushes every row under it past the foot, and those rows must stay reachable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowsPastTheFoot {
+    Cut,
+    Keep,
+}
+
 /// The rows of one pane, ready to be drawn, and the pane they were composed for.
 ///
 /// The two travel together, because neither one says anything without the other.
@@ -123,11 +134,16 @@ impl Frame {
 /// What the client says about itself leads, the tree follows, and the calls are
 /// pinned to the foot. Blank rows fill whatever is left between the tree and the
 /// calls.
+///
+/// `past_the_foot` decides what happens to rows that the pane cannot hold. A
+/// frame that keeps them is taller than its pane, and the client scrolls over
+/// it.
 pub fn build_frame(
     problems: &[ClientProblem<'_>],
     tree: &[Row],
     notices: &[Notification],
     area: Rect,
+    past_the_foot: RowsPastTheFoot,
     options: &DrawingOptions,
 ) -> Frame {
     let width = area.width as usize;
@@ -138,9 +154,11 @@ pub fn build_frame(
         .flat_map(|problem| heading_over_message(problem.heading, problem.text, width))
         .collect();
     lines.extend(tree.iter().cloned());
-    let room = height.saturating_sub(calls.len());
-    lines.truncate(room);
-    lines.resize(room, Row::new(RowContent::Blank));
+    if past_the_foot == RowsPastTheFoot::Cut {
+        let room = height.saturating_sub(calls.len());
+        lines.truncate(room);
+        lines.resize(room, Row::new(RowContent::Blank));
+    }
     lines.extend(calls);
     Frame { lines, area }
 }
@@ -183,6 +201,7 @@ mod tests {
             &tree(),
             notices,
             pane(height),
+            RowsPastTheFoot::Cut,
             &DrawingOptions::default(),
         )
     }
@@ -281,7 +300,14 @@ mod tests {
             notifications: false,
             ..DrawingOptions::default()
         };
-        let frame = build_frame(&[], &tree(), &[call("one", "editor")], pane(12), &quiet);
+        let frame = build_frame(
+            &[],
+            &tree(),
+            &[call("one", "editor")],
+            pane(12),
+            RowsPastTheFoot::Cut,
+            &quiet,
+        );
         assert!(frame
             .lines()
             .iter()
@@ -294,7 +320,14 @@ mod tests {
             heading: "no client",
             text: "the sidebar could not run its client",
         };
-        let frame = build_frame(&[note], &tree(), &[], pane(12), &DrawingOptions::default());
+        let frame = build_frame(
+            &[note],
+            &tree(),
+            &[],
+            pane(12),
+            RowsPastTheFoot::Cut,
+            &DrawingOptions::default(),
+        );
         assert_eq!(
             frame.lines()[0].content,
             RowContent::Header {
@@ -307,6 +340,39 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_that_keeps_its_rows_pads_none_and_cuts_none() {
+        // The dashboard grows past the foot as soon as a row opens its block.
+        // The client scrolls over the result, so nothing is dropped.
+        let tall: Vec<Row> = std::iter::repeat_n(tree()[0].clone(), 40).collect();
+        let frame = build_frame(
+            &[],
+            &tall,
+            &[],
+            pane(12),
+            RowsPastTheFoot::Keep,
+            &DrawingOptions::default(),
+        );
+        assert_eq!(frame.lines().len(), 40);
+        assert!(frame
+            .lines()
+            .iter()
+            .all(|row| row.content != RowContent::Blank));
+    }
+
+    #[test]
+    fn a_frame_that_keeps_its_rows_is_shorter_than_the_pane_when_it_has_few() {
+        let frame = build_frame(
+            &[],
+            &tree(),
+            &[],
+            pane(12),
+            RowsPastTheFoot::Keep,
+            &DrawingOptions::default(),
+        );
+        assert_eq!(frame.lines().len(), 1);
+    }
+
+    #[test]
     fn a_tree_taller_than_the_pane_is_cut_rather_than_pushing_the_calls_off() {
         let tall: Vec<Row> = std::iter::repeat_n(tree()[0].clone(), 40).collect();
         let frame = build_frame(
@@ -314,6 +380,7 @@ mod tests {
             &tall,
             &[call("one", "editor")],
             pane(12),
+            RowsPastTheFoot::Cut,
             &DrawingOptions::default(),
         );
         assert_eq!(frame.lines().len(), 12);

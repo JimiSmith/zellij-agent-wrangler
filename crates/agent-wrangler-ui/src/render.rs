@@ -28,7 +28,7 @@ use ratatui_core::widgets::Widget;
 use agent_wrangler_core::agent::Turn;
 
 use crate::model::{
-    Branch, CellAlignment, NamedColor, Placement, Row, RowContent, RowKey, TableCell,
+    Branch, CellAlignment, NamedColor, Placement, Row, RowContent, RowKey, RowPreview, TableCell,
 };
 
 /// Column 0: a block marks "where you are", and a space does not.
@@ -85,6 +85,24 @@ const ICON_GAP: &str = "  ";
 /// pins.
 const ICON_AND_GAP: usize = 1 + ICON_GAP.len();
 
+/// The glyph that says whether the block under a dashboard row is drawn. The
+/// mark points down at a block that is open, and along at one that is closed.
+fn open_marker(preview: RowPreview) -> char {
+    match preview {
+        RowPreview::Open => '▾',
+        RowPreview::Closed => '▸',
+    }
+}
+
+/// The glyph that a line of a preview block draws in the tree column. The last
+/// line of the block closes the tree, and nothing is drawn below it.
+fn preview_glyph(branch: Branch) -> char {
+    match branch {
+        Branch::More => '│',
+        Branch::Last => '└',
+    }
+}
+
 /// A description row hangs under its title. The row is indented to the column
 /// where the text of the title starts, past the gutter, the icon and the gap
 /// after the icon.
@@ -113,10 +131,18 @@ pub fn notification_body_field(width: usize) -> usize {
 
 /// The column that a dashboard row starts its AGENT cell in.
 ///
-/// The gutter, the space after it, the kind icon and the gap after the icon
-/// come before that column. The builder lays the table out from here, and
-/// [`parts`] draws it from here. The two therefore cannot drift apart.
-pub const DASHBOARD_NAME_COLUMN: usize = 2 + ICON_AND_GAP;
+/// The gutter, the open marker with a space on each side, the kind icon
+/// and the gap after the icon come before that column. The builder lays the
+/// table out from here, and [`parts`] draws it from here. The two therefore
+/// cannot drift apart.
+pub const DASHBOARD_NAME_COLUMN: usize = 4 + ICON_AND_GAP;
+
+/// The column that a line of a preview block starts its text in.
+///
+/// The tree glyph sits in the column of the kind icon of the row above. The
+/// block then reads as one thing with its row. The text starts one column past
+/// the AGENT cell above it.
+pub const PREVIEW_TEXT_COLUMN: usize = DASHBOARD_NAME_COLUMN + 1;
 
 /// The columns between one cell of a dashboard row and the next.
 pub const DASHBOARD_CELL_GAP: usize = 2;
@@ -265,6 +291,25 @@ fn status_parts(placement: Placement, position: Branch, index: &str, text: &str)
     Parts::Whole(format!("{lead}{:indent$}{text}", ""))
 }
 
+/// The pieces of one line of the block under a dashboard row: the gutter, the
+/// tree glyph that the block hangs from, and the text.
+///
+/// The line draws no kind icon and no open marker. It describes the row
+/// above rather than pointing at a thing of its own, so it takes no color and
+/// needs nothing to carry one. It keeps the gutter. The block belongs to the
+/// same pane as its row, and the mark must not break between the two.
+fn preview_parts(placement: Placement, branch: Branch, text: &str) -> Parts {
+    let lead = format!("{}", gutter(placement.is_focused_pane()));
+    let indent = (DASHBOARD_NAME_COLUMN - ICON_AND_GAP).saturating_sub(lead.chars().count());
+    let gap = PREVIEW_TEXT_COLUMN - (DASHBOARD_NAME_COLUMN - ICON_AND_GAP) - 1;
+    Parts::Whole(format!(
+        "{lead}{:indent$}{}{:gap$}{text}",
+        "",
+        preview_glyph(branch),
+        ""
+    ))
+}
+
 /// The pieces one row is drawn as.
 fn parts(content: &RowContent) -> Parts {
     match content {
@@ -325,10 +370,15 @@ fn parts(content: &RowContent) -> Parts {
             name,
             cells,
             color,
+            preview,
             ..
         } => {
             let mut fields = vec![
-                Field::Text(format!("{} ", gutter(placement.is_focused_pane()))),
+                Field::Text(format!(
+                    "{} {} ",
+                    gutter(placement.is_focused_pane()),
+                    open_marker(*preview)
+                )),
                 Field::Icon {
                     glyph: ICON_AGENT,
                     color: *color,
@@ -339,6 +389,21 @@ fn parts(content: &RowContent) -> Parts {
             fields.extend(cell_fields(cells));
             Parts::Columns(fields)
         }
+        RowContent::PreviewMessage {
+            placement,
+            branch,
+            text,
+        }
+        | RowContent::PreviewTime {
+            placement,
+            branch,
+            text,
+        }
+        | RowContent::PreviewTool {
+            placement,
+            branch,
+            text,
+        } => preview_parts(*placement, *branch, text),
         RowContent::DashboardNoAgents => Parts::Whole(format!("  {NO_AGENTS}")),
         RowContent::DashboardPaneTooNarrow => Parts::Whole(format!("  {PANE_TOO_NARROW}")),
     }
@@ -427,6 +492,14 @@ pub fn base_style(content: &RowContent) -> Style {
             .add_modifier(Modifier::BOLD)
             .add_modifier(Modifier::UNDERLINED),
         RowContent::DashboardAgent { turn, .. } => urgency(*turn),
+        // The block is what the user asked to read, so the message draws at
+        // full strength whatever the row above it does.
+        RowContent::PreviewMessage { .. } => Style::new(),
+        // Dimmed, so the message leads and the two facts under it read as its
+        // detail. A description row already draws that way.
+        RowContent::PreviewTime { .. } | RowContent::PreviewTool { .. } => {
+            Style::new().add_modifier(Modifier::DIM)
+        }
         // What the dashboard says about itself instead of a table. The line
         // must read plainly, so it takes neither channel.
         RowContent::DashboardNoAgents | RowContent::DashboardPaneTooNarrow => Style::new(),
@@ -556,6 +629,9 @@ fn marker_inset(content: &RowContent) -> u16 {
     match content {
         RowContent::DashboardHeading { .. }
         | RowContent::DashboardAgent { .. }
+        | RowContent::PreviewMessage { .. }
+        | RowContent::PreviewTime { .. }
+        | RowContent::PreviewTool { .. }
         | RowContent::DashboardNoAgents
         | RowContent::DashboardPaneTooNarrow => DASHBOARD_MARKER_INSET as u16,
         _ => 0,
@@ -1038,6 +1114,7 @@ mod tests {
             placement,
             turn,
             color,
+            preview: RowPreview::Closed,
             name: cell(name, width),
             cells: vec![cell("working", 9), cell("1 wrangler", 10)],
         }
@@ -1091,7 +1168,7 @@ mod tests {
                 Placement::SameTab,
                 None
             )),
-            "  \u{f167a}  docs      working    1 wrangler"
+            "  \u{25b8} \u{f167a}  docs      working    1 wrangler"
         );
     }
 
@@ -1105,7 +1182,7 @@ mod tests {
                 alignment: CellAlignment::Right,
             }],
         };
-        assert_eq!(row_text(&row), "     AGENT    122k");
+        assert_eq!(row_text(&row), "       AGENT    122k");
     }
 
     #[test]
@@ -1118,9 +1195,9 @@ mod tests {
             Some(NamedColor::Cyan),
         );
         let buf = drawn(&Row::new(content), 40, false);
-        assert_eq!(buf[(2, 0)].symbol(), ICON_AGENT.to_string());
-        assert_eq!(buf[(2, 0)].fg, Color::Cyan, "the icon carries the color");
-        assert_eq!(buf[(5, 0)].fg, Color::Reset, "the name stays default");
+        assert_eq!(buf[(4, 0)].symbol(), ICON_AGENT.to_string());
+        assert_eq!(buf[(4, 0)].fg, Color::Cyan, "the icon carries the color");
+        assert_eq!(buf[(7, 0)].fg, Color::Reset, "the name stays default");
     }
 
     #[test]

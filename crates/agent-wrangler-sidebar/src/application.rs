@@ -3,8 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use agent_wrangler_core::agent::{Agent, SessionId, Turn};
 use agent_wrangler_core::label::label;
 use agent_wrangler_core::registry::Registry;
-use agent_wrangler_ui::frame::{build_frame, ClientProblem, Frame};
-use agent_wrangler_ui::model::{NamedColor, Notification, PaneId, RowKey, TabPosition};
+use agent_wrangler_ui::frame::{build_frame, ClientProblem, Frame, RowsPastTheFoot};
+use agent_wrangler_ui::model::{
+    NamedColor, Notification, OpenPreviews, PaneId, Row, RowKey, TabPosition,
+};
 use agent_wrangler_ui::{dashboard, selection, tree, Rect};
 
 use crate::calls::AnsweredCalls;
@@ -40,6 +42,11 @@ pub struct Application {
     observed_focus: Option<Focus>,
     left_behind: BTreeMap<TabId, PaneId>,
     tabs_with_company: BTreeSet<TabId>,
+    /// The agents whose block is open in this sidebar. Nothing broadcasts it.
+    open_previews: OpenPreviews,
+    /// The frame row that the top of the pane sits on. The pane follows the
+    /// selection, so this moves when the selection leaves the pane.
+    scroll: usize,
     installed: bool,
     mismatched: bool,
 }
@@ -76,9 +83,56 @@ impl Application {
     }
 
     pub fn render(&mut self, area: Rect) -> RenderedView {
-        let rendered = self.view(area);
+        let mut rendered = self.view(area);
+        self.follow_selection(&rendered, area);
+        rendered.offset = self.scroll;
         self.rendered = Some(rendered.clone());
         rendered
+    }
+
+    /// Move the pane so that the selected row is inside it, and no further.
+    ///
+    /// A row that opened its block can be taller than the pane. The rule that
+    /// shows the foot of the selection runs first. The rule that shows its head
+    /// runs after, and wins. So a block too tall to fit shows its first line.
+    ///
+    /// A sidebar that resolves no selection keeps the pane where it is. Only
+    /// the sidebar the keys reach resolves one, so the others do not jump.
+    fn follow_selection(&mut self, rendered: &RenderedView, area: Rect) {
+        let height = area.height as usize;
+        let rows = rendered.frame.lines().len();
+        let mut offset = self.scroll;
+        if let Some(selected) = &rendered.selection {
+            let carries = |row: &&Row| row.key.as_ref() == Some(selected);
+            let lines: Vec<usize> = rendered
+                .frame
+                .lines()
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| carries(row))
+                .map(|(at, _)| at)
+                .collect();
+            if let (Some(first), Some(last)) = (lines.first(), lines.last()) {
+                if *last >= offset + height {
+                    offset = last + 1 - height;
+                }
+                if *first < offset {
+                    offset = *first;
+                }
+            }
+        }
+        // Nothing above the first row that carries a key can be selected. A
+        // pane that reaches that row therefore shows the heading over it too.
+        let heading = rendered
+            .frame
+            .lines()
+            .iter()
+            .take_while(|row| row.key.is_none())
+            .count();
+        if offset <= heading {
+            offset = 0;
+        }
+        self.scroll = offset.min(rows.saturating_sub(height));
     }
 
     pub fn session_name(&self) -> Option<&str> {
@@ -396,6 +450,7 @@ impl Application {
                 changed |= self.suppress();
                 let mut decision = self.confirmed_effects();
                 self.answered.drop_gone_sessions(&self.registry);
+                self.open_previews.drop_gone_sessions(&self.registry);
                 decision.request_repaint(changed);
                 decision
             }
@@ -408,6 +463,7 @@ impl Application {
             UserAction::Next => self.step(1, &mut decision),
             UserAction::Previous => self.step(-1, &mut decision),
             UserAction::Activate => self.activate(&mut decision),
+            UserAction::OpenOrClosePreview => self.open_or_close_preview(&mut decision),
             UserAction::Quit => decision.effects.push(Effect::Broadcast(Broadcast::Off)),
             UserAction::Click(line) => {
                 let item = self
@@ -440,6 +496,26 @@ impl Application {
                 decision
             }
         }
+    }
+
+    /// Open the block under the selected row, or close it when it is open.
+    ///
+    /// The sidebars of a session share a selection and broadcast it. They do
+    /// not share what is open, because a block changes the height of the table
+    /// and a shared block would scroll every other sidebar.
+    fn open_or_close_preview(&mut self, decision: &mut Decision) {
+        // The row the user sees selected, which is the last frame's answer.
+        // A sidebar holds no selection of its own until the user steps through
+        // it. Such a sidebar falls back to the first row that it drew.
+        let selected = self
+            .rendered
+            .as_ref()
+            .and_then(|view| view.selection.clone());
+        let Some(RowKey::Agent(session)) = selected else {
+            return;
+        };
+        self.open_previews.open_or_close(&session);
+        decision.request_repaint(true);
     }
 
     fn select(&mut self, key: Option<RowKey>, decision: &mut Decision) {
@@ -586,6 +662,8 @@ impl Application {
             frame,
             interactions,
             selection,
+            // `render` settles this once it knows where the pane sits.
+            offset: 0,
         }
     }
 
@@ -599,6 +677,7 @@ impl Application {
                 &[],
                 &[],
                 area,
+                RowsPastTheFoot::Cut,
                 &self.options.view,
             );
         }
@@ -619,17 +698,34 @@ impl Application {
         // The dashboard draws no notification area. The agents that want you
         // already lead its table, so the calls at the foot repeat what the
         // first rows say.
-        let (rows, notices) = match self.options.view.dashboard {
+        // The dashboard keeps every row and the pane scrolls over them. A row
+        // that opens its block pushes the rows under it past the foot, and
+        // those rows stay reachable. The tree cuts, as it always has.
+        let (rows, notices, past_the_foot) = match self.options.view.dashboard {
             true => (
-                dashboard::build_dashboard(session, area.width as usize, &self.options.view),
+                dashboard::build_dashboard(
+                    session,
+                    area.width as usize,
+                    &self.open_previews,
+                    &self.options.view,
+                ),
                 Vec::new(),
+                RowsPastTheFoot::Keep,
             ),
             false => (
                 tree::build_tree(session, &self.options.view),
                 self.notifications(),
+                RowsPastTheFoot::Cut,
             ),
         };
-        build_frame(&problems, &rows, &notices, area, &self.options.view)
+        build_frame(
+            &problems,
+            &rows,
+            &notices,
+            area,
+            past_the_foot,
+            &self.options.view,
+        )
     }
 }
 
@@ -660,7 +756,7 @@ fn said(stderr: &[u8]) -> &str {
 mod tests {
     use super::*;
     use crate::model::{PaneReport, PaneVisibility, SidebarPaneReport, TabId, TabLayout};
-    use agent_wrangler_core::agent::{LabelFacts, StatusFacts};
+    use agent_wrangler_core::agent::{LabelFacts, StatusFacts, TranscriptRecords};
     use agent_wrangler_core::origin::Origin;
     use agent_wrangler_ui::ansi;
     use agent_wrangler_ui::model::RowContent;
@@ -705,6 +801,15 @@ mod tests {
             target,
         }))
     }
+
+    /// The pane that the dashboard tests draw into. Wide enough for the whole
+    /// table, and tall enough that nothing scrolls.
+    const PANE: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 60,
+        height: 12,
+    };
 
     fn app() -> Application {
         let mut app = Application::new(Options::default());
@@ -1321,8 +1426,8 @@ mod tests {
         let second = app.render(Rect::new(0, 0, 30, 8));
         assert_eq!(first, second);
         assert_eq!(
-            ansi::frame_to_ansi(&first.frame, first.selection.as_ref()),
-            ansi::frame_to_ansi(&second.frame, second.selection.as_ref())
+            ansi::frame_to_ansi(&first.frame, first.selection.as_ref(), first.offset),
+            ansi::frame_to_ansi(&second.frame, second.selection.as_ref(), second.offset)
         );
     }
 
@@ -1575,6 +1680,206 @@ mod tests {
         assert!(rows
             .iter()
             .all(|row| !matches!(row.content, RowContent::Tab { .. })));
+    }
+
+    /// A dashboard sidebar with the keys. It holds `count` agents, and each
+    /// one reports one thing it said.
+    fn dashboard_with_agents(count: usize) -> Application {
+        let mut app = dashboard_app();
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        let mut registry = Registry::default();
+        let mut panes = BTreeMap::new();
+        for at in 0..count {
+            let record = format!(
+                r#"{{"type":"assistant","timestamp":"2026-09-01T05:11:01.469Z","message":{{"content":[{{"type":"text","text":"agent {at} spoke"}}]}}}}"#
+            );
+            let agent = agent(&format!("a{at}"), Turn::Working).with_records(TranscriptRecords {
+                last_message: record,
+                running_tool: String::new(),
+            });
+            panes.insert(agent.session.clone(), PaneId::new("%7"));
+            registry.report(agent);
+        }
+        app.reduce(Input::Agents(AgentSnapshot::Compatible { registry, panes }));
+        app
+    }
+
+    /// The rows of a drawn frame that belong to a block.
+    fn block_rows(view: &RenderedView) -> Vec<&Row> {
+        view.frame
+            .lines()
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.content,
+                    RowContent::PreviewMessage { .. }
+                        | RowContent::PreviewTime { .. }
+                        | RowContent::PreviewTool { .. }
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_space_key_opens_the_row_under_the_cursor_and_closes_it_again() {
+        let mut app = dashboard_with_agents(2);
+        app.render(PANE);
+        assert!(block_rows(&app.render(PANE)).is_empty());
+
+        app.reduce(Input::User(UserAction::OpenOrClosePreview));
+        assert_eq!(
+            block_rows(&app.render(PANE)).len(),
+            2,
+            "a message and a time"
+        );
+
+        app.reduce(Input::User(UserAction::OpenOrClosePreview));
+        assert!(block_rows(&app.render(PANE)).is_empty());
+    }
+
+    #[test]
+    fn several_rows_are_open_at_the_same_time() {
+        let mut app = dashboard_with_agents(3);
+        app.render(PANE);
+        app.reduce(Input::User(UserAction::OpenOrClosePreview));
+        app.render(PANE);
+        app.reduce(Input::User(UserAction::Next));
+        app.render(PANE);
+        app.reduce(Input::User(UserAction::OpenOrClosePreview));
+        assert_eq!(block_rows(&app.render(PANE)).len(), 4, "two blocks of two");
+    }
+
+    #[test]
+    fn opening_a_row_tells_no_other_sidebar() {
+        // A block changes the height of the table. A shared block would scroll
+        // the sidebar of every other tab.
+        let mut app = dashboard_with_agents(2);
+        app.render(PANE);
+        let decision = app.reduce(Input::User(UserAction::OpenOrClosePreview));
+        assert_eq!(decision.effects, vec![Effect::Repaint]);
+    }
+
+    #[test]
+    fn an_open_row_stays_open_across_a_state_message() {
+        // The daemon sends the whole state many times a minute. A block that
+        // closed itself on every message would be useless.
+        let mut app = dashboard_with_agents(2);
+        app.render(PANE);
+        app.reduce(Input::User(UserAction::OpenOrClosePreview));
+        app.reduce(Input::Agents(agents(&[
+            ("a0", "%7", Turn::Working),
+            ("a1", "%7", Turn::Working),
+        ])));
+        assert_eq!(block_rows(&app.render(PANE)).len(), 1, "no record to read");
+    }
+
+    #[test]
+    fn an_open_row_stays_open_when_the_selection_moves_away() {
+        let mut app = dashboard_with_agents(2);
+        app.render(PANE);
+        app.reduce(Input::User(UserAction::OpenOrClosePreview));
+        app.render(PANE);
+        app.reduce(Input::User(UserAction::Next));
+        assert_eq!(block_rows(&app.render(PANE)).len(), 2);
+    }
+
+    #[test]
+    fn an_agent_the_daemon_stops_reporting_takes_its_open_block_with_it() {
+        let mut app = dashboard_with_agents(2);
+        app.render(PANE);
+        app.reduce(Input::User(UserAction::OpenOrClosePreview));
+        app.render(PANE);
+        app.reduce(Input::Agents(agents(&[("a1", "%7", Turn::Working)])));
+        app.render(PANE);
+        // The agent comes back reporting nothing new. Its block must not.
+        app.reduce(Input::Agents(agents(&[
+            ("a0", "%7", Turn::Working),
+            ("a1", "%7", Turn::Working),
+        ])));
+        assert!(block_rows(&app.render(PANE)).is_empty());
+    }
+
+    #[test]
+    fn one_step_moves_over_a_whole_block() {
+        let mut app = dashboard_with_agents(2);
+        app.render(PANE);
+        app.reduce(Input::User(UserAction::OpenOrClosePreview));
+        let view = app.render(PANE);
+        assert_eq!(
+            view.selectable_items()
+                .into_iter()
+                .map(|item| item.key.clone())
+                .collect::<Vec<RowKey>>(),
+            vec![
+                RowKey::Agent(SessionId::new("a0").unwrap()),
+                RowKey::Agent(SessionId::new("a1").unwrap()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_row_past_the_foot_is_reachable_and_the_pane_follows_it() {
+        // Six agents in a pane four rows tall. Without the scroll the last
+        // rows are neither drawn nor selectable.
+        let mut app = dashboard_with_agents(6);
+        let short = Rect::new(0, 0, 60, 4);
+        let view = app.render(short);
+        assert_eq!(view.selectable_items().len(), 6);
+        assert_eq!(view.offset, 0);
+
+        for _ in 0..5 {
+            app.reduce(Input::User(UserAction::Next));
+            app.render(short);
+        }
+        let view = app.render(short);
+        assert_eq!(
+            view.selection,
+            Some(RowKey::Agent(SessionId::new("a5").unwrap()))
+        );
+        // Seven rows, a pane of four, and the last row must be the last drawn.
+        assert_eq!(view.offset, 3);
+
+        for _ in 0..5 {
+            app.reduce(Input::User(UserAction::Previous));
+            app.render(short);
+        }
+        assert_eq!(app.render(short).offset, 0, "the pane comes back up");
+    }
+
+    #[test]
+    fn a_block_taller_than_the_pane_shows_its_head() {
+        // The rule that brings the foot of a selection into the pane runs
+        // first, and the rule that brings its head in runs after. So a block
+        // that cannot fit shows its first line rather than its last.
+        let mut app = dashboard_with_agents(1);
+        let short = Rect::new(0, 0, 60, 3);
+        app.render(short);
+        app.reduce(Input::User(UserAction::OpenOrClosePreview));
+        let view = app.render(short);
+        assert_eq!(view.offset, 0);
+        assert!(matches!(
+            view.frame.lines()[2].content,
+            RowContent::PreviewMessage { .. }
+        ));
+    }
+
+    #[test]
+    fn a_click_on_a_scrolled_pane_reaches_the_row_under_the_pointer() {
+        let mut app = dashboard_with_agents(6);
+        let short = Rect::new(0, 0, 60, 4);
+        app.render(short);
+        for _ in 0..5 {
+            app.reduce(Input::User(UserAction::Next));
+            app.render(short);
+        }
+        let view = app.render(short);
+        assert_eq!(view.offset, 3);
+        // The heading and three agent rows sit above the pane, so the first
+        // line of the pane is the fourth row of the frame.
+        assert_eq!(
+            view.item_at(0).map(|item| item.key.clone()),
+            Some(RowKey::Agent(SessionId::new("a2").unwrap()))
+        );
     }
 
     #[test]

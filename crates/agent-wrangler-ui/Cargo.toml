@@ -11,6 +11,14 @@ description = "The rows a client draws and the cells they land in, told apart fr
 # escape sequences, and into a client sitting on a real terminal, where a
 # backend takes the same cells there directly.
 ratatui-core = { version = "0.1", default-features = false, features = ["std"] }
-# The types alone. What a row says about an agent is read off the record it is
-# handed; nothing here goes looking for one.
-agent-wrangler-core = { path = "../agent-wrangler-core", default-features = false }
+# The types and a JSON reader. A row that is open reads its preview out of the
+# raw transcript records that the daemon handed it. Nothing here goes looking
+# for a file, so the feature that reads an agent's files stays off.
+agent-wrangler-core = { path = "../agent-wrangler-core", default-features = false, features = [
+    "json",
+] }
+# The scrolling. The dashboard grows taller than the pane as soon as one row
+# opens. The whole table then draws into a buffer of its own height, and this
+# clips that buffer to the pane. It takes the same `ratatui-core` 0.1 and it
+# brings `ratatui-widgets`. It brings no backend and no terminal.
+tui-scrollview = "0.6"

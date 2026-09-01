@@ -246,6 +246,7 @@ impl Plugin {
                 BareKey::Down | BareKey::Char('j') => vec![Input::User(UserAction::Next)],
                 BareKey::Up | BareKey::Char('k') => vec![Input::User(UserAction::Previous)],
                 BareKey::Enter => vec![Input::User(UserAction::Activate)],
+                BareKey::Char(' ') => vec![Input::User(UserAction::OpenOrClosePreview)],
                 BareKey::Char('q') => vec![Input::User(UserAction::Quit)],
                 _ => Vec::new(),
             },
@@ -352,7 +353,11 @@ impl ZellijPlugin for Plugin {
         let rendered = self.application.render(area);
         print!(
             "{}",
-            ansi::frame_to_ansi(&rendered.frame, rendered.selection.as_ref())
+            ansi::frame_to_ansi(
+                &rendered.frame,
+                rendered.selection.as_ref(),
+                rendered.offset
+            )
         );
     }
 }

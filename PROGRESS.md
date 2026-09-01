@@ -43,8 +43,15 @@ binary yet, by decision.
 
 The daemon now reads two more things out of a transcript, in the pass it already
 runs. The first is the most recent record that says something. The second is the
-tool call that no result answers yet. Both travel as they were read, so nothing
-draws them yet. The record format is 7.
+tool call that no result answers yet. Both travel as they were read, and the
+record format is 7.
+
+The zellij sidebar draws them. The space key opens the row under the cursor.
+The block holds what the agent last said, the time it said so, and the tool it
+runs now. Several rows are open at once, and a row stays open across a state
+message. The block is as tall as the message needs, so the pane scrolls, and a
+row past the foot is drawn and reachable. Each sidebar keeps its own open rows.
+The tmux client reads no key events, so it draws no block.
 
 Delivery no longer decides which clients the daemon keeps. A client of either
 kind is kept for as long as it speaks, and given up on after ninety seconds of
@@ -489,6 +496,52 @@ agent's files also carried the JSON. It split in two: `json` turns on the parser
 `json` alone. The wasm release artifact went from 1,526,838 bytes to 1,528,893,
 which is 2,055 bytes for the parser. Nothing in the plugin calls it yet, so the
 linker drops nearly all of it, and the real cost lands with the drawing.
+
+**The sidebar parses, and the client crate scrolls.** The daemon sends both
+records raw, so a client reads a message, a time and a tool out of them where it
+draws. That reading lives in `agent-wrangler-core`, behind `json`, so one reader
+answers for every client and the daemon still opens the files. `agent-wrangler-ui`
+took that feature and `tui-scrollview` together. The wasm release artifact went
+from 1,528,893 bytes to 1,574,971, which is 46,078 bytes for a parser that is
+now called and for the clipping.
+
+**The block draws the time in UTC, and says so.** A record spells its own time
+as `2026-09-01T05:11:01.469Z`. A local time needs an offset from UTC, and a
+plugin in wasm has none without a wire change. So the block draws the date and
+the minute of the record's own spelling, and keeps the `Z`. The date is drawn
+because a message from yesterday must not read as one from this morning. Story 1
+dropped the FOR column for the neighbouring reason. An elapsed time needs a clock
+read where the row is drawn, and the pane has no repaint tick.
+
+**A tool draws the one input key that its own tool names.** A tool call carries
+an `input` object whose keys the tool itself decides, and no key is common to
+every tool. Measured over 111 transcripts on this machine, Bash is 5,093 of the
+calls, Edit 1,133, Read 567 and Write 247. A long tail follows them, and it
+includes MCP tools. So a small table names the key per tool, and a tool that the
+table does not name draws its name alone. Reading whatever key a strange tool happens to carry
+would be a guess, and an MCP tool promises nothing.
+
+**What is open belongs to one sidebar, and the selection still does not.** The
+sidebars of a session broadcast their selection to each other. They do not
+broadcast what is open. A block changes the height of the table, and a shared
+block would scroll the sidebar of every other tab the moment the user opened a
+row in one.
+
+**A click reaches a pane, and never the open marker.** Zellij reports the
+column of a click, and the plugin drops it. So a click on a dashboard row goes
+to the pane wherever it lands, the marker included. Opening a row with the mouse
+needs that column carried through five places, and it is left for later.
+
+**Both scrollbars are switched off.** `tui-scrollview` draws a vertical
+scrollbar when the content does not fit, and that scrollbar takes a column from
+the right edge of the pane. That column is the turn marker's. Nothing on the
+pane now says that rows sit below the foot, as the tree already does.
+
+**The pane follows the selection, minimally, and shows the head of a block.**
+The rule that brings the foot of a selection into the pane runs first. The rule
+that brings its head in runs after, and wins. So a block too tall to fit shows
+its first line rather than its last. A pane that reaches the first row shows the
+heading over it too, because nothing above that row can be selected.
 
 **The control client signals, and a query answers.** Nothing decodes the layout
 string in `%layout-change`, which is a checksum and a nested geometry grammar.

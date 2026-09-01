@@ -114,7 +114,7 @@ with `#` are ignored.
 | `spawn: <command>` | Fork a child on a pty and run the command in it. Replaces any previous child |
 | `sh: <command>` | Run a shell command on the host, outside the pty. Fails the run on a non-zero exit |
 | `sh?: <command>` | The same, but a non-zero exit is allowed |
-| `keys: <literal>` | Write bytes to the pty. `\r`, `\n`, `\e`, `\t`, `\\` and `<C-x>` are understood |
+| `keys: <literal>` | Write bytes to the pty. `\r`, `\n`, `\e`, `\t`, `\s`, `\\` and `<C-x>` are understood |
 | `wait: <substring>` | Pump output until the substring appears on the replayed screen |
 | `waitgone: <substring>` | Pump until it is no longer on the screen |
 | `sleep: <seconds>` | Keep pumping for that long |
@@ -200,6 +200,17 @@ sidebar goes on drawing the agent row.
 A pipe that refused the line would leave the sidebar with the state that it last
 received, which holds no agent. So the row is the proof that the line landed.
 `append-tool-call.sh` writes the record, and its second argument is the size.
+
+## Sending a key to the sidebar
+
+`keys:` writes to the pty of the whole zellij client, so a keystroke lands
+wherever the focus is. Every other run types into a shell pane, which is where
+a session starts. `preview_mode.steps` sends the space key to the sidebar. It
+moves the focus first with `keys: \eh`, the stock binding for "focus the pane to
+the left". The sidebar is the left pane of `tests/dashboard.kdl`.
+
+A step argument is stripped of the whitespace around it, so `keys:` alone sends
+nothing. `\s` is how a run writes one space.
 
 ## What this cannot do yet
 

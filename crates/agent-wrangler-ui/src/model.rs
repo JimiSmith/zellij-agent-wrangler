@@ -9,7 +9,10 @@
 //! Nothing here knows what a terminal is. A row says what to draw, and never how
 //! to draw it.
 
+use std::collections::BTreeSet;
+
 use agent_wrangler_core::agent::{Agent, SessionId, Turn};
+use agent_wrangler_core::registry::Registry;
 
 /// The stable name a multiplexer gives a pane.
 ///
@@ -85,6 +88,14 @@ impl TabPosition {
 pub enum Branch {
     More,
     Last,
+}
+
+/// Whether the block under a dashboard row is drawn. The row marks which it is,
+/// so a user knows that a closed row has something to open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowPreview {
+    Open,
+    Closed,
 }
 
 /// The place of a row relative to the user. A client reads both the gutter and
@@ -224,6 +235,36 @@ impl RowKey {
     }
 }
 
+/// The agents whose preview block is drawn under their dashboard row.
+///
+/// One sidebar keeps its own. Nothing broadcasts this set, because a block
+/// changes the height of the table. A shared set would scroll the sidebar of
+/// every other tab whenever the user opened a row in one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OpenPreviews(BTreeSet<SessionId>);
+
+impl OpenPreviews {
+    /// Whether this agent's block is drawn.
+    pub fn holds(&self, session: &SessionId) -> bool {
+        self.0.contains(session)
+    }
+
+    /// Open this agent's block, or close it when it is already open.
+    pub fn open_or_close(&mut self, session: &SessionId) {
+        if !self.0.remove(session) {
+            self.0.insert(session.clone());
+        }
+    }
+
+    /// Forget every session that the registry no longer holds.
+    ///
+    /// An agent that the daemon stops reporting takes its open block with it.
+    /// Without this, the set grows for as long as the sidebar runs.
+    pub fn drop_gone_sessions(&mut self, registry: &Registry) {
+        self.0.retain(|session| registry.get(session).is_some());
+    }
+}
+
 /// Which edge of its columns a cell's text sits against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CellAlignment {
@@ -317,10 +358,40 @@ pub enum RowContent {
         /// Whose turn it is, which decides how brightly the row draws.
         turn: Turn,
         color: Option<NamedColor>,
+        /// Whether the block under this row is drawn, which the disclosure
+        /// marker says.
+        preview: RowPreview,
         /// The AGENT column, which the kind icon leads.
         name: TableCell,
         /// The columns from TURN onward, in the order they draw.
         cells: Vec<TableCell>,
+    },
+    /// One line of what an agent last told the user, in the block that the
+    /// space key opens under its row.
+    ///
+    /// A block that reports no message draws one such line that says so. A row
+    /// that opened and drew nothing leaves the user to guess why.
+    PreviewMessage {
+        /// The placement of the row that the block hangs from. Every line of
+        /// the block carries it, so the gutter does not break in the middle of
+        /// one pane.
+        placement: Placement,
+        /// Whether more of the block follows this line. The last line closes
+        /// the tree that the block hangs from.
+        branch: Branch,
+        text: String,
+    },
+    /// When the agent wrote that message, in the block under its row.
+    PreviewTime {
+        placement: Placement,
+        branch: Branch,
+        text: String,
+    },
+    /// The tool that the agent runs now, in the block under its row.
+    PreviewTool {
+        placement: Placement,
+        branch: Branch,
+        text: String,
     },
     /// The dashboard draws no table, because no agent is running.
     DashboardNoAgents,

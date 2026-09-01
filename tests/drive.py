@@ -72,6 +72,9 @@ _ESCAPES = (
     ("\\n", "\n"),
     ("\\e", "\x1b"),
     ("\\t", "\t"),
+    # A step argument is stripped of the whitespace around it, so a run that
+    # sends a bare space has no other way to write one.
+    ("\\s", " "),
 )
 
 

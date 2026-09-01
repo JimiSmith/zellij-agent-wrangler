@@ -81,13 +81,21 @@ once with no agent reporting itself again.
       group the longest wait leads
 - [x] Columns dropped one at a time from the right edge as the pane narrows
 - [ ] Subagents and teammates as rows under the agent that started them
-- [ ] The last message of an agent, under the row that the space key expands
+- [x] The last message of an agent, under the row that the space key expands,
+      with the time it was said and the tool that runs now
+- [x] The pane scrolls, so a row past its foot is drawn and reachable
+- [ ] Clicking the open marker of a row opens and closes its block, where a
+      click anywhere else on the row goes to the pane
 
 The order compares two readings of `raised` and reads no clock of its own. That
 is what lets the view live in a crate that also builds for wasm, where a wall
 clock is not a given. The design draws a column that holds how long an agent
 waited. A duration needs a clock read where the row is drawn, so that column is
 not here.
+
+A block says when the agent spoke rather than how long ago, for the same
+reason, and it says so in UTC. The record spells its own time in UTC, and a
+client knows no offset from it.
 
 The order reverses `Registry::calling`, which puts the most recent call first
 for the notification area. A list of calls answers "what just happened". A

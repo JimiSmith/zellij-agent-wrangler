@@ -57,7 +57,10 @@ size. The renderer translates those lines into terminal output.
 - `agent-wrangler-ui` — the row vocabulary, tree and frame composition,
   terminal styling, selection, and ANSI serialization. It draws into a ratatui
   buffer and knows nothing about how one reaches a screen, so a plugin that can
-  only print and a program that owns its terminal draw the same sidebar.
+  only print and a program that owns its terminal draw the same sidebar. It
+  reads the raw transcript records that an agent record carries, so that an
+  open row can draw what the agent last said. It clips a frame taller than its
+  pane, so the dashboard scrolls.
 - `agent-wrangler-sidebar` — multiplexer-neutral application state, reducer
   inputs, effects, session reconciliation, client state, and configuration.
 - `zellij-agent-wrangler` — the plugin. `adapter.rs` converts between Zellij

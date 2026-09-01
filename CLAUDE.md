@@ -35,6 +35,13 @@ drawing: raw mode, the alternate screen, the size of its pane, and the pair of
 buffers that limits a draw to the cells that changed. Ratatui comes with default
 features OFF and with the `crossterm` feature alone. Nothing else ever.
 
+`agent-wrangler-ui` takes `ratatui-core` for the buffer and `tui-scrollview` for
+the clipping. The dashboard grows taller than the pane as soon as a row opens
+its block. The whole table then draws into a buffer of its own height, and the
+scroll view clips that buffer to the pane. Both scrollbars are switched off. A
+scrollbar takes a column from the right edge, and that column belongs to the
+turn marker.
+
 Three rules follow.
 
 1. `agent-wrangler-core` builds for wasm as well as for the host. Anything that
@@ -182,6 +189,7 @@ python3 -m unittest discover -s tests -v
 python3 tests/drive.py tests/scripts/agent_row.steps
 python3 tests/drive.py tests/scripts/dashboard_view.steps
 python3 tests/drive.py tests/scripts/transcript_records.steps
+python3 tests/drive.py tests/scripts/preview_mode.steps
 python3 tests/drive.py tests/scripts/tmux_tree.steps
 ```
 

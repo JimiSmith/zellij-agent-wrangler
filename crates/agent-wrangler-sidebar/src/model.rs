@@ -102,6 +102,8 @@ pub enum UserAction {
     Next,
     Previous,
     Activate,
+    /// Open the block under the selected row, or close it when it is open.
+    OpenOrClosePreview,
     Quit,
     Click(usize),
 }
@@ -232,12 +234,17 @@ pub struct RenderedView {
     pub interactions: Vec<Option<InteractionItem>>,
     /// The selection resolved against this view's visible interactions.
     pub selection: Option<RowKey>,
+    /// The frame row that the top of the pane sat on when this view was drawn.
+    ///
+    /// A frame can hold more rows than the pane, so a line on screen is this
+    /// many rows further down the frame.
+    pub offset: usize,
 }
 
 impl RenderedView {
-    /// The interaction attached to a particular rendered line.
+    /// The interaction attached to a particular line of the pane.
     pub fn item_at(&self, line: usize) -> Option<&InteractionItem> {
-        self.interactions.get(line)?.as_ref()
+        self.interactions.get(line + self.offset)?.as_ref()
     }
 
     /// The interaction whose key was visibly selected in this view.
@@ -249,11 +256,15 @@ impl RenderedView {
             .find(|item| &item.key == selected)
     }
 
-    /// Each distinct selectable item in visible screen order.
+    /// Each distinct selectable item in the order the frame draws it.
     ///
-    /// Notification titles and their wrapped body lines share an item. This
+    /// Every line of a multi-line entry shares one item: a notification title
+    /// and its wrapped body, and a dashboard row and the block under it. This
     /// method returns each shared item once, although each of its lines is
     /// clickable.
+    ///
+    /// The items cover every row of the frame rather than the rows that fit,
+    /// so a row past the foot of the pane is still reachable.
     pub fn selectable_items(&self) -> Vec<&InteractionItem> {
         let mut items = Vec::new();
         for item in self.interactions.iter().flatten() {

@@ -14,6 +14,11 @@ pub mod origin;
 pub mod registry;
 pub mod status_line;
 
+/// A client reads the records that the daemon handed it, so this module is
+/// behind `json`, the feature that turns the parser on. It opens no file.
+#[cfg(feature = "json")]
+pub mod preview;
+
 /// What a session calls itself comes from the agent's own files. The modules
 /// that read those files are behind `native`, the feature that turns file
 /// reading on. A client takes `json` instead. The daemon hands a client its
