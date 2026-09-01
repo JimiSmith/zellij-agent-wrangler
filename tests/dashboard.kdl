@@ -1,0 +1,60 @@
+// The layout that the dashboard end to end run opens.
+//
+// `dev.kdl` is where a developer tries the sidebar by hand, so it changes. This
+// file is the harness's own, and it changes only when a test needs it to.
+//
+// The sidebar pane is 96 columns wide, which holds every column of the table. A
+// 32 column sidebar draws the AGENT column alone. A run that asserts on a
+// column then asserts on nothing.
+//
+// Every tab carries a shell pane beside the sidebar. The run types the hook of
+// an agent into that shell. The pane is the source of `ZELLIJ_PANE_ID`, and
+// that variable alone decides which pane the record lands under.
+//
+// PLUGIN_LOCATION takes the absolute path of the built wasm, and
+// CLIENT_LOCATION the absolute path of the built client. `make-layout.sh`
+// writes both.
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane split_direction="vertical" {
+            pane size=96 borderless=true {
+                plugin location="PLUGIN_LOCATION" {
+                    dashboard true
+                    desktop_notification "off"
+                    install_hooks "CLIENT_LOCATION"
+                }
+            }
+            children
+        }
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    new_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane split_direction="vertical" {
+            pane size=96 borderless=true {
+                plugin location="PLUGIN_LOCATION" {
+                    dashboard true
+                    desktop_notification "off"
+                    install_hooks "CLIENT_LOCATION"
+                }
+            }
+            pane
+        }
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    tab name="wrangler" focus=true {
+        pane
+    }
+    tab name="notes" {
+        pane
+    }
+}

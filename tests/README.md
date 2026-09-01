@@ -117,7 +117,7 @@ with `#` are ignored.
 | `wait: <substring>` | Pump output until the substring appears on the replayed screen |
 | `waitgone: <substring>` | Pump until it is no longer on the screen |
 | `sleep: <seconds>` | Keep pumping for that long |
-| `resize: <rows>x<cols>` | Change the window size and clear the grid, so the child redraws |
+| `resize: <rows>x<cols>` | Change the window size and clear the grid, so the child redraws. Before a spawn it sets the size that the child starts at |
 | `dump: <name>` | Write `tests/out/<name>.txt` and `tests/out/<name>.sgr.json` |
 
 `wait:` and `waitgone:` default to a 10 second timeout. A trailing `@ <seconds>`
@@ -169,11 +169,12 @@ notes, which otherwise open over the layout.
 ## Driving the plugin
 
 Once the workspace builds, a script for the sidebar looks like the smoke test
-with a layout added. The layout has to be generated first because `dev.kdl`
-carries a `PLUGIN_LOCATION` placeholder for the wasm's absolute path:
+with a layout added. The layout has to be generated first because
+`tests/tree.kdl` carries a `PLUGIN_LOCATION` placeholder for the wasm's
+absolute path:
 
     sh: cargo build --target wasm32-wasip1 -p zellij-agent-wrangler
-    sh: sed "s#PLUGIN_LOCATION#file:$PWD/target/wasm32-wasip1/debug/zellij-agent-wrangler.wasm#" dev.kdl > tests/out/layout.kdl
+    sh: sed "s#PLUGIN_LOCATION#file:$PWD/target/wasm32-wasip1/debug/zellij-agent-wrangler.wasm#" tests/tree.kdl > tests/out/layout.kdl
     env: ZELLIJ_CONFIG_DIR=tests/zellij-config
     spawn: zellij --session wrangler-test-sidebar --new-session-with-layout tests/out/layout.kdl
     wait: Ctrl @ 20
@@ -181,6 +182,12 @@ carries a `PLUGIN_LOCATION` placeholder for the wasm's absolute path:
 
 `--new-session-with-layout` rather than `--session` with `--layout`, because the
 latter attaches to an existing session and silently ignores the layout.
+
+`make-layout.sh` does all of this. It opens `tests/tree.kdl`, and a run that
+needs another layout names one as its third argument, the way
+`dashboard_view.steps` names `tests/dashboard.kdl`. The harness owns both files.
+`dev.kdl` is where a developer tries the sidebar by hand, so a change there must
+not move what a run asserts on.
 
 ## What this cannot do yet
 

@@ -15,6 +15,10 @@ pub struct DrawingOptions {
     /// sessions, gathered by the agent they are rather than by the place they
     /// are in.
     pub sections: bool,
+    /// Whether the pane draws the dashboard in place of the tree. The
+    /// dashboard draws one row for every agent, ordered by urgency, with one
+    /// column for every fact.
+    pub dashboard: bool,
     /// Whether an agent's row says whose turn it is.
     pub turn_state: bool,
     /// Whether the calls for the user are listed at the foot of the pane.
@@ -29,6 +33,7 @@ impl Default for DrawingOptions {
         DrawingOptions {
             label: Label::default(),
             sections: false,
+            dashboard: false,
             turn_state: true,
             notifications: true,
             status_line: None,

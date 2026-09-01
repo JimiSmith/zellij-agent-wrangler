@@ -9,7 +9,7 @@
 //! Nothing here knows what a terminal is. A row says what to draw, and never how
 //! to draw it.
 
-use agent_wrangler_core::agent::{Agent, SessionId};
+use agent_wrangler_core::agent::{Agent, SessionId, Turn};
 
 /// The stable name a multiplexer gives a pane.
 ///
@@ -224,6 +224,26 @@ impl RowKey {
     }
 }
 
+/// Which edge of its columns a cell's text sits against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellAlignment {
+    Left,
+    Right,
+}
+
+/// One cell of the dashboard table: the text it holds, and the columns that
+/// the text is padded to.
+///
+/// The builder fits the text to `width` and marks a cut. The drawing pads the
+/// text and never shortens it. Without that rule, a long value pushes every
+/// cell after it out of its column.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableCell {
+    pub text: String,
+    pub width: usize,
+    pub alignment: CellAlignment,
+}
+
 /// What a row is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowContent {
@@ -274,6 +294,39 @@ pub enum RowContent {
     NotificationBody {
         text: String,
     },
+    /// The row of column headings over the dashboard table.
+    ///
+    /// The row carries the same cell widths as every agent row under it, so a
+    /// heading sits over the column it names and the two cannot drift apart.
+    DashboardHeading {
+        /// The AGENT heading, which sits over the kind icon and the name
+        /// together.
+        name: TableCell,
+        /// The headings from TURN onward, in the order they draw.
+        cells: Vec<TableCell>,
+    },
+    /// One agent as one row of the dashboard table.
+    ///
+    /// The row carries two channels that the tree carries as one. `placement`
+    /// reaches the gutter alone, and `turn` decides how brightly the row
+    /// draws. The dashboard orders by urgency, so intensity says urgency
+    /// there.
+    DashboardAgent {
+        /// Whether the user is in this agent's pane, which the gutter marks.
+        placement: Placement,
+        /// Whose turn it is, which decides how brightly the row draws.
+        turn: Turn,
+        color: Option<NamedColor>,
+        /// The AGENT column, which the kind icon leads.
+        name: TableCell,
+        /// The columns from TURN onward, in the order they draw.
+        cells: Vec<TableCell>,
+    },
+    /// The dashboard draws no table, because no agent is running.
+    DashboardNoAgents,
+    /// The dashboard draws no table, because the pane is too narrow for the
+    /// AGENT column.
+    DashboardPaneTooNarrow,
 }
 
 /// The call of an agent for attention, as the notification area lists it. The

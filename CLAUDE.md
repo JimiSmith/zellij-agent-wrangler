@@ -180,6 +180,7 @@ plugin pane, so this is the only way to see what a sidebar drew.
 ```
 python3 -m unittest discover -s tests -v
 python3 tests/drive.py tests/scripts/agent_row.steps
+python3 tests/drive.py tests/scripts/dashboard_view.steps
 python3 tests/drive.py tests/scripts/tmux_tree.steps
 ```
 

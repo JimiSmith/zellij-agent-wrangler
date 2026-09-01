@@ -25,7 +25,11 @@ use ratatui_core::style::{Color, Modifier, Style};
 use ratatui_core::text::{Line, Span};
 use ratatui_core::widgets::Widget;
 
-use crate::model::{Branch, NamedColor, Placement, Row, RowContent, RowKey};
+use agent_wrangler_core::agent::Turn;
+
+use crate::model::{
+    Branch, CellAlignment, NamedColor, Placement, Row, RowContent, RowKey, TableCell,
+};
 
 /// Column 0: a block marks "where you are", and a space does not.
 ///
@@ -90,11 +94,104 @@ const BODY_INDENT: &str = "    ";
 /// the name that was not drawn.
 const ELLIPSIS: char = '…';
 
+/// What the dashboard says in place of a table.
+///
+/// A session with no agent gives the dashboard nothing to draw. A pane too
+/// narrow for the AGENT column gives it nowhere to draw. Neither line is a
+/// [`ClientProblem`], which says that the client is broken.
+///
+/// [`ClientProblem`]: crate::frame::ClientProblem
+const NO_AGENTS: &str = "no agents";
+const PANE_TOO_NARROW: &str = "widen the pane";
+
 /// The columns a description row has for its text in a pane `width` columns
 /// wide. The indent comes off the front, and the reserved right-hand column
 /// comes off the end. The result is never zero, so a wrap to it always ends.
 pub fn notification_body_field(width: usize) -> usize {
     width.saturating_sub(BODY_INDENT.len() + 1).max(1)
+}
+
+/// The column that a dashboard row starts its AGENT cell in.
+///
+/// The gutter, the space after it, the kind icon and the gap after the icon
+/// come before that column. The builder lays the table out from here, and
+/// [`parts`] draws it from here. The two therefore cannot drift apart.
+pub const DASHBOARD_NAME_COLUMN: usize = 2 + ICON_AND_GAP;
+
+/// The columns between one cell of a dashboard row and the next.
+pub const DASHBOARD_CELL_GAP: usize = 2;
+
+/// The columns kept clear between the last cell of a dashboard row and the turn
+/// marker.
+///
+/// The drawing pads every cell to the whole of its column, so the last cell
+/// reaches the edge of the table on every row. Without this gap, the marker
+/// touches that cell. A name in the tree reaches the edge only when it is long
+/// enough to be cut, so the tree needs no such gap.
+pub const DASHBOARD_MARKER_GAP: usize = 2;
+
+/// The columns kept clear between the turn marker of a dashboard row and the
+/// right edge of the pane.
+///
+/// A tree row draws its marker in the last column of the pane. A table has an
+/// edge of its own, and a marker against the edge of the pane reads as part of
+/// the frame rather than as part of the row. This gap gives the marker a space
+/// on each side.
+pub const DASHBOARD_MARKER_INSET: usize = 1;
+
+/// `text` fitted to `columns`, with an ellipsis at the end of text that the
+/// fit had to cut.
+///
+/// The dashboard cuts a value where it lays the table out. A table row must
+/// lose the tail of one cell rather than the columns at its right edge.
+/// [`elide`] cuts a whole line and stays the last resort.
+///
+/// Columns count as characters, which is the measure the table is composed
+/// with.
+pub fn cut_to_columns(text: &str, columns: usize) -> String {
+    if text.chars().count() <= columns {
+        return text.to_string();
+    }
+    let Some(room) = columns.checked_sub(1) else {
+        return String::new();
+    };
+    let mut cut: String = text.chars().take(room).collect();
+    cut.push(ELLIPSIS);
+    cut
+}
+
+/// One piece of a table row.
+enum Field {
+    /// Text drawn as written, in the style of the row: the gutter, a gap, or a
+    /// cell already padded to its columns.
+    Text(String),
+    /// The kind icon, drawn in the color of the session.
+    Icon {
+        glyph: char,
+        color: Option<NamedColor>,
+    },
+}
+
+/// The text of one cell, padded to the columns of that cell.
+fn padded(cell: &TableCell) -> String {
+    let room = cell.width.saturating_sub(cell.text.chars().count());
+    match cell.alignment {
+        CellAlignment::Left => format!("{}{:room$}", cell.text, ""),
+        CellAlignment::Right => format!("{:room$}{}", "", cell.text),
+    }
+}
+
+/// The fields of a run of cells: a gap before each one, then the cell itself.
+fn cell_fields(cells: &[TableCell]) -> Vec<Field> {
+    cells
+        .iter()
+        .flat_map(|cell| {
+            [
+                Field::Text(format!("{:DASHBOARD_CELL_GAP$}", "")),
+                Field::Text(padded(cell)),
+            ]
+        })
+        .collect()
 }
 
 /// The text of a row, split so that a color can land on the kind icon alone.
@@ -109,6 +206,8 @@ enum Parts {
         tail: String,
         color: Option<NamedColor>,
     },
+    /// A dashboard row, as a run of fields at fixed offsets.
+    Columns(Vec<Field>),
 }
 
 /// The pieces of a child row: the gutter, the branch and the index, then the
@@ -210,6 +309,38 @@ fn parts(content: &RowContent) -> Parts {
             color: *color,
         },
         RowContent::NotificationBody { text } => Parts::Whole(format!("{BODY_INDENT}{text}")),
+        // The heading row draws spaces where an agent row draws its kind icon
+        // and the gap after it. Both rows therefore start the AGENT column in
+        // the same place.
+        RowContent::DashboardHeading { name, cells } => {
+            let mut fields = vec![
+                Field::Text(format!("{:DASHBOARD_NAME_COLUMN$}", "")),
+                Field::Text(padded(name)),
+            ];
+            fields.extend(cell_fields(cells));
+            Parts::Columns(fields)
+        }
+        RowContent::DashboardAgent {
+            placement,
+            name,
+            cells,
+            color,
+            ..
+        } => {
+            let mut fields = vec![
+                Field::Text(format!("{} ", gutter(placement.is_focused_pane()))),
+                Field::Icon {
+                    glyph: ICON_AGENT,
+                    color: *color,
+                },
+                Field::Text(ICON_GAP.to_string()),
+                Field::Text(padded(name)),
+            ];
+            fields.extend(cell_fields(cells));
+            Parts::Columns(fields)
+        }
+        RowContent::DashboardNoAgents => Parts::Whole(format!("  {NO_AGENTS}")),
+        RowContent::DashboardPaneTooNarrow => Parts::Whole(format!("  {PANE_TOO_NARROW}")),
     }
 }
 
@@ -222,6 +353,13 @@ pub fn row_text(content: &RowContent) -> String {
         Parts::Split {
             head, icon, tail, ..
         } => format!("{head}{icon}{tail}"),
+        Parts::Columns(fields) => fields
+            .iter()
+            .map(|field| match field {
+                Field::Text(text) => text.clone(),
+                Field::Icon { glyph, .. } => glyph.to_string(),
+            })
+            .collect(),
     }
 }
 
@@ -245,6 +383,17 @@ pub fn row_line(content: &RowContent) -> Line<'static> {
             Span::styled(icon.to_string(), own_color(base, color)),
             Span::styled(tail, base),
         ]),
+        Parts::Columns(fields) => Line::from(
+            fields
+                .into_iter()
+                .map(|field| match field {
+                    Field::Text(text) => Span::styled(text, base),
+                    Field::Icon { glyph, color } => {
+                        Span::styled(glyph.to_string(), own_color(base, color))
+                    }
+                })
+                .collect::<Vec<Span<'static>>>(),
+        ),
     }
 }
 
@@ -274,6 +423,13 @@ pub fn base_style(content: &RowContent) -> Style {
         // Dimmed, so the title leads and the description reads as its detail.
         // Intensity is not available for that: it says where you are.
         RowContent::NotificationBody { .. } => Style::new().add_modifier(Modifier::DIM),
+        RowContent::DashboardHeading { .. } => Style::new()
+            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::UNDERLINED),
+        RowContent::DashboardAgent { turn, .. } => urgency(*turn),
+        // What the dashboard says about itself instead of a table. The line
+        // must read plainly, so it takes neither channel.
+        RowContent::DashboardNoAgents | RowContent::DashboardPaneTooNarrow => Style::new(),
     }
 }
 
@@ -289,6 +445,20 @@ fn intensity(placement: Placement) -> Style {
         Placement::FocusedPane => Style::new().add_modifier(Modifier::BOLD),
         Placement::SameTab => Style::new(),
         Placement::OtherTab => Style::new().add_modifier(Modifier::DIM),
+    }
+}
+
+/// How brightly a dashboard row draws, which is the one channel that says how
+/// urgent the row is.
+///
+/// The dashboard orders by urgency, so the agent that wants you leads the pane
+/// and draws brightest. The tree orders by place, so intensity says placement
+/// there. The gutter says where you are in both views.
+fn urgency(turn: Turn) -> Style {
+    match turn {
+        Turn::Attention => Style::new().add_modifier(Modifier::BOLD),
+        Turn::Working => Style::new(),
+        Turn::Idle => Style::new().add_modifier(Modifier::DIM),
     }
 }
 
@@ -376,6 +546,22 @@ fn elide(line: Line<'static>, field: usize) -> Line<'static> {
     Line::from(kept)
 }
 
+/// The columns that a row keeps clear at the right edge of the pane, after its
+/// turn marker.
+///
+/// A tree row keeps none, and its marker sits in the last column. Every
+/// dashboard row keeps the same number, the heading included, so that a heading
+/// and the rows under it stop in the same column.
+fn marker_inset(content: &RowContent) -> u16 {
+    match content {
+        RowContent::DashboardHeading { .. }
+        | RowContent::DashboardAgent { .. }
+        | RowContent::DashboardNoAgents
+        | RowContent::DashboardPaneTooNarrow => DASHBOARD_MARKER_INSET as u16,
+        _ => 0,
+    }
+}
+
 /// The finished pane: every row drawn in order, with the selected row in reverse
 /// video.
 ///
@@ -398,12 +584,15 @@ impl Sidebar<'_> {
     /// The cells of one row: the text fitted to everything but the last column,
     /// then the marker in the column kept back for it.
     fn draw(&self, row: &Row, area: Rect, buf: &mut Buffer) {
-        let field = area.width.saturating_sub(1);
+        // The marker takes one column, and the text takes every column before
+        // it. One number therefore says both where the marker goes and how much
+        // room the text has.
+        let marker = area.width.saturating_sub(1 + marker_inset(&row.content));
         let base = base_style(&row.content);
-        let line = elide(row_line(&row.content), field as usize);
-        buf.set_line(area.x, area.y, &line, field);
+        let line = elide(row_line(&row.content), marker as usize);
+        buf.set_line(area.x, area.y, &line, marker);
         if let Some((glyph, color)) = row.indicator.glyph_and_color() {
-            if let Some(cell) = buf.cell_mut((area.x + field, area.y)) {
+            if let Some(cell) = buf.cell_mut((area.x + marker, area.y)) {
                 cell.set_char(glyph).set_style(own_color(base, color));
             }
         }
@@ -826,6 +1015,194 @@ mod tests {
             false,
         );
         assert_eq!(buf[(11, 0)].symbol(), " ");
+    }
+
+    /// A cell of `width` columns holding `text`, left against its edge.
+    fn cell(text: &str, width: usize) -> TableCell {
+        TableCell {
+            text: text.to_string(),
+            width,
+            alignment: CellAlignment::Left,
+        }
+    }
+
+    /// One agent row of the table, with `width` columns for its name.
+    fn dashboard_agent(
+        name: &str,
+        width: usize,
+        turn: Turn,
+        placement: Placement,
+        color: Option<NamedColor>,
+    ) -> RowContent {
+        RowContent::DashboardAgent {
+            placement,
+            turn,
+            color,
+            name: cell(name, width),
+            cells: vec![cell("working", 9), cell("1 wrangler", 10)],
+        }
+    }
+
+    #[test]
+    fn a_dashboard_heading_sits_over_the_columns_it_names() {
+        // The heading row draws spaces where an agent row draws its kind icon.
+        // The two rows therefore start every column in the same place, and a
+        // wider AGENT column moves both together.
+        //
+        // Every cell here holds text that fits. The builder guarantees that,
+        // because the drawing pads a cell and never shortens one.
+        for width in [5usize, 8, 20] {
+            let heading = RowContent::DashboardHeading {
+                name: cell("AGENT", width),
+                cells: vec![cell("TURN", 9), cell("TAB", 10)],
+            };
+            let row = dashboard_agent("docs", width, Turn::Working, Placement::SameTab, None);
+            let above = row_text(&heading);
+            let below = row_text(&row);
+            assert_eq!(
+                above.chars().count(),
+                below.chars().count(),
+                "width {width}"
+            );
+            for (name, value) in [
+                ("AGENT", "docs"),
+                ("TURN", "working"),
+                ("TAB", "1 wrangler"),
+            ] {
+                assert_eq!(
+                    column_of(&above, name),
+                    column_of(&below, value),
+                    "width {width}: {name} over {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_dashboard_row_pads_a_short_cell_and_never_shortens_a_long_one() {
+        // The drawing pads and nothing else. A cell arrives already fitted to
+        // its columns. A value that overflows one here pushes every column
+        // after it out of place.
+        assert_eq!(
+            row_text(&dashboard_agent(
+                "docs",
+                8,
+                Turn::Idle,
+                Placement::SameTab,
+                None
+            )),
+            "  \u{f167a}  docs      working    1 wrangler"
+        );
+    }
+
+    #[test]
+    fn a_count_sits_against_the_right_of_its_column() {
+        let row = RowContent::DashboardHeading {
+            name: cell("AGENT", 5),
+            cells: vec![TableCell {
+                text: "122k".to_string(),
+                width: 6,
+                alignment: CellAlignment::Right,
+            }],
+        };
+        assert_eq!(row_text(&row), "     AGENT    122k");
+    }
+
+    #[test]
+    fn a_dashboard_row_draws_its_color_on_the_icon_and_nowhere_else() {
+        let content = dashboard_agent(
+            "docs",
+            8,
+            Turn::Working,
+            Placement::SameTab,
+            Some(NamedColor::Cyan),
+        );
+        let buf = drawn(&Row::new(content), 40, false);
+        assert_eq!(buf[(2, 0)].symbol(), ICON_AGENT.to_string());
+        assert_eq!(buf[(2, 0)].fg, Color::Cyan, "the icon carries the color");
+        assert_eq!(buf[(5, 0)].fg, Color::Reset, "the name stays default");
+    }
+
+    #[test]
+    fn a_dashboard_row_draws_its_intensity_from_the_turn_rather_than_the_place() {
+        // The dashboard orders by urgency, so the agent that wants you leads
+        // the pane and draws brightest. The tree orders by place, so intensity
+        // says placement there.
+        for (turn, bold, dim) in [
+            (Turn::Attention, true, false),
+            (Turn::Working, false, false),
+            (Turn::Idle, false, true),
+        ] {
+            // The placement is the same in all three, so nothing but the turn
+            // can move the intensity.
+            let style = base_style(&dashboard_agent("docs", 8, turn, Placement::OtherTab, None));
+            assert_eq!(
+                style.add_modifier.contains(Modifier::BOLD),
+                bold,
+                "{turn:?}"
+            );
+            assert_eq!(style.add_modifier.contains(Modifier::DIM), dim, "{turn:?}");
+        }
+    }
+
+    #[test]
+    fn the_gutter_of_a_dashboard_row_still_says_where_you_are() {
+        for (placement, gutter) in [
+            (Placement::FocusedPane, '\u{258c}'),
+            (Placement::SameTab, ' '),
+            (Placement::OtherTab, ' '),
+        ] {
+            let row = dashboard_agent("docs", 8, Turn::Attention, placement, None);
+            assert!(row_text(&row).starts_with(gutter), "{placement:?}");
+        }
+    }
+
+    #[test]
+    fn a_dashboard_row_keeps_a_space_on_each_side_of_its_marker() {
+        let row = Row::new(dashboard_agent(
+            "docs",
+            8,
+            Turn::Attention,
+            Placement::SameTab,
+            None,
+        ))
+        .with_key(RowKey::Agent(
+            agent_wrangler_core::agent::SessionId::new("one").unwrap(),
+        ))
+        .with_indicator(Indicator::Attention);
+        let inset = DASHBOARD_MARKER_INSET as u16;
+        for width in [4u16, 12, 40] {
+            let buf = drawn(&row, width, false);
+            assert_eq!(text(&buf, 0).chars().count(), width as usize, "{width}");
+            assert_eq!(buf[(width - 1 - inset, 0)].symbol(), "\u{25cf}", "{width}");
+            // The marker sits inside the pane rather than against its edge.
+            assert_eq!(buf[(width - 1, 0)].symbol(), " ", "{width}");
+        }
+    }
+
+    #[test]
+    fn what_the_dashboard_says_about_itself_draws_in_neither_channel() {
+        for content in [
+            RowContent::DashboardNoAgents,
+            RowContent::DashboardPaneTooNarrow,
+        ] {
+            assert_eq!(base_style(&content), Style::new(), "{content:?}");
+        }
+        assert_eq!(row_text(&RowContent::DashboardNoAgents), "  no agents");
+        assert_eq!(
+            row_text(&RowContent::DashboardPaneTooNarrow),
+            "  widen the pane"
+        );
+    }
+
+    #[test]
+    fn a_cut_cell_carries_its_mark_and_a_cell_that_fits_carries_none() {
+        assert_eq!(cut_to_columns("branch", 6), "branch");
+        assert_eq!(cut_to_columns("branch", 10), "branch");
+        assert_eq!(cut_to_columns("a-long-branch", 6), "a-lon\u{2026}");
+        // A column with no room at all draws nothing rather than a bare mark.
+        assert_eq!(cut_to_columns("branch", 0), "");
+        assert_eq!(cut_to_columns("branch", 1), "\u{2026}");
     }
 
     #[test]

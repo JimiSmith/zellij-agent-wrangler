@@ -86,6 +86,12 @@ replay it into a character grid. That harness is now in `tests/`: `screen.py` is
 the grid, `drive.py` runs a script of steps against a pty, and
 `tests/scripts/agent_row.steps` drives the whole path end to end, from a hook
 typed into a real pane to the row it draws and the call it answers.
+`tests/scripts/dashboard_view.steps` drives the same path into the other view,
+and asserts on the columns of the table and on the word that the TURN column
+draws for a call. Every run opens a layout that the harness owns:
+`tests/tree.kdl` by default, and `tests/dashboard.kdl` for that one. `dev.kdl`
+is where a developer tries the sidebar by hand, so a change there must not move
+what a run asserts on.
 `tests/scripts/two_sidebars.steps` does the same with two sidebars on one held
 pipe, which is the case where two writers share one stream.
 `tests/scripts/held_pipe.steps` counts the pipes alive between two publishes,

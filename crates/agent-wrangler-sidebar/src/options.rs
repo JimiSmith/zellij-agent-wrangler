@@ -46,6 +46,7 @@ impl Options {
                     .and_then(|value| Label::read(value))
                     .unwrap_or(default.view.label),
                 sections: flag("sections", default.view.sections),
+                dashboard: flag("dashboard", default.view.dashboard),
                 turn_state: flag("turn_state", default.view.turn_state),
                 notifications: flag("notifications", default.view.notifications),
                 status_line: configuration
@@ -90,6 +91,15 @@ mod tests {
         assert_eq!(read(&[]), Options::default());
         assert!(read(&[("sections", "yes")]).view.sections);
         assert!(!read(&[("turn_state", "off")]).view.turn_state);
+        assert!(read(&[("dashboard", "1")]).view.dashboard);
+    }
+
+    #[test]
+    fn the_dashboard_is_off_until_the_layout_asks_for_it() {
+        assert!(!read(&[]).view.dashboard);
+        // A value the option does not recognize costs the setting, not the
+        // sidebar.
+        assert!(!read(&[("dashboard", "sometimes")]).view.dashboard);
     }
 
     #[test]

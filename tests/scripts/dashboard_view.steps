@@ -1,0 +1,83 @@
+# The dashboard, end to end. A hook fires from inside a real pane and reaches
+# the daemon. The daemon pipes the state into the zellij session. The sidebar
+# draws that agent as one row of a table.
+#
+# The unit tests pin the rows that the builder makes. Only this run proves that
+# the plugin draws them, because `zellij action dump-screen` returns nothing for
+# the pane of a plugin.
+#
+# The layout is the harness's own. `dev.kdl` is where a developer tries the
+# sidebar by hand, so a change there must not move what this run asserts on.
+
+env: ZELLIJ_CONFIG_DIR=$PWD/tests/zellij-config
+env: TERM=xterm-256color
+env: XDG_STATE_HOME=$PWD/tests/out/state
+env: XDG_CACHE_HOME=$PWD/tests/out/cache
+# The daemon socket is named for the user. Without a name of its own, a run
+# reports to the daemon of the client that the developer installed.
+env: USER=wrangler-test
+
+# If an interrupted run leaves a session behind, this run fails to start rather
+# than fails an assertion.
+sh?: tests/scripts/reset.sh wrangler-test-dashboard
+sh?: rm -f tests/out/dashboard-pane.txt
+
+sh: cargo build --target wasm32-wasip1 -p zellij-agent-wrangler
+sh: cargo build -p agent-wrangler
+sh: tests/scripts/make-layout.sh tests/out/dashboard.kdl off tests/dashboard.kdl
+
+# One answer, so the session has a branch, a model and a count for the BRANCH,
+# MODEL and CTX columns. The counts add up to 4200, which the row draws as `4k`.
+sh: printf '%s\n' '{"type":"assistant","gitBranch":"main","message":{"model":"claude-opus-5","usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":4000,"output_tokens":198}}}' >> tests/out/e2e-transcript.jsonl
+
+# The table needs more room than a sidebar column. The default window is 80
+# columns, and the sidebar of this layout alone is 96.
+resize: 40x160
+
+spawn: zellij --session wrangler-test-dashboard --new-session-with-layout tests/out/dashboard.kdl
+
+# The dashboard draws no tab row and no pane row. The name of a tab is
+# therefore no longer the proof that the sidebar is alive. The line that the
+# dashboard draws with no agent running takes that role.
+wait: no agents @ 25
+
+# This is what the hook of a real agent does, from the pane that a real agent
+# runs in. The pane is the source of `ZELLIJ_PANE_ID`, and that variable alone
+# decides which pane the record lands under.
+keys: printf '%s' '{"session_id":"dash-one","cwd":"/home/u/quarry","transcript_path":"'"$PWD"'/tests/out/e2e-transcript.jsonl"}' | "$PWD/target/debug/agent-wrangler" hook claude start\r
+# The same pane says which pane it is. The call below is reported from the host
+# rather than typed here, so the host needs the number.
+keys: echo "$ZELLIJ_PANE_ID" > tests/out/dashboard-pane.txt\r
+sleep: 2
+
+# The label that the transcript gives the session. If it appears at all, the
+# hook reached the daemon and the daemon reached this session. The heading row
+# arrives with the first agent, because a table with no row draws none.
+wait: AGENT @ 20
+wait: QUARRYMARK @ 20
+
+# The columns of that row. Reaching the screen proves the whole path. The
+# daemon read one answer out of the transcript, the three values rode the wire,
+# and the table spelled each one in its own column.
+wait: 1 wrangler @ 20
+wait: opus-5 @ 20
+wait: 4k @ 20
+dump: dashboard_idle
+
+# A second tab, so that the user leaves the pane that the agent runs in. A call
+# raised in the pane the user sits in is answered where it lands, and the word
+# never reaches the screen. Ctrl-t is the stock tab mode, and n opens a tab.
+keys: <C-t>
+keys: n
+sleep: 2
+
+# The call comes from the host, because the pane that raises it is now in
+# another tab. The sidebar of this tab draws every agent of the session.
+sh: sh -c 'tests/scripts/raise-call.sh dash-one wrangler-test-dashboard "$(cat tests/out/dashboard-pane.txt)" needsAttention'
+
+# The TURN column says in words what the marker says at the right edge.
+wait: wants you @ 20
+dump: dashboard_wants_you
+
+keys: <C-q>
+sleep: 1

@@ -8,6 +8,10 @@
 //! A template is parsed once, when the options are read. Drawing a row
 //! therefore runs no check and cannot fail.
 //!
+//! [`short_model_name`] and [`short_token_count`] are public, because the
+//! dashboard spells the same two values in its own columns. Both views then
+//! read a model and a count the same way.
+//!
 //! [`label`]: crate::label::label
 
 use crate::agent::Agent;
@@ -54,8 +58,8 @@ impl StatusField {
     fn spell(self, agent: &Agent) -> String {
         match self {
             StatusField::Branch => agent.status.branch.clone(),
-            StatusField::Model => model_name(&agent.status.model),
-            StatusField::ContextTokens => token_count(agent.status.context_tokens),
+            StatusField::Model => short_model_name(&agent.status.model),
+            StatusField::ContextTokens => short_token_count(agent.status.context_tokens),
         }
     }
 }
@@ -65,7 +69,7 @@ impl StatusField {
 /// The record keeps the id that the agent wrote, because the id is the fact.
 /// This drops the prefix that every id carries and the date that some ids end
 /// with, so `claude-opus-4-5-20251101` reads `opus-4-5`.
-fn model_name(id: &str) -> String {
+pub fn short_model_name(id: &str) -> String {
     let named = id.strip_prefix(MODEL_PREFIX).unwrap_or(id);
     match named.rsplit_once('-') {
         Some((head, tail))
@@ -77,12 +81,12 @@ fn model_name(id: &str) -> String {
     }
 }
 
-/// A count of tokens, short enough to sit beside two other values.
+/// A count of tokens, short enough for a narrow field.
 ///
 /// A count of nothing draws nothing, because a session that has answered
 /// nothing has spent no context. Anything from a thousand up draws in
 /// thousands, rounded to the nearest one.
-fn token_count(tokens: u64) -> String {
+pub fn short_token_count(tokens: u64) -> String {
     match tokens {
         0 => String::new(),
         counted if counted < IN_FULL => counted.to_string(),
@@ -290,15 +294,15 @@ mod tests {
             ("gpt-5", "gpt-5"),
             ("", ""),
         ] {
-            assert_eq!(model_name(id), want, "{id}");
+            assert_eq!(short_model_name(id), want, "{id}");
         }
     }
 
     #[test]
     fn a_tail_of_digits_that_is_not_a_date_is_part_of_the_name() {
         // Only a run of exactly eight digits reads as a date.
-        assert_eq!(model_name("claude-opus-4-5"), "opus-4-5");
-        assert_eq!(model_name("claude-opus-123456789"), "opus-123456789");
+        assert_eq!(short_model_name("claude-opus-4-5"), "opus-4-5");
+        assert_eq!(short_model_name("claude-opus-123456789"), "opus-123456789");
     }
 
     #[test]
@@ -313,7 +317,7 @@ mod tests {
             (195_547, "196k"),
             (1_200_000, "1200k"),
         ] {
-            assert_eq!(token_count(tokens), want, "{tokens}");
+            assert_eq!(short_token_count(tokens), want, "{tokens}");
         }
     }
 }

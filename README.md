@@ -158,6 +158,8 @@ plugin location="..." {
     label "name"                 // agent rows: 'name' (session title, or the
                                  // working directory) | 'dir'
     sections false               // one section for each agent, below the tree
+    dashboard false              // one row for each agent, in a table, in
+                                 // place of the tree
     turn_state true              // '○' mid-turn, '●' when the agent wants you
     notifications true           // the calls for you, at the foot
     status_line ""               // a second line under each agent row
@@ -179,6 +181,40 @@ installed from. The install script and `dev.sh` write the path in for you.
 
 `sections on` draws the tree. Below the tree it draws the same sessions again,
 in a group for each agent, not in a group for each tab.
+
+### The dashboard
+
+`dashboard on` draws a table in place of the tree. Every agent takes one row,
+and every fact takes a column. No row draws for a tab or for a pane.
+
+```
+     AGENT               TURN       TAB         PANE        BRANCH    MODEL   CTX
+  󱙺  migrate the runner  wants you  3 infra     ssh prod-1  infra/ci  opus-5  122k ●
+▌ 󱙺  the zellij port     working    1 wrangler  claude      main      opus-5  196k ○
+  󱙺  docs                idle       2 notes     copilot     docs      opus-5   88k
+```
+
+The rows sort by urgency. An agent that wants you leads. An agent mid-turn
+follows. An idle agent goes last. Inside the first group, the agent that has
+waited longest leads. Two agents that report the same facts keep the same order
+between two draws, so a row never moves under the selection.
+
+Brightness says urgency in this view. An agent that wants you draws bright, an
+agent mid-turn draws plain, and an idle agent draws dim. In the tree,
+brightness says where you are. The `▌` gutter says where you are in both views.
+
+Give the pane more width than a sidebar needs. The table drops a column at a
+time from its right edge as the pane narrows: CTX first, then MODEL, BRANCH,
+PANE, TAB and TURN. The AGENT column and the turn marker never drop. A pane too
+narrow even for the AGENT column draws one line that asks you to widen it.
+
+`sections` and `status_line` do nothing while the dashboard draws. The table
+gives the branch, the model and the count a column each, and one row for each
+agent is the point of the view. The dashboard lists no calls at the foot,
+because the agents that want you already lead the table. Answering a call works
+as it always does.
+
+The tmux client draws the tree. That client reads no options yet.
 
 ### The status line
 

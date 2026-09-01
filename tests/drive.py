@@ -435,10 +435,20 @@ class Runner:
         self.dump(argument)
 
     def _step_resize(self, argument):
+        """Sets the size of the terminal.
+
+        Before a spawn this sets the size that the child is started at. A
+        program that needs more room than the default gets it from the first
+        byte it writes, rather than from a resize that it has to survive.
+
+        After a spawn this resizes the child that is running.
+        """
         rows, _, cols = argument.partition("x")
-        child = self._need_pty("resize")
         self.rows = int(rows)
         self.cols = int(cols)
+        child = self.pty
+        if child is None:
+            return
         child.screen.rows = self.rows
         child.screen.cols = self.cols
         # The reset builds the grid again at the new size. Everything from

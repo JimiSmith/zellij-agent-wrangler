@@ -17,7 +17,7 @@ use crate::options::DrawingOptions;
 
 /// The marker the row of an agent carries at its right edge. If the client is
 /// asked not to say whose turn it is, the marker is nothing at all.
-fn indicator(agent: &Agent, options: &DrawingOptions) -> Indicator {
+pub(crate) fn indicator(agent: &Agent, options: &DrawingOptions) -> Indicator {
     match (options.turn_state, agent.turn) {
         (false, _) | (_, Turn::Idle) => Indicator::None,
         (_, Turn::Working) => Indicator::Working,
@@ -124,7 +124,7 @@ fn tab_placement(active: bool) -> Placement {
 /// active tab. A pane of a tab you are not in is always `Unfocused`. That pane
 /// can be the pane the tab restores you to, or not. A tab you are not in recedes
 /// as a block.
-fn pane_placement(tab_active: bool, focused: bool) -> Placement {
+pub(crate) fn pane_placement(tab_active: bool, focused: bool) -> Placement {
     match (tab_active, focused) {
         (false, _) => Placement::OtherTab,
         (true, true) => Placement::FocusedPane,

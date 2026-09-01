@@ -1,0 +1,83 @@
+// The layout that every end to end run of the tree sidebar opens.
+//
+// `dev.kdl` is where a developer tries the sidebar by hand, so it changes. This
+// file is the harness's own, and it changes only when a test needs it to. A run
+// that asserts on a drawn row must not fail because someone moved a tab.
+//
+// The block names every option, so that a run exercises the reading of all of
+// them. `dashboard false` keeps the tree, which is what these runs assert on.
+// `tests/dashboard.kdl` is the layout for the other view.
+//
+// PLUGIN_LOCATION takes the absolute path of the built wasm, and
+// CLIENT_LOCATION the absolute path of the built client. `make-layout.sh`
+// writes both, and rewrites `desktop_notification` when a run names a notifier.
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane split_direction="vertical" {
+            pane size=32 borderless=true {
+                plugin location="PLUGIN_LOCATION" {
+                    // Every option. Both templates carry the same block,
+                    // because a later tab takes its configuration from its own
+                    // template.
+                    //
+                    // The status line is on, because `agent_row.steps` asserts
+                    // on the line that it draws. `make-layout.sh` writes the
+                    // notifier, so the value here is the one a run gets when it
+                    // names none.
+                    label "name"
+                    sections false
+                    dashboard false
+                    turn_state true
+                    notifications true
+                    status_line "{branch} · {model} · {context_tokens}"
+                    desktop_notification "off"
+                    install_hooks "CLIENT_LOCATION"
+                }
+            }
+            children
+        }
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    new_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane split_direction="vertical" {
+            pane size=32 borderless=true {
+                plugin location="PLUGIN_LOCATION" {
+                    // Every option. Both templates carry the same block,
+                    // because a later tab takes its configuration from its own
+                    // template.
+                    //
+                    // The status line is on, because `agent_row.steps` asserts
+                    // on the line that it draws. `make-layout.sh` writes the
+                    // notifier, so the value here is the one a run gets when it
+                    // names none.
+                    label "name"
+                    sections false
+                    dashboard false
+                    turn_state true
+                    notifications true
+                    status_line "{branch} · {model} · {context_tokens}"
+                    desktop_notification "off"
+                    install_hooks "CLIENT_LOCATION"
+                }
+            }
+            pane
+        }
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    tab name="wrangler" focus=true {
+        pane
+    }
+    tab name="notes" {
+        pane
+    }
+}

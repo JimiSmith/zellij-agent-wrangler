@@ -71,13 +71,39 @@ row says: the directory, the title, and the teammate name. Composing those into
 a label is the sidebar's, which is why the label option changes every row at
 once with no agent reporting itself again.
 
+## The dashboard
+
+- [x] A second view, behind the `dashboard` option, in place of the tree
+- [x] One row for every agent, and no row for a tab or a pane
+- [x] A column each for the turn, the tab, the pane, the branch, the model and
+      the context of the last answer
+- [x] Rows ordered by urgency: the agents that want you lead, and inside that
+      group the longest wait leads
+- [x] Columns dropped one at a time from the right edge as the pane narrows
+- [ ] Subagents and teammates as rows under the agent that started them
+- [ ] The last message of an agent, under the row that the space key expands
+
+The order compares two readings of `raised` and reads no clock of its own. That
+is what lets the view live in a crate that also builds for wasm, where a wall
+clock is not a given. The design draws a column that holds how long an agent
+waited. A duration needs a clock read where the row is drawn, so that column is
+not here.
+
+The order reverses `Registry::calling`, which puts the most recent call first
+for the notification area. A list of calls answers "what just happened". A
+dashboard answers "who has waited longest".
+
+Brightness says urgency in this view rather than placement. The rows sort by
+urgency, so without that the agent that wants you is usually the dimmest row on
+the pane. The gutter still says where you are.
+
 ## Drawing
 
 - [x] Gutter marking the tab you are in and the pane you are in
 - [x] Tree branches, index prefixes, heading spacing and case
 - [x] Kind icons: pane, agent
 - [x] A child's color rides on its icon alone; a tab row colors its whole line
-- [x] Intensity says placement: bold where you are, dim for a tab you are not in
+- [x] Intensity says placement in the tree, and urgency in the dashboard
 - [x] The selection bar spans the width and drops the color and dimming it covers
 - [x] Only the sidebar the keys would reach draws a selection bar at all
 - [x] Rows fitted to the pane width, padded or cut from the right
@@ -237,6 +263,7 @@ rather than installed again beside itself.
       plugin configuration: label mode, sections, turn state, notification area,
       desktop notification, installing the hooks on load
 - [x] A status line template, as plugin configuration
+- [x] The dashboard, as plugin configuration
 
 Width is the layout's. A plugin cannot size its own pane, and the pane the
 sidebar is in is declared where every other pane of the tab is declared, so a

@@ -17,9 +17,14 @@
 # client, and the last sidebar to register sets what that client wants. If the
 # templates of a layout disagree, the order of the tabs at open time settles the
 # result.
+#
+# The layout comes from `tests/tree.kdl` unless the caller names another one.
+# The harness owns that file, so that a change to `dev.kdl` cannot move what a
+# run asserts on. A run that needs another layout names it.
 set -eu
 out=$1
 notifier=${2:-off}
+source_layout=${3:-tests/tree.kdl}
 root=$(cd "$(dirname "$0")/../.." && pwd)
 wasm="$root/target/wasm32-wasip1/debug/zellij-agent-wrangler.wasm"
 
@@ -28,7 +33,7 @@ mkdir -p "$(dirname "$out")" "$root/tests/out/cache/zellij"
 sed -e "s#PLUGIN_LOCATION#file:$wasm#" \
     -e "s#CLIENT_LOCATION#$root/tests/scripts/wrangler-probe.sh#" \
     -e "s#desktop_notification \"[^\"]*\"#desktop_notification \"$notifier\"#" \
-    "$root/dev.kdl" >"$out"
+    "$root/$source_layout" >"$out"
 
 printf '%s\n' '{"type":"custom-title","customTitle":"QUARRYMARK"}' \
     >"$root/tests/out/e2e-transcript.jsonl"

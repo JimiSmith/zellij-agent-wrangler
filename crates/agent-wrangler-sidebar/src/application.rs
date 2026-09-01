@@ -5,7 +5,7 @@ use agent_wrangler_core::label::label;
 use agent_wrangler_core::registry::Registry;
 use agent_wrangler_ui::frame::{build_frame, ClientProblem, Frame};
 use agent_wrangler_ui::model::{NamedColor, Notification, PaneId, RowKey, TabPosition};
-use agent_wrangler_ui::{selection, tree, Rect};
+use agent_wrangler_ui::{dashboard, selection, tree, Rect};
 
 use crate::calls::AnsweredCalls;
 use crate::helper_program::HelperProgramState;
@@ -616,8 +616,19 @@ impl Application {
                 text,
             });
         }
-        let rows = tree::build_tree(session, &self.options.view);
-        let notices = self.notifications();
+        // The dashboard draws no notification area. The agents that want you
+        // already lead its table, so the calls at the foot repeat what the
+        // first rows say.
+        let (rows, notices) = match self.options.view.dashboard {
+            true => (
+                dashboard::build_dashboard(session, area.width as usize, &self.options.view),
+                Vec::new(),
+            ),
+            false => (
+                tree::build_tree(session, &self.options.view),
+                self.notifications(),
+            ),
+        };
         build_frame(&problems, &rows, &notices, area, &self.options.view)
     }
 }
@@ -652,6 +663,7 @@ mod tests {
     use agent_wrangler_core::agent::{LabelFacts, StatusFacts};
     use agent_wrangler_core::origin::Origin;
     use agent_wrangler_ui::ansi;
+    use agent_wrangler_ui::model::RowContent;
     use agent_wrangler_ui::options::{DrawingOptions, StatusTemplate};
 
     fn tab(id: &str, position: usize) -> TabReport {
@@ -1512,6 +1524,120 @@ mod tests {
                 "line {line}"
             );
         }
+    }
+
+    /// A sidebar that draws the dashboard rather than the tree.
+    fn dashboard_app() -> Application {
+        let mut app = Application::new(Options {
+            view: DrawingOptions {
+                dashboard: true,
+                ..DrawingOptions::default()
+            },
+            ..Options::default()
+        });
+        app.reduce(Input::VisibilityChanged(true));
+        app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["%7", "%8"])])));
+        app.reduce(Input::PermissionReported(Permission::Granted));
+        app
+    }
+
+    #[test]
+    fn the_dashboard_draws_one_row_per_agent_and_no_notification_area() {
+        // The agents that want you already lead the table, so the calls at the
+        // foot repeat the first rows.
+        let mut app = dashboard_app();
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        app.reduce(Input::Agents(agents(&[
+            ("one", "%7", Turn::Attention),
+            ("two", "%8", Turn::Working),
+        ])));
+        let view = app.render(Rect::new(0, 0, 60, 12));
+
+        let rows = view.frame.lines();
+        assert!(matches!(
+            rows[0].content,
+            RowContent::DashboardHeading { .. }
+        ));
+        assert_eq!(
+            rows[1..3]
+                .iter()
+                .map(|row| row.key.clone())
+                .collect::<Vec<Option<RowKey>>>(),
+            vec![
+                Some(RowKey::Agent(SessionId::new("one").unwrap())),
+                Some(RowKey::Agent(SessionId::new("two").unwrap())),
+            ]
+        );
+        assert!(rows
+            .iter()
+            .all(|row| !matches!(row.content, RowContent::NotificationTitle { .. })));
+        assert!(rows
+            .iter()
+            .all(|row| !matches!(row.content, RowContent::Tab { .. })));
+    }
+
+    #[test]
+    fn a_call_is_still_answered_while_the_dashboard_draws() {
+        // Answering runs off the confirmed focus, not off the notification
+        // area that the dashboard leaves out.
+        let mut app = dashboard_app();
+        app.reduce(focus("10", FocusTarget::Content(PaneId::new("%7"))));
+        let decision = app.reduce(Input::Agents(agents(&[("call", "%7", Turn::Attention)])));
+
+        assert!(decision.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Tell(ClientMessage::Seen(session)) if session.as_str() == "call"
+        )));
+    }
+
+    #[test]
+    fn the_keys_move_over_the_dashboard_rows_and_enter_reaches_the_pane() {
+        let mut app = dashboard_app();
+        app.reduce(focus("10", FocusTarget::Sidebar));
+        app.reduce(Input::Agents(agents(&[
+            ("one", "%7", Turn::Working),
+            ("two", "%8", Turn::Working),
+        ])));
+        let view = app.render(Rect::new(0, 0, 60, 12));
+
+        // The heading points at nothing, so only the agent rows are navigated.
+        assert_eq!(
+            view.selectable_items()
+                .into_iter()
+                .map(|item| item.key.clone())
+                .collect::<Vec<RowKey>>(),
+            vec![
+                RowKey::Agent(SessionId::new("one").unwrap()),
+                RowKey::Agent(SessionId::new("two").unwrap()),
+            ]
+        );
+
+        let stepped = app.reduce(Input::User(UserAction::Next));
+        assert_eq!(
+            stepped.effects,
+            vec![
+                Effect::Broadcast(Broadcast::Selection(RowKey::Agent(
+                    SessionId::new("two").unwrap()
+                ))),
+                Effect::Repaint,
+            ]
+        );
+        app.render(Rect::new(0, 0, 60, 12));
+        let activated = app.reduce(Input::User(UserAction::Activate));
+        assert_eq!(
+            activated.effects,
+            vec![Effect::FocusPane(PaneId::new("%8"))]
+        );
+
+        app.render(Rect::new(0, 0, 60, 12));
+        app.reduce(Input::User(UserAction::Previous));
+        app.render(Rect::new(0, 0, 60, 12));
+        let activated = app.reduce(Input::User(UserAction::Activate));
+        assert_eq!(
+            activated.effects,
+            vec![Effect::FocusPane(PaneId::new("%7"))]
+        );
     }
 
     #[test]
