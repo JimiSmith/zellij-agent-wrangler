@@ -83,6 +83,9 @@ once with no agent reporting itself again.
 - [ ] Subagents and teammates as rows under the agent that started them
 - [x] The last message of an agent, under the row that the space key expands,
       with the time it was said and the tool that runs now
+- [x] That message drawn as the markdown it was written in: a heading and a bold
+      word are bold, a quote and a code span are dim, a link is underlined, and
+      no marker is drawn
 - [x] The pane scrolls, so a row past its foot is drawn and reachable
 - [ ] Clicking the open marker of a row opens and closes its block, where a
       click anywhere else on the row goes to the pane
@@ -96,6 +99,11 @@ not here.
 A block says when the agent spoke rather than how long ago, for the same
 reason, and it says so in UTC. The record spells its own time in UTC, and a
 client knows no offset from it.
+
+The markdown draws in intensity alone. Color already says what a row is and
+whose turn it is in this view, and a third meaning for it would read as none at
+all. A blank line of the message draws nothing, because a block is a few rows
+tall and a paragraph break is a row that the message needs.
 
 The order reverses `Registry::calling`, which puts the most recent call first
 for the notification area. A list of calls answers "what just happened". A

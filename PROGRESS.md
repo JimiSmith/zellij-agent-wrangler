@@ -48,7 +48,7 @@ record format is 7.
 
 The zellij sidebar draws them. The space key opens the row under the cursor.
 The block holds what the agent last said, the time it said so, and the tool it
-runs now. Several rows are open at once, and a row stays open across a state
+runs now. The message draws as the markdown it was written in. Several rows are open at once, and a row stays open across a state
 message. The block is as tall as the message needs, so the pane scrolls, and a
 row past the foot is drawn and reachable. Each sidebar keeps its own open rows.
 The tmux client reads no key events, so it draws no block.
@@ -504,6 +504,45 @@ answers for every client and the daemon still opens the files. `agent-wrangler-u
 took that feature and `tui-scrollview` together. The wasm release artifact went
 from 1,528,893 bytes to 1,574,971, which is 46,078 bytes for a parser that is
 now called and for the clipping.
+
+**The block draws the message as markdown, and the daemon keeps the line
+breaks.** An agent answers in markdown, so a message arrives with headings, list
+items, fences and inline emphasis in it. `tui-markdown` parses that and returns
+`ratatui-core` text, which is what the rows are already drawn from, so no second
+drawing path appears. Its `highlight-code` default feature is off: it pulls
+syntect and thirty four other crates, and it renders through escape sequences
+that the drawing must read back. The wasm release artifact went from 1,575,418
+bytes to 1,921,552, which is 346,134 bytes for the parser and the renderer. One
+open row costs 6.1 microseconds a frame on this host, measured over a thousand
+parses of a message of four lines, and a closed row parses nothing.
+
+`termimad` came first and could not be used. It depends on crossterm, and
+crossterm does not compile for `wasm32-wasip1`, which is the plugin's target.
+
+The client reads the message, so the daemon had to stop flattening it. A record
+travels as one line, and the reader replaced every control character with a
+space. It now keeps the line breaks of the message, because a heading, a list
+item and a code fence each need the line that they start. A tool name and a tool
+argument draw on one row, and both stay flat.
+
+**A wrap keeps the whitespace, and a table row is never wrapped.** The first
+wrap broke on whitespace and collapsed it, the way the wrap for a notification
+does. That drew `| core | records |` for a table cell that the parser had padded
+to `| core  | records |`, and it lost the indentation of a code block and of a
+nested list. The wrap now drops the whitespace at the break alone. A table row
+wider than the field is drawn on one line even so, and the row drawing cuts it
+at the edge of the pane. A wrapped table row loses the columns that a table is
+for. The crate returns text and no structure with it, so a line counts as a
+table row when it starts with one of the four glyphs that the crate draws a
+table frame with.
+
+**Markdown draws in intensity and in no color.** Color says what a row is and
+whose turn it is. So the preview hands `tui-markdown` a style sheet of its own:
+a heading and a bold word are bold, a quote and a code span are dim, a link is
+underlined, and deleted text is crossed out. The sheet drops the `#` of a
+heading and the fence of a code block as well. Both cost a row or a column in a
+field that is around a hundred columns wide, and the intensity already says what
+they say.
 
 **The block draws the time in UTC, and says so.** A record spells its own time
 as `2026-09-01T05:11:01.469Z`. A local time needs an offset from UTC, and a

@@ -25,6 +25,7 @@ pub use ratatui_core::layout::Rect;
 pub mod ansi;
 pub mod dashboard;
 pub mod frame;
+pub mod markdown;
 pub mod model;
 pub mod options;
 pub mod render;

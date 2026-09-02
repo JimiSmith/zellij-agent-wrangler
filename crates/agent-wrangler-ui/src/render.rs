@@ -29,6 +29,7 @@ use agent_wrangler_core::agent::Turn;
 
 use crate::model::{
     Branch, CellAlignment, NamedColor, Placement, Row, RowContent, RowKey, RowPreview, TableCell,
+    TextEmphasis, TextRun,
 };
 
 /// Column 0: a block marks "where you are", and a space does not.
@@ -234,6 +235,9 @@ enum Parts {
     },
     /// A dashboard row, as a run of fields at fixed offsets.
     Columns(Vec<Field>),
+    /// A line whose text is emphasised in places: the message under an open
+    /// dashboard row, which the agent wrote in markdown.
+    Runs { head: String, runs: Vec<TextRun> },
 }
 
 /// The pieces of a child row: the gutter, the branch and the index, then the
@@ -299,15 +303,25 @@ fn status_parts(placement: Placement, position: Branch, index: &str, text: &str)
 /// needs nothing to carry one. It keeps the gutter. The block belongs to the
 /// same pane as its row, and the mark must not break between the two.
 fn preview_parts(placement: Placement, branch: Branch, text: &str) -> Parts {
+    Parts::Whole(format!("{}{text}", preview_head(placement, branch)))
+}
+
+/// The pieces of the message line of a block. The message is the one line that
+/// markdown divides into runs, so it alone carries an emphasis of its own.
+fn preview_message_parts(placement: Placement, branch: Branch, runs: &[TextRun]) -> Parts {
+    Parts::Runs {
+        head: preview_head(placement, branch),
+        runs: runs.to_vec(),
+    }
+}
+
+/// Everything a line of the block draws before its text: the gutter, the indent
+/// and the tree glyph.
+fn preview_head(placement: Placement, branch: Branch) -> String {
     let lead = format!("{}", gutter(placement.is_focused_pane()));
     let indent = (DASHBOARD_NAME_COLUMN - ICON_AND_GAP).saturating_sub(lead.chars().count());
     let gap = PREVIEW_TEXT_COLUMN - (DASHBOARD_NAME_COLUMN - ICON_AND_GAP) - 1;
-    Parts::Whole(format!(
-        "{lead}{:indent$}{}{:gap$}{text}",
-        "",
-        preview_glyph(branch),
-        ""
-    ))
+    format!("{lead}{:indent$}{}{:gap$}", "", preview_glyph(branch), "")
 }
 
 /// The pieces one row is drawn as.
@@ -392,9 +406,9 @@ fn parts(content: &RowContent) -> Parts {
         RowContent::PreviewMessage {
             placement,
             branch,
-            text,
-        }
-        | RowContent::PreviewTime {
+            runs,
+        } => preview_message_parts(*placement, *branch, runs),
+        RowContent::PreviewTime {
             placement,
             branch,
             text,
@@ -415,6 +429,12 @@ fn parts(content: &RowContent) -> Parts {
 pub fn row_text(content: &RowContent) -> String {
     match parts(content) {
         Parts::Whole(text) => text,
+        Parts::Runs { head, runs } => {
+            format!(
+                "{head}{}",
+                runs.iter().map(|run| run.text.as_str()).collect::<String>()
+            )
+        }
         Parts::Split {
             head, icon, tail, ..
         } => format!("{head}{icon}{tail}"),
@@ -438,6 +458,14 @@ pub fn row_line(content: &RowContent) -> Line<'static> {
     let base = base_style(content);
     match parts(content) {
         Parts::Whole(text) => Line::from(Span::styled(text, base)),
+        Parts::Runs { head, runs } => Line::from(
+            std::iter::once(Span::styled(head, base))
+                .chain(
+                    runs.into_iter()
+                        .map(|run| Span::styled(run.text, base.patch(emphasised(run.emphasis)))),
+                )
+                .collect::<Vec<Span<'static>>>(),
+        ),
         Parts::Split {
             head,
             icon,
@@ -504,6 +532,24 @@ pub fn base_style(content: &RowContent) -> Style {
         // must read plainly, so it takes neither channel.
         RowContent::DashboardNoAgents | RowContent::DashboardPaneTooNarrow => Style::new(),
     }
+}
+
+/// The terminal effects that one emphasis takes. The drawing patches this over
+/// the style of the row, so a run in a selected or a dim row keeps both.
+fn emphasised(emphasis: TextEmphasis) -> Style {
+    let mut style = Style::new();
+    for (wanted, modifier) in [
+        (emphasis.bold, Modifier::BOLD),
+        (emphasis.italic, Modifier::ITALIC),
+        (emphasis.dim, Modifier::DIM),
+        (emphasis.underlined, Modifier::UNDERLINED),
+        (emphasis.crossed_out, Modifier::CROSSED_OUT),
+    ] {
+        if wanted {
+            style = style.add_modifier(modifier);
+        }
+    }
+    style
 }
 
 /// How brightly a row draws, which is the one channel that says where you are.

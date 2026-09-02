@@ -17,13 +17,14 @@ use agent_wrangler_core::label::label;
 use agent_wrangler_core::preview::{Preview, ToolCall};
 use agent_wrangler_core::status_line::{short_model_name, short_token_count};
 
+use crate::markdown::message_lines;
 use crate::model::{
     Branch, CellAlignment, NamedColor, OpenPreviews, Placement, Row, RowContent, RowKey,
-    RowPreview, TableCell,
+    RowPreview, TableCell, TextRun,
 };
 use crate::options::DrawingOptions;
 use crate::render::{
-    cut_to_columns, wrap, DASHBOARD_CELL_GAP, DASHBOARD_MARKER_GAP, DASHBOARD_MARKER_INSET,
+    cut_to_columns, DASHBOARD_CELL_GAP, DASHBOARD_MARKER_GAP, DASHBOARD_MARKER_INSET,
     DASHBOARD_NAME_COLUMN, PREVIEW_TEXT_COLUMN,
 };
 use crate::tree::{indicator, pane_placement, Pane, Tab};
@@ -268,7 +269,9 @@ fn tool_line(call: &ToolCall, field: usize) -> String {
 /// glyph depends on how many lines follow, which is known only once every line
 /// is built.
 enum PreviewLine {
-    Message(String),
+    /// One line of what the agent said, in the runs that its markdown divided
+    /// the line into.
+    Message(Vec<TextRun>),
     Time(String),
     Tool(String),
 }
@@ -277,10 +280,10 @@ impl PreviewLine {
     /// The row content of this line. The line hangs from `branch`.
     fn content(self, placement: Placement, branch: Branch) -> RowContent {
         match self {
-            PreviewLine::Message(text) => RowContent::PreviewMessage {
+            PreviewLine::Message(runs) => RowContent::PreviewMessage {
                 placement,
                 branch,
-                text,
+                runs,
             },
             PreviewLine::Time(text) => RowContent::PreviewTime {
                 placement,
@@ -307,9 +310,9 @@ fn preview_rows(place: &AgentPlace<'_>, field: usize) -> Vec<Row> {
     let placement = pane_placement(place.tab.active, place.pane.focused);
     let key = RowKey::Agent(place.agent.session.clone());
 
-    let mut message = wrap(&preview.message, field);
+    let mut message = message_lines(&preview.message, field);
     if message.is_empty() {
-        message = vec![NO_MESSAGE.to_string()];
+        message = vec![vec![TextRun::plain(NO_MESSAGE)]];
     }
     let mut lines: Vec<PreviewLine> = message.into_iter().map(PreviewLine::Message).collect();
     if !preview.timestamp.is_empty() {

@@ -117,6 +117,39 @@ impl Placement {
     }
 }
 
+/// The emphasis one run of text draws with.
+///
+/// The fields carry terminal effects rather than markdown roles, because
+/// several roles take one effect. A heading and a bold word are both bold, and
+/// a quote and a code span are both dim. The client decides what each effect
+/// looks like, the way it decides what a color name looks like.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextEmphasis {
+    pub bold: bool,
+    pub italic: bool,
+    pub dim: bool,
+    pub underlined: bool,
+    pub crossed_out: bool,
+}
+
+/// One run of text in a row, and the emphasis it draws with. A row carries runs
+/// rather than one string when markdown emphasises part of its text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TextRun {
+    pub text: String,
+    pub emphasis: TextEmphasis,
+}
+
+impl TextRun {
+    /// A run that nothing emphasises.
+    pub fn plain(text: impl Into<String>) -> TextRun {
+        TextRun {
+            text: text.into(),
+            emphasis: TextEmphasis::default(),
+        }
+    }
+}
+
 /// The palette the identity of a thing is drawn from. The colors carry terminal
 /// names rather than RGB values, so the theme of the user decides how they look.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -379,7 +412,9 @@ pub enum RowContent {
         /// Whether more of the block follows this line. The last line closes
         /// the tree that the block hangs from.
         branch: Branch,
-        text: String,
+        /// The line, in the runs that the markdown of the message divided it
+        /// into. A line that markdown says nothing about is one plain run.
+        runs: Vec<TextRun>,
     },
     /// When the agent wrote that message, in the block under its row.
     PreviewTime {

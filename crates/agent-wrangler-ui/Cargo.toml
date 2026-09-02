@@ -22,3 +22,13 @@ agent-wrangler-core = { path = "../agent-wrangler-core", default-features = fals
 # clips that buffer to the pane. It takes the same `ratatui-core` 0.1 and it
 # brings `ratatui-widgets`. It brings no backend and no terminal.
 tui-scrollview = "0.6"
+# The markdown. An agent answers in markdown, so the message under an open row
+# arrives with headings, lists, fences and inline emphasis in it. This parses
+# that and returns the same `ratatui-core` 0.1 text that the rows are drawn
+# from, so no second drawing path appears.
+#
+# `highlight-code` is a default feature, and it is off here. It pulls syntect
+# and thirty four other crates, it renders through escape sequences that this
+# crate would have to read back, and it paints in colors that the sidebar keeps
+# for what a row is and whose turn it is.
+tui-markdown = { version = "0.3", default-features = false }

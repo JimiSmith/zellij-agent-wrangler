@@ -56,12 +56,17 @@ pub struct ToolCall {
 
 /// What a client draws under a dashboard row.
 ///
-/// Every field is drawn on a terminal line, so no field holds a control
-/// character. See [`without_control_characters`].
+/// No field holds a control character other than the line breaks of the
+/// message. See [`without_control_characters`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Preview {
-    /// What the agent last told the user. Empty for a session that reports no
-    /// record, and for a record that this code cannot read.
+    /// What the agent last told the user, as the agent wrote it. Empty for a
+    /// session that reports no record, and for a record that this code cannot
+    /// read.
+    ///
+    /// The line breaks are kept, and every other control character is a space.
+    /// An agent writes markdown, and a heading, a list item and a code fence
+    /// each need the line that they start.
     pub message: String,
     /// When the agent wrote that message, spelled `2026-09-01 05:11Z`. Empty
     /// for a record that carries no timestamp of that shape.
@@ -107,10 +112,30 @@ pub(crate) fn holds_text(block: &Value) -> bool {
 /// characters that the line itself carried. JSON writes a line break inside a
 /// string as two characters, and reading the string turns those two back into
 /// one control character. So a message and a tool argument both reach a client
-/// with real line breaks in them, and both are drawn on a terminal line.
+/// with real line breaks in them.
+///
+/// A tool name and a tool argument are drawn on one terminal line, so they take
+/// this. A message keeps its line breaks and takes
+/// [`without_control_characters_except_line_breaks`].
 fn without_control_characters(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+/// `text` with every control character replaced by a space, except the line
+/// breaks, which are kept.
+///
+/// A client reads the message as markdown, and the markdown of a heading, a
+/// list item and a code fence starts a line. A carriage return before a line
+/// break becomes a space, and markdown ignores one space at the end of a
+/// line.
+fn without_control_characters_except_line_breaks(text: &str) -> String {
+    text.chars()
+        .map(|c| match c.is_control() && c != '\n' {
+            true => ' ',
+            false => c,
+        })
         .collect()
 }
 
@@ -152,7 +177,7 @@ fn message(record: &Value) -> String {
         .filter(|block| holds_text(block))
         .filter_map(|block| string_field(block, "text"))
         .collect();
-    without_control_characters(&blocks.join(" "))
+    without_control_characters_except_line_breaks(&blocks.join(" "))
 }
 
 /// The tool that a record calls, for a record that calls one.
@@ -235,12 +260,23 @@ mod tests {
     }
 
     #[test]
-    fn a_line_break_inside_a_message_is_drawn_as_a_space() {
+    fn a_line_break_inside_a_message_reaches_the_client() {
         // A record travels as one line, so the daemon replaced the control
         // characters that the line held. JSON writes a line break as two
-        // characters, and reading the string turns those two into one.
+        // characters, and reading the string turns those two into one. The
+        // client reads the message as markdown, so the break is kept.
         let line =
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"one\ntwo"}]}}"#;
+        assert_eq!(
+            Preview::from_records(&records(line, "")).message,
+            "one\ntwo"
+        );
+    }
+
+    #[test]
+    fn a_tab_inside_a_message_is_drawn_as_a_space() {
+        let line =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"one\ttwo"}]}}"#;
         assert_eq!(Preview::from_records(&records(line, "")).message, "one two");
     }
 

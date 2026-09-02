@@ -42,6 +42,14 @@ scroll view clips that buffer to the pane. Both scrollbars are switched off. A
 scrollbar takes a column from the right edge, and that column belongs to the
 turn marker.
 
+The same crate takes `tui-markdown` for the message under an open row. An agent
+answers in markdown, and that crate returns the same `ratatui-core` text the
+rows already draw. Its `highlight-code` default feature is off. The feature
+pulls syntect, it renders through escape sequences that this crate must read
+back, and it paints in colors that the sidebar keeps for what a row is and whose
+turn it is. The preview gives the crate a style sheet with no color in it, for
+the same reason.
+
 Three rules follow.
 
 1. `agent-wrangler-core` builds for wasm as well as for the host. Anything that
