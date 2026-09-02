@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use agent_wrangler_core::notify::Notifier;
 
-use crate::daemon::state::{Client, Source};
+use crate::daemon::state::{Client, SessionFiles};
 use crate::proto::DeliveryTarget;
 
 /// The number of writes that this process made. No two of those writes name the
@@ -30,8 +30,11 @@ static WRITES: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Saved {
     record: String,
+    /// This field keeps the name `source` although its type is now
+    /// `SessionFiles`. The field name is the key in `agents.json`, so a rename
+    /// here drops every session on the next restart.
     #[serde(default)]
-    source: Source,
+    source: SessionFiles,
 }
 
 /// One client as this module keeps it: where to reach the client, and what the
@@ -70,7 +73,7 @@ fn file(dir: &Path) -> PathBuf {
 /// Side effect: if the state directory is not there, this function creates it.
 /// This function writes a temporary file beside the real file, and then renames
 /// the temporary file over the real one.
-pub fn save(dir: &Path, sessions: &[(String, Source)], clients: &[Client]) {
+pub fn save(dir: &Path, sessions: &[(String, SessionFiles)], clients: &[Client]) {
     let kept = Kept {
         sessions: sessions
             .iter()
@@ -125,7 +128,7 @@ pub fn save(dir: &Path, sessions: &[(String, Source)], clients: &[Client]) {
 
 /// Reads back what `save` wrote. This function reads nothing at all for a first
 /// run, for an unreadable file, or for a file that something else wrote.
-pub fn load(dir: &Path) -> (Vec<(String, Source)>, Vec<Client>) {
+pub fn load(dir: &Path) -> (Vec<(String, SessionFiles)>, Vec<Client>) {
     let Ok(text) = fs::read_to_string(file(dir)) else {
         return (Vec::new(), Vec::new());
     };
@@ -164,8 +167,8 @@ mod tests {
         dir
     }
 
-    fn source(transcript: &str) -> Source {
-        Source {
+    fn source(transcript: &str) -> SessionFiles {
+        SessionFiles {
             agent: "claude".to_string(),
             transcript: transcript.to_string(),
             mtime: Some(42),
@@ -241,7 +244,7 @@ mod tests {
                 let dir = dir.clone();
                 std::thread::spawn(move || {
                     let padding = writer.to_string().repeat(2048);
-                    let sessions: Vec<(String, Source)> = (0..RECORDS)
+                    let sessions: Vec<(String, SessionFiles)> = (0..RECORDS)
                         .map(|n| {
                             (
                                 format!("3\ts{n}\tclaude\t\tidle\t0\tdir\t\t\t\t{padding}"),

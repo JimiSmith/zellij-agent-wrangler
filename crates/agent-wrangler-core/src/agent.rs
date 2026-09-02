@@ -213,10 +213,10 @@ pub struct StatusFacts {
 /// already holds. The wire does not move again.
 ///
 /// These records live here, and not beside the reader that finds them, because
-/// [`titles`] is behind the feature that reads an agent's files. A client is
-/// handed these records and builds without that feature.
+/// [`session_facts`] is behind the feature that reads an agent's files. A
+/// client is handed these records and builds without that feature.
 ///
-/// [`titles`]: crate::titles
+/// [`session_facts`]: crate::session_facts
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TranscriptRecords {
     /// The most recent `assistant` record whose content holds a text block with

@@ -1,12 +1,17 @@
-//! What a session calls itself, read from the files that the agent keeps.
+//! What an agent's own files say about one session.
 //!
-//! Neither agent puts its title in the hook body, so both titles are read from
-//! disk at the moment when a hook fires. That is also what keeps a label
-//! current. An agent fires hooks throughout its turn, and each hook is another
-//! look at a title that can differ from the last one.
+//! A reader here returns three groups of facts.
 //!
-//! Nothing here fails. A file that is missing, unreadable or unexpected gives an
-//! empty title. That is the same answer as a session with no title yet.
+//! - The label: the name, the title and the color.
+//! - The status: the branch, the model and the context.
+//! - The records: the last message, and the tool that still runs.
+//!
+//! No agent puts any of that in a hook body. A reader therefore takes it off
+//! disk at the moment when a hook fires. That is what keeps a row current. An
+//! agent fires hooks throughout its turn, and each hook is another look.
+//!
+//! Nothing here fails. A file that is missing, unreadable or unexpected gives
+//! empty facts. That is the same answer as a session that has said nothing yet.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -150,7 +155,7 @@ fn status_from_assistant_record(record: &Value) -> Option<StatusFacts> {
 /// result name each other by id, so two tools that an agent started together
 /// stay apart, whichever one comes back first. The reader reports the oldest
 /// call still unanswered, because that tool started first and still runs.
-pub fn claude(transcript: &str) -> SessionFacts {
+pub fn read_claude_session(transcript: &str) -> SessionFacts {
     let Some((bytes, cut)) = read_tail(Path::new(transcript)) else {
         return SessionFacts::default();
     };
@@ -277,7 +282,7 @@ fn workspace_path(home: &Path, session: &str) -> PathBuf {
 /// of a Copilot session is empty. The daemon never opens a Copilot transcript,
 /// so such a session reports no transcript records either, and nothing here
 /// guesses at them.
-pub fn copilot(home: &Path, session: &str) -> SessionFacts {
+pub fn read_copilot_session(home: &Path, session: &str) -> SessionFacts {
     let Ok(text) = std::fs::read_to_string(workspace_path(home, session)) else {
         return SessionFacts::default();
     };
@@ -373,7 +378,10 @@ mod tests {
 
     #[test]
     fn a_transcript_that_is_not_there_says_nothing() {
-        assert_eq!(claude("/no/such/transcript.jsonl"), SessionFacts::default());
+        assert_eq!(
+            read_claude_session("/no/such/transcript.jsonl"),
+            SessionFacts::default()
+        );
     }
 
     #[test]
@@ -386,7 +394,10 @@ mod tests {
                 r#"{"type":"ai-title","aiTitle":"porting the sidebar"}"#,
             ],
         );
-        assert_eq!(claude(&path).label.title, "porting the sidebar");
+        assert_eq!(
+            read_claude_session(&path).label.title,
+            "porting the sidebar"
+        );
     }
 
     #[test]
@@ -399,7 +410,7 @@ mod tests {
                 r#"{"type":"ai-title","aiTitle":"second guess"}"#,
             ],
         );
-        assert_eq!(claude(&path).label.title, "second guess");
+        assert_eq!(read_claude_session(&path).label.title, "second guess");
     }
 
     #[test]
@@ -412,7 +423,7 @@ mod tests {
                 r#"{"type":"ai-title","aiTitle":"a guess made after it"}"#,
             ],
         );
-        assert_eq!(claude(&path).label.title, "the port");
+        assert_eq!(read_claude_session(&path).label.title, "the port");
     }
 
     #[test]
@@ -428,7 +439,7 @@ mod tests {
                 r#"{"type":"assistant","agentName":"scout","teamName":"port"}"#,
             ],
         );
-        assert_eq!(claude(&path).label.name, "scout");
+        assert_eq!(read_claude_session(&path).label.name, "scout");
     }
 
     #[test]
@@ -443,7 +454,7 @@ mod tests {
             ],
         );
         // The last one in the window is the one in force, as for a title.
-        assert_eq!(claude(&path).label.color, "purple");
+        assert_eq!(read_claude_session(&path).label.color, "purple");
     }
 
     #[test]
@@ -461,7 +472,7 @@ mod tests {
         let path = write_transcript(scratch.path(), &borrowed);
 
         assert!(std::fs::metadata(&path).unwrap().len() > TAIL);
-        let facts = claude(&path);
+        let facts = read_claude_session(&path);
         assert_eq!(facts.label.title, "the long one");
         assert_eq!(facts.label.color, "");
     }
@@ -470,14 +481,14 @@ mod tests {
     fn a_session_given_no_color_reports_none() {
         let scratch = Scratch::new("no-color");
         let path = write_transcript(scratch.path(), &[r#"{"type":"user","message":"hi"}"#]);
-        assert_eq!(claude(&path).label.color, "");
+        assert_eq!(read_claude_session(&path).label.color, "");
     }
 
     #[test]
     fn a_session_of_its_own_has_no_teammate_name() {
         let scratch = Scratch::new("top-level");
         let path = write_transcript(scratch.path(), &[r#"{"type":"user","message":"hi"}"#]);
-        assert_eq!(claude(&path).label.name, "");
+        assert_eq!(read_claude_session(&path).label.name, "");
     }
 
     /// One record of type `assistant`, as Claude writes it: the branch it ran
@@ -500,7 +511,7 @@ mod tests {
         let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
         let path = write_transcript(scratch.path(), &borrowed);
         assert_eq!(
-            claude(&path).status,
+            read_claude_session(&path).status,
             StatusFacts {
                 branch: "main".to_string(),
                 model: "claude-opus-5".to_string(),
@@ -514,7 +525,7 @@ mod tests {
         // The same report as a session that has replied nothing yet.
         let scratch = Scratch::new("no-assistant-record");
         let path = write_transcript(scratch.path(), &[r#"{"type":"user","message":"hi"}"#]);
-        assert_eq!(claude(&path).status, StatusFacts::default());
+        assert_eq!(read_claude_session(&path).status, StatusFacts::default());
     }
 
     #[test]
@@ -528,8 +539,8 @@ mod tests {
         ];
         let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
         let path = write_transcript(scratch.path(), &borrowed);
-        assert_eq!(claude(&path).status.model, "claude-opus-5");
-        assert_eq!(claude(&path).status.context_tokens, 112);
+        assert_eq!(read_claude_session(&path).status.model, "claude-opus-5");
+        assert_eq!(read_claude_session(&path).status.context_tokens, 112);
     }
 
     #[test]
@@ -539,7 +550,7 @@ mod tests {
             scratch.path(),
             &[r#"{"type":"assistant","message":{"model":"claude-opus-5"}}"#],
         );
-        let status = claude(&path).status;
+        let status = read_claude_session(&path).status;
         assert_eq!(status.model, "claude-opus-5");
         assert_eq!(status.context_tokens, 0);
         assert_eq!(status.branch, "");
@@ -555,7 +566,7 @@ mod tests {
                 r#"{"type":"ai-title","aiTitle":"whole"}"#,
             ],
         );
-        assert_eq!(claude(&path).label.title, "whole");
+        assert_eq!(read_claude_session(&path).label.title, "whole");
     }
 
     /// One `assistant` record with one text block, as Claude writes it.
@@ -596,7 +607,7 @@ mod tests {
     /// The two records that a scan of these transcript lines reports.
     fn records_from_lines(dir: &Path, lines: &[String]) -> TranscriptRecords {
         let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
-        claude(&write_transcript(dir, &borrowed)).records
+        read_claude_session(&write_transcript(dir, &borrowed)).records
     }
 
     #[test]
@@ -743,14 +754,17 @@ mod tests {
             scratch.path(),
             &[r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}"#],
         );
-        assert_eq!(claude(&path).records.running_tool, "");
+        assert_eq!(read_claude_session(&path).records.running_tool, "");
     }
 
     #[test]
     fn a_session_that_has_said_nothing_and_runs_nothing_reports_neither() {
         let scratch = Scratch::new("no-records");
         let path = write_transcript(scratch.path(), &[r#"{"type":"user","message":"hi"}"#]);
-        assert_eq!(claude(&path).records, TranscriptRecords::default());
+        assert_eq!(
+            read_claude_session(&path).records,
+            TranscriptRecords::default()
+        );
     }
 
     fn write_workspace(home: &Path, session: &str, text: &str) {
@@ -767,14 +781,20 @@ mod tests {
             "abc",
             "name: the port\nsummary: something\n",
         );
-        assert_eq!(copilot(scratch.path(), "abc").label.title, "the port");
+        assert_eq!(
+            read_copilot_session(scratch.path(), "abc").label.title,
+            "the port"
+        );
     }
 
     #[test]
     fn a_copilot_session_with_no_name_falls_back_to_its_summary() {
         let scratch = Scratch::new("copilot-summary");
         write_workspace(scratch.path(), "abc", "name: ~\nsummary: 'what it did'\n");
-        assert_eq!(copilot(scratch.path(), "abc").label.title, "what it did");
+        assert_eq!(
+            read_copilot_session(scratch.path(), "abc").label.title,
+            "what it did"
+        );
     }
 
     #[test]
@@ -785,7 +805,10 @@ mod tests {
             "abc",
             "summary: |\n  the first line\n  the second\nname:\n",
         );
-        assert_eq!(copilot(scratch.path(), "abc").label.title, "the first line");
+        assert_eq!(
+            read_copilot_session(scratch.path(), "abc").label.title,
+            "the first line"
+        );
     }
 
     #[test]
@@ -795,7 +818,7 @@ mod tests {
         let scratch = Scratch::new("copilot-records");
         write_workspace(scratch.path(), "abc", "name: the port\n");
         assert_eq!(
-            copilot(scratch.path(), "abc").records,
+            read_copilot_session(scratch.path(), "abc").records,
             TranscriptRecords::default()
         );
     }
@@ -803,7 +826,10 @@ mod tests {
     #[test]
     fn a_workspace_that_is_not_there_says_nothing() {
         let scratch = Scratch::new("copilot-missing");
-        assert_eq!(copilot(scratch.path(), "abc"), SessionFacts::default());
+        assert_eq!(
+            read_copilot_session(scratch.path(), "abc"),
+            SessionFacts::default()
+        );
     }
 
     #[test]

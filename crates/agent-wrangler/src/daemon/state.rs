@@ -14,14 +14,14 @@ use agent_wrangler_core::notify::Notifier;
 use agent_wrangler_core::origin::Origin;
 use agent_wrangler_core::payload::directory_name;
 use agent_wrangler_core::registry::Registry;
-use agent_wrangler_core::titles::{self, SessionFacts};
+use agent_wrangler_core::session_facts::{self, SessionFacts};
 
 use crate::proto::{DeliveryTarget, Hook};
 
 /// Where a session's own account of itself is kept. The daemon can read it
 /// again without a new message from the agent.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Source {
+pub struct SessionFiles {
     /// Which agent this is. The agent kind decides how the daemon reads its
     /// files.
     pub agent: String,
@@ -37,7 +37,7 @@ pub struct Source {
 pub trait World {
     /// What an agent's own files say about this session: what it is called by,
     /// and what it works with.
-    fn read(&self, agent: &str, transcript: &str, session: &str) -> SessionFacts;
+    fn read_session_files(&self, agent: &str, transcript: &str, session: &str) -> SessionFacts;
     /// When a file last changed, or `None` for one that is not there.
     fn mtime(&self, path: &str) -> Option<u64>;
     /// Whether a process still runs, and is still the intended one.
@@ -48,11 +48,11 @@ pub trait World {
 pub struct Real;
 
 impl World for Real {
-    fn read(&self, agent: &str, transcript: &str, session: &str) -> SessionFacts {
+    fn read_session_files(&self, agent: &str, transcript: &str, session: &str) -> SessionFacts {
         match agent {
-            "claude" => titles::claude(transcript),
+            "claude" => session_facts::read_claude_session(transcript),
             "copilot" => match crate::paths::home() {
-                Some(home) => titles::copilot(&home, session),
+                Some(home) => session_facts::read_copilot_session(&home, session),
                 None => SessionFacts::default(),
             },
             _ => SessionFacts::default(),
@@ -121,7 +121,7 @@ pub struct State {
     registry: Registry,
     /// One per session held, so the daemon can read a transcript again between
     /// events.
-    sources: BTreeMap<SessionId, Source>,
+    session_files: BTreeMap<SessionId, SessionFiles>,
     /// Where to deliver, newest last. A client that registers twice is one
     /// client, so this list never holds the same sink twice.
     clients: Vec<Client>,
@@ -253,7 +253,7 @@ pub fn look(plan: &Plan, world: &dyn World, since: &BTreeMap<SessionId, Option<u
                 Some((
                     session.clone(),
                     mtime,
-                    world.read(agent, transcript, session.as_str()),
+                    world.read_session_files(agent, transcript, session.as_str()),
                 ))
             })
             .collect(),
@@ -264,7 +264,7 @@ pub fn look(plan: &Plan, world: &dyn World, since: &BTreeMap<SessionId, Option<u
 /// nothing else.
 pub fn read_hook(hook: &Hook, world: &dyn World) -> Reading {
     Reading {
-        facts: world.read(&hook.agent, &hook.transcript, &hook.session_id),
+        facts: world.read_session_files(&hook.agent, &hook.transcript, &hook.session_id),
         mtime: world.mtime(&hook.transcript),
     }
 }
@@ -278,7 +278,7 @@ impl State {
         };
         let event = event(&hook.agent, &hook.event, hook.recoverable);
         if event == Event::End {
-            self.sources.remove(&session);
+            self.session_files.remove(&session);
             return Applied::told(self.registry.end(&session));
         }
 
@@ -311,9 +311,9 @@ impl State {
         .with_status(reading.facts.status)
         .with_records(reading.facts.records);
 
-        self.sources.insert(
+        self.session_files.insert(
             session.clone(),
-            Source {
+            SessionFiles {
                 agent: hook.agent.clone(),
                 transcript: hook.transcript.clone(),
                 mtime: reading.mtime,
@@ -472,13 +472,13 @@ impl State {
     pub fn plan(&self) -> Plan {
         Plan {
             watch: self
-                .sources
+                .session_files
                 .iter()
-                .map(|(session, source)| {
+                .map(|(session, files)| {
                     (
                         session.clone(),
-                        source.agent.clone(),
-                        source.transcript.clone(),
+                        files.agent.clone(),
+                        files.transcript.clone(),
                     )
                 })
                 .collect(),
@@ -506,16 +506,16 @@ impl State {
 
         // An agent whose process went away is gone, whatever it last said.
         for session in look.dead {
-            self.sources.remove(&session);
+            self.session_files.remove(&session);
             changed |= self.registry.end(&session);
         }
 
         for (session, mtime, found) in look.moved {
             // A session that ended during the look is not one to bring back.
-            let Some(source) = self.sources.get_mut(&session) else {
+            let Some(files) = self.session_files.get_mut(&session) else {
                 continue;
             };
-            source.mtime = Some(mtime);
+            files.mtime = Some(mtime);
             let Some(held) = self.registry.get(&session).cloned() else {
                 continue;
             };
@@ -550,24 +550,24 @@ impl State {
     /// What each held transcript last read as. This tells a file that moved
     /// from a file that did not move.
     pub fn mtimes(&self) -> BTreeMap<SessionId, Option<u64>> {
-        self.sources
+        self.session_files
             .iter()
-            .map(|(session, source)| (session.clone(), source.mtime))
+            .map(|(session, files)| (session.clone(), files.mtime))
             .collect()
     }
 
     /// The state as it is kept between runs: every session, with the file that
     /// the daemon reads its account of itself from.
-    pub fn snapshot(&self) -> Vec<(String, Source)> {
+    pub fn snapshot(&self) -> Vec<(String, SessionFiles)> {
         self.registry
             .iter()
             .map(|agent| {
-                let source = self
-                    .sources
+                let files = self
+                    .session_files
                     .get(&agent.session)
                     .cloned()
                     .unwrap_or_default();
-                (agent.encode(), source)
+                (agent.encode(), files)
             })
             .collect()
     }
@@ -579,8 +579,8 @@ impl State {
     /// A record that names a live process is kept. Every other record is
     /// dropped, because a live agent says so again on its very next event of
     /// any kind. A dead record that is kept is drawn for good.
-    pub fn restore(&mut self, saved: Vec<(String, Source)>, world: &dyn World) {
-        for (line, source) in saved {
+    pub fn restore(&mut self, saved: Vec<(String, SessionFiles)>, world: &dyn World) {
+        for (line, files) in saved {
             let agent_wrangler_core::agent::Record::Known(agent) = Agent::decode(&line) else {
                 continue;
             };
@@ -588,7 +588,7 @@ impl State {
                 Some(process) if world.alive(&process) => {}
                 _ => continue,
             }
-            self.sources.insert(agent.session.clone(), source);
+            self.session_files.insert(agent.session.clone(), files);
             self.registry.report(agent);
         }
     }
@@ -646,7 +646,12 @@ mod tests {
     }
 
     impl World for Fake {
-        fn read(&self, _agent: &str, transcript: &str, _session: &str) -> SessionFacts {
+        fn read_session_files(
+            &self,
+            _agent: &str,
+            transcript: &str,
+            _session: &str,
+        ) -> SessionFacts {
             self.facts
                 .borrow()
                 .get(transcript)
