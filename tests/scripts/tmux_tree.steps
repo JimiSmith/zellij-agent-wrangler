@@ -22,15 +22,22 @@ wait: wrangler-0:editor @ 20
 
 # Two things about the line below.
 #
-# The variables go on it and not in an `env:` step. A pane that a host `sh:`
-# step creates takes the environment of the host, and not the environment that
-# the harness gave the tmux client. Without `PATH`, the sidebar runs the client
-# that the developer installed, and it draws OUT OF STEP rather than a tree.
-# Without `USER`, the run reports to the daemon of the developer.
+# The variables go inside the pane command, and not in an `env:` step and not
+# in front of `tmux`. A new pane takes the environment of the tmux server, and
+# the server started from a `spawn:` step that carried none of these. A variable
+# in front of `tmux` reaches the tmux client alone, and dies with it.
+#
+# Without `PATH`, the sidebar runs the client that the developer installed. That
+# client can be older than this build, and the pane then draws OUT OF STEP
+# rather than a tree. Without `USER`, the run reports to the daemon of the
+# developer.
+#
+# The harness shell expands `$PWD` before tmux sees the line. `\$PATH` reaches
+# the pane, where the shell of the pane expands it.
 #
 # The two marks bracket the sidebar. The first says what the pane held before
 # the sidebar took it, and the second runs after the sidebar gives it back.
-sh: USER=wrangler-test XDG_STATE_HOME="$PWD/tests/out/state" PATH="$PWD/target/debug:$PATH" tmux -L wrangler-test split-window -h -l 34 -t wrangler-test-tree "echo WRANGLER-PANE-BEFORE; $PWD/target/debug/tmux-agent-wrangler; echo WRANGLER-PANE-AFTER; sleep 30"
+sh: tmux -L wrangler-test split-window -h -l 34 -t wrangler-test-tree "echo WRANGLER-PANE-BEFORE; USER=wrangler-test XDG_STATE_HOME=$PWD/tests/out/state PATH=$PWD/target/debug:\$PATH $PWD/target/debug/tmux-agent-wrangler; echo WRANGLER-PANE-AFTER; sleep 30"
 
 # The window that the session opened with. The number in front of the name is
 # the tmux window index.
