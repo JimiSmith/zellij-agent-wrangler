@@ -52,6 +52,13 @@ pub struct Hook {
     pub transcript: String,
     /// Present only when the hook body carried a genuine JSON boolean.
     pub recoverable: Option<bool>,
+    /// The child that this hook fired inside, or `None` for a hook that fired
+    /// in the session itself. Claude sets it for a subagent and for a teammate
+    /// alike, and `session_id` still names the lead.
+    pub agent_id: Option<String>,
+    /// What kind of child this is. Claude writes the built in type of a
+    /// subagent, such as `Explore`, and the name that the lead gave a teammate.
+    pub agent_type: Option<String>,
     /// The location variables that the hook captured, already encoded as one
     /// run of values.
     pub origin: String,
@@ -283,6 +290,8 @@ mod tests {
             cwd: "/home/u/repo".to_string(),
             transcript: "/home/u/.claude/t.jsonl".to_string(),
             recoverable: None,
+            agent_id: None,
+            agent_type: None,
             origin: "0\u{1f}proto\u{1f}7\u{1f}\u{1f}".to_string(),
             process: Some(Process {
                 pid: 4242,

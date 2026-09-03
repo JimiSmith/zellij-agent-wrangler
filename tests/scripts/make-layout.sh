@@ -38,6 +38,16 @@ sed -e "s#PLUGIN_LOCATION#file:$wasm#" \
 printf '%s\n' '{"type":"custom-title","customTitle":"QUARRYMARK"}' \
     >"$root/tests/out/e2e-transcript.jsonl"
 
+# The two files of one child of that session. Claude keeps them under a
+# directory named for the lead session, beside the lead's own transcript, and
+# the daemon builds both paths from the transcript that a hook names.
+children="$root/tests/out/e2e-transcript/subagents"
+mkdir -p "$children"
+printf '%s\n' '{"agentType":"Explore","description":"read the quarry"}' \
+    >"$children/agent-probe-one.meta.json"
+printf '%s\n' '{"type":"user","message":"hello"}' \
+    >"$children/agent-probe-one.jsonl"
+
 cat >"$root/tests/out/cache/zellij/permissions.kdl" <<KDL
 "$wasm" {
     ReadApplicationState

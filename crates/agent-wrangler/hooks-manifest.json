@@ -24,6 +24,9 @@
       "SubagentStart": [
         "working"
       ],
+      "SubagentStop": [
+        "childEnd"
+      ],
       "PreToolUse": [
         {
           "matcher": "AskUserQuestion|ExitPlanMode",

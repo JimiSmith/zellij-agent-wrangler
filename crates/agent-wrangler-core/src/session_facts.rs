@@ -282,6 +282,78 @@ fn workspace_path(home: &Path, session: &str) -> PathBuf {
 /// of a Copilot session is empty. The daemon never opens a Copilot transcript,
 /// so such a session reports no transcript records either, and nothing here
 /// guesses at them.
+/// Where Claude keeps the two files of one child of a session.
+///
+/// The two are built together, because a caller that reads one always reads the
+/// other. [`ChildPaths`] therefore holds a pair and never one half.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChildPaths {
+    /// What the child writes its own conversation to.
+    pub transcript: String,
+    /// The file that names the child. Claude spells it `.meta.json`.
+    pub meta_file: String,
+}
+
+/// Where Claude keeps the files of one child of the session that
+/// `lead_transcript` belongs to.
+///
+/// Claude reports the transcript of the lead on every hook, and never the file
+/// of a child. So the daemon builds the pair itself. The files sit under a
+/// directory named for the lead session, beside the lead's own file:
+///
+/// ```text
+/// <project directory>/<lead session id>.jsonl
+/// <project directory>/<lead session id>/subagents/agent-<agent id>.jsonl
+/// <project directory>/<lead session id>/subagents/agent-<agent id>.meta.json
+/// ```
+///
+/// Measurement on Claude Code 2.1.258 confirmed the rule. A `SubagentStop` body
+/// carries `agent_transcript_path`, and its value is the path that this function
+/// builds.
+///
+/// The result is nothing for a lead transcript with no file name, and for an
+/// agent id with no characters at all.
+pub fn claude_child_paths(lead_transcript: &str, agent_id: &str) -> Option<ChildPaths> {
+    if agent_id.is_empty() {
+        return None;
+    }
+    let lead = Path::new(lead_transcript);
+    let directory = lead.parent()?.join(lead.file_stem()?).join("subagents");
+    Some(ChildPaths {
+        transcript: directory
+            .join(format!("agent-{agent_id}.jsonl"))
+            .to_str()?
+            .to_string(),
+        meta_file: directory
+            .join(format!("agent-{agent_id}.meta.json"))
+            .to_str()?
+            .to_string(),
+    })
+}
+
+/// What a child's own two files say about it.
+///
+/// The transcript of a child holds the branch, the model, the context, the last
+/// message and the running tool, in the records that
+/// [`read_claude_session`] already reads. It holds no name, no title and no
+/// color, so the meta file supplies the first two.
+///
+/// A file that is not there says nothing, and this function guesses nothing.
+pub fn read_claude_child(paths: &ChildPaths) -> SessionFacts {
+    let mut facts = read_claude_session(&paths.transcript);
+    let Ok(text) = std::fs::read_to_string(Path::new(&paths.meta_file)) else {
+        return facts;
+    };
+    let Ok(meta) = serde_json::from_str::<Value>(&text) else {
+        return facts;
+    };
+    // `agentType` is the built in type of a subagent, and the name that the lead
+    // gave a teammate. Either one is what a user calls the child.
+    facts.label.name = string_field(&meta, "agentType").unwrap_or("").to_string();
+    facts.label.title = string_field(&meta, "description").unwrap_or("").to_string();
+    facts
+}
+
 pub fn read_copilot_session(home: &Path, session: &str) -> SessionFacts {
     let Ok(text) = std::fs::read_to_string(workspace_path(home, session)) else {
         return SessionFacts::default();
@@ -374,6 +446,105 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// A lead transcript, plus the two files of one child under it.
+    fn write_child(dir: &Path, agent_id: &str, meta: &str, lines: &[&str]) -> ChildPaths {
+        let lead = dir.join("4630d1cb.jsonl");
+        std::fs::write(&lead, "").unwrap();
+        let paths = claude_child_paths(&lead.to_string_lossy(), agent_id).unwrap();
+        std::fs::create_dir_all(Path::new(&paths.transcript).parent().unwrap()).unwrap();
+        std::fs::write(&paths.transcript, lines.join("\n")).unwrap();
+        if !meta.is_empty() {
+            std::fs::write(&paths.meta_file, meta).unwrap();
+        }
+        paths
+    }
+
+    #[test]
+    fn the_files_of_a_child_sit_under_a_directory_named_for_the_lead() {
+        let paths = claude_child_paths("/p/4630d1cb.jsonl", "a9a352ae014362aad").unwrap();
+        assert!(paths.transcript.ends_with("agent-a9a352ae014362aad.jsonl"));
+        assert!(paths
+            .meta_file
+            .ends_with("agent-a9a352ae014362aad.meta.json"));
+        // The directory of the lead, then the lead session, then subagents.
+        for path in [&paths.transcript, &paths.meta_file] {
+            let parent = Path::new(path).parent().unwrap();
+            assert_eq!(parent.file_name().unwrap(), "subagents");
+            assert_eq!(parent.parent().unwrap().file_name().unwrap(), "4630d1cb");
+        }
+    }
+
+    #[test]
+    fn an_agent_id_with_no_characters_names_no_files() {
+        assert_eq!(claude_child_paths("/p/4630d1cb.jsonl", ""), None);
+    }
+
+    #[test]
+    fn a_child_takes_its_name_and_its_title_from_the_meta_file() {
+        let scratch = Scratch::new("child-meta");
+        let paths = write_child(
+            scratch.path(),
+            "a9a352",
+            r#"{"agentType":"Explore","description":"Explore the tmux client crate"}"#,
+            &[r#"{"type":"user","message":"hello"}"#],
+        );
+        let facts = read_claude_child(&paths);
+        assert_eq!(facts.label.name, "Explore");
+        assert_eq!(facts.label.title, "Explore the tmux client crate");
+    }
+
+    #[test]
+    fn a_child_with_no_meta_file_reports_no_name() {
+        let scratch = Scratch::new("child-no-meta");
+        let paths = write_child(
+            scratch.path(),
+            "a9a352",
+            "",
+            &[r#"{"type":"user","message":"hello"}"#],
+        );
+        let facts = read_claude_child(&paths);
+        assert_eq!(facts.label.name, "");
+        assert_eq!(facts.label.title, "");
+    }
+
+    #[test]
+    fn a_child_reads_the_branch_and_the_model_off_its_own_transcript() {
+        // Measured on Claude Code 2.1.258. A child's assistant records carry
+        // gitBranch, the model and the usage, and sessionId names the lead.
+        let scratch = Scratch::new("child-status");
+        let paths = write_child(
+            scratch.path(),
+            "a9a352",
+            r#"{"agentType":"Explore","description":"a look"}"#,
+            &[concat!(
+                r#"{"type":"assistant","sessionId":"4630d1cb","agentId":"a9a352","#,
+                r#""gitBranch":"main","message":{"model":"claude-opus-5","#,
+                r#""usage":{"input_tokens":2,"output_tokens":1}}}"#
+            )],
+        );
+        let facts = read_claude_child(&paths);
+        assert_eq!(facts.status.branch, "main");
+        assert_eq!(facts.status.model, "claude-opus-5");
+        assert_eq!(facts.status.context_tokens, 3);
+    }
+
+    #[test]
+    fn a_child_whose_transcript_is_not_there_still_takes_its_name() {
+        let scratch = Scratch::new("child-no-transcript");
+        let lead = scratch.path().join("4630d1cb.jsonl");
+        std::fs::write(&lead, "").unwrap();
+        let paths = claude_child_paths(&lead.to_string_lossy(), "a9a352").unwrap();
+        std::fs::create_dir_all(Path::new(&paths.transcript).parent().unwrap()).unwrap();
+        std::fs::write(
+            &paths.meta_file,
+            r#"{"agentType":"Plan","description":"d"}"#,
+        )
+        .unwrap();
+        let facts = read_claude_child(&paths);
+        assert_eq!(facts.label.name, "Plan");
+        assert_eq!(facts.status, StatusFacts::default());
     }
 
     #[test]

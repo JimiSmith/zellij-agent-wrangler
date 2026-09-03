@@ -60,14 +60,44 @@ impl Registry {
             if agent.process.is_none() {
                 agent.process = known.process;
             }
+            // The lead arrives on a hook and is read off no file. A report that
+            // names none came from a look that found none, and not from a child
+            // that changed hands.
+            if agent.lead.is_none() {
+                agent.lead = known.lead.clone();
+            }
         }
         self.sessions.insert(agent.session.clone(), agent.clone()) != Some(agent)
     }
 
-    /// Drop an agent's session. If there was a session to drop, the result is
-    /// `true`.
+    /// Drop an agent's session, and every agent that names it as its lead.
+    ///
+    /// A child runs inside the process of its lead, so it cannot outlive that
+    /// process. A lead that leaves therefore takes its children with it, and no
+    /// row is left behind that names a session which is gone.
+    ///
+    /// A child leads nothing, so one pass over the sessions is enough. If this
+    /// dropped anything, the result is `true`.
     pub fn end(&mut self, session: &SessionId) -> bool {
-        self.sessions.remove(session).is_some()
+        let dropped = self.sessions.remove(session).is_some();
+        let children = self.children_of(session);
+        for child in &children {
+            self.sessions.remove(child);
+        }
+        dropped || !children.is_empty()
+    }
+
+    /// Every agent that names `lead` as the agent which started it.
+    ///
+    /// A child leads nothing itself, so one pass over the sessions finds them
+    /// all. The daemon calls this to drop what it watches for a child, which
+    /// the registry knows nothing about.
+    pub fn children_of(&self, lead: &SessionId) -> Vec<SessionId> {
+        self.sessions
+            .values()
+            .filter(|agent| agent.lead.as_ref() == Some(lead))
+            .map(|agent| agent.session.clone())
+            .collect()
     }
 
     /// Every agent calling for the user, the most recent call first.
@@ -131,6 +161,57 @@ mod tests {
         assert!(registry.start(agent("one", 3)));
         assert!(!registry.start(agent("one", 3)));
         assert!(registry.start(agent("one", 4)));
+    }
+
+    /// One agent that names another as the agent which started it.
+    fn child(id: &str, lead: &str, pane: u32) -> Agent {
+        agent(id, pane).with_lead(session(lead))
+    }
+
+    #[test]
+    fn ending_a_lead_ends_every_child_under_it() {
+        let mut registry = Registry::default();
+        registry.start(agent("lead", 3));
+        registry.start(child("lead.a1", "lead", 3));
+        registry.start(child("lead.a2", "lead", 3));
+        registry.start(agent("other", 4));
+        assert!(registry.end(&session("lead")));
+        assert_eq!(registry.get(&session("lead.a1")), None);
+        assert_eq!(registry.get(&session("lead.a2")), None);
+        // An agent that the ended session does not lead stays.
+        assert!(registry.get(&session("other")).is_some());
+    }
+
+    #[test]
+    fn ending_a_child_leaves_its_lead() {
+        let mut registry = Registry::default();
+        registry.start(agent("lead", 3));
+        registry.start(child("lead.a1", "lead", 3));
+        assert!(registry.end(&session("lead.a1")));
+        assert!(registry.get(&session("lead")).is_some());
+    }
+
+    #[test]
+    fn a_report_that_names_no_lead_withdraws_none() {
+        let mut registry = Registry::default();
+        registry.start(child("lead.a1", "lead", 3));
+        // A later report of the same child that says nothing about its lead.
+        registry.report(agent("lead.a1", 3));
+        assert_eq!(
+            registry.get(&session("lead.a1")).unwrap().lead,
+            Some(session("lead"))
+        );
+    }
+
+    #[test]
+    fn a_lead_survives_the_round_trip_through_a_record() {
+        let mut registry = Registry::default();
+        registry.start(child("lead.a1", "lead", 3));
+        let line = registry.encode();
+        let Record::Known(read) = Agent::decode(&line) else {
+            panic!("not a record");
+        };
+        assert_eq!(read.lead, Some(session("lead")));
     }
 
     #[test]

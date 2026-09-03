@@ -79,5 +79,24 @@ sh: sh -c 'tests/scripts/raise-call.sh dash-one wrangler-test-dashboard "$(cat t
 wait: wants you @ 20
 dump: dashboard_wants_you
 
+# A hook that fires inside a child of that session. It names the lead in
+# session_id, names the child in agent_id, and names the transcript of the lead
+# and never the file of the child. The daemon composes an id for the child and
+# builds the child's own two files from the path that the hook gave it.
+sh: sh -c 'tests/scripts/raise-call.sh dash-one wrangler-test-dashboard "$(cat tests/out/dashboard-pane.txt)" working probe-one'
+sleep: 2
+
+# The record of the child names the session that started it. This reads the
+# state back from the daemon, because the drawing of a child is another story.
+sh: tests/scripts/expect-lead.sh dash-one.probe-one dash-one
+# The lead names no lead of its own.
+sh: tests/scripts/expect-lead.sh dash-one ''
+
+# The child took its name from the meta file beside its transcript. The title
+# follows it in the same label, and the AGENT column cuts the pair short, so the
+# assertion names only what fits. A unit test covers the whole pair.
+wait: @Explore @ 20
+dump: dashboard_child
+
 keys: <C-q>
 sleep: 1

@@ -26,7 +26,7 @@ pub(crate) const RECORD: char = '\n';
 /// daemon keeps a client for as long as it speaks, so a client too old to beat
 /// is dropped after a minute and a half, and the pane says nothing about why. A
 /// reader that meets a number it does not know says so instead.
-pub const FORMAT: u32 = 7;
+pub const FORMAT: u32 = 8;
 
 /// The character that stands in for a record break on a transport that frames
 /// its messages by the line.
@@ -120,6 +120,27 @@ impl SessionId {
                 })
                 .collect(),
         ))
+    }
+
+    /// The id that the daemon files a child of `lead` under.
+    ///
+    /// Claude gives a subagent and a teammate no session id of their own. Every
+    /// hook that fires inside one carries the session id of the lead, and names
+    /// the child in `agent_id` beside it. The daemon therefore composes an id
+    /// out of the pair.
+    ///
+    /// A Claude session id is a UUID, so it holds no dot. A composed id can
+    /// therefore never collide with the id of a session. A composed id also
+    /// holds the id of its own lead, so no chain of children closes on itself.
+    /// Claude alone composes ids this way.
+    ///
+    /// The result is `None` for an agent id with no characters at all, the way
+    /// [`SessionId::new`] refuses an empty id.
+    pub fn child_of(lead: &SessionId, agent_id: &str) -> Option<Self> {
+        if agent_id.is_empty() {
+            return None;
+        }
+        SessionId::new(&format!("{}.{agent_id}", lead.as_str()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -296,6 +317,10 @@ pub struct Agent {
     /// It is taken once, where the call happens, so everything downstream orders
     /// the calls the same way, and compares no clock of its own.
     pub raised: u64,
+    /// The session that started this agent, or `None` for an agent that no
+    /// agent started. The daemon fills it from the `agent_id` on a hook, and
+    /// reads it off no file. [`Agent::with_lead`] attaches it.
+    pub lead: Option<SessionId>,
 }
 
 /// Replace with a space every control character, and every character that can
@@ -323,7 +348,17 @@ impl Agent {
             process: None,
             turn: Turn::default(),
             raised: 0,
+            lead: None,
         }
+    }
+
+    /// This method attaches the session that started this agent.
+    ///
+    /// The id passed a constructor that already took out every character which
+    /// can split a record, so this method cleans nothing.
+    pub fn with_lead(mut self, lead: SessionId) -> Self {
+        self.lead = Some(lead);
+        self
     }
 
     /// This method attaches what the session is working with.
@@ -373,8 +408,12 @@ impl Agent {
             ),
             None => (String::new(), String::new()),
         };
+        let lead = match &self.lead {
+            Some(lead) => lead.as_str(),
+            None => "",
+        };
         format!(
-            "{FORMAT}{FIELD}{}{FIELD}{}{FIELD}{pid}{FIELD}{started}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}",
+            "{FORMAT}{FIELD}{}{FIELD}{}{FIELD}{pid}{FIELD}{started}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}",
             self.session.as_str(),
             self.agent,
             self.turn.encode(),
@@ -388,6 +427,7 @@ impl Agent {
             self.status.context_tokens,
             self.records.last_message,
             self.records.running_tool,
+            lead,
             self.meta.title,
         )
     }
@@ -398,7 +438,7 @@ impl Agent {
     /// character in it still parses. No such title exists, because the
     /// constructor takes that character out.
     pub fn decode(line: &str) -> Record {
-        let mut fields = line.splitn(17, FIELD);
+        let mut fields = line.splitn(18, FIELD);
         match fields.next().and_then(|format| format.parse::<u32>().ok()) {
             Some(FORMAT) => {}
             Some(other) => return Record::Foreign(other),
@@ -427,6 +467,9 @@ impl Agent {
         let context_tokens = fields.next()?.parse().ok()?;
         let last_message = fields.next()?.to_string();
         let running_tool = fields.next()?.to_string();
+        // An empty field is an agent that no agent leads. `SessionId::new`
+        // refuses an empty id, so the two cases need no separate test.
+        let lead = SessionId::new(fields.next()?);
         let title = fields.next()?.to_string();
         // A start time says nothing without the process that it belongs to. A
         // record that names no process therefore names none, whatever the start
@@ -446,6 +489,7 @@ impl Agent {
                 process,
                 turn,
                 raised,
+                lead,
                 ..Agent::new(
                     session,
                     agent,
@@ -494,7 +538,7 @@ pub(crate) mod tests {
     fn whole() -> Vec<&'static str> {
         vec![
             "one", "claude", "42", "918273", "idle", "0", "dir", "", "", "", "", "", "0", "", "",
-            "title",
+            "", "title",
         ]
     }
 
@@ -615,11 +659,51 @@ pub(crate) mod tests {
         // process names a moment with nothing to attach it to.
         let orphan = record_line(&[
             "one", "claude", "", "918273", "idle", "0", "dir", "", "", "", "", "", "0", "", "", "",
+            "",
         ]);
         let Record::Known(read) = Agent::decode(&orphan) else {
             panic!("not a record");
         };
         assert_eq!(read.process, None);
+    }
+
+    #[test]
+    fn a_child_id_holds_the_id_of_its_lead() {
+        let lead = session("4630d1cb-3381-4fef-91a9-be9e5741ac83");
+        let child = SessionId::child_of(&lead, "a9a352ae014362aad").unwrap();
+        assert_eq!(
+            child.as_str(),
+            "4630d1cb-3381-4fef-91a9-be9e5741ac83.a9a352ae014362aad"
+        );
+        // The id names its own lead, so a child cannot lead itself.
+        assert_ne!(child, lead);
+    }
+
+    #[test]
+    fn a_child_id_cannot_be_the_id_of_a_session() {
+        // A Claude session id is a UUID, and a UUID holds no dot.
+        let lead = session("4630d1cb-3381-4fef-91a9-be9e5741ac83");
+        let child = SessionId::child_of(&lead, "a9a352ae014362aad").unwrap();
+        assert!(child.as_str().contains('.'));
+        assert!(!lead.as_str().contains('.'));
+    }
+
+    #[test]
+    fn an_agent_id_with_no_characters_names_no_child() {
+        assert_eq!(SessionId::child_of(&session("one"), ""), None);
+    }
+
+    #[test]
+    fn a_record_that_names_a_lead_survives_the_round_trip() {
+        let record = agent("one.a1", 3).with_lead(session("one"));
+        assert_eq!(Agent::decode(&record.encode()), Record::Known(record));
+    }
+
+    #[test]
+    fn a_record_that_names_no_lead_survives_the_round_trip() {
+        let record = agent("one", 3);
+        assert_eq!(record.lead, None);
+        assert_eq!(Agent::decode(&record.encode()), Record::Known(record));
     }
 
     #[test]

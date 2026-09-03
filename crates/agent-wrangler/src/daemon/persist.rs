@@ -171,6 +171,7 @@ mod tests {
         SessionFiles {
             agent: "claude".to_string(),
             transcript: transcript.to_string(),
+            child_meta_file: None,
             mtime: Some(42),
         }
     }

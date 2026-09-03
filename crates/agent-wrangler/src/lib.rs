@@ -85,6 +85,8 @@ fn hook(agent: &str, event: &str) {
             cwd: payload.cwd,
             transcript: payload.transcript_path,
             recoverable: payload.recoverable,
+            agent_id: payload.agent_id,
+            agent_type: payload.agent_type,
             origin: origin.encode(),
             process: agent_process(agent),
             at: now(),

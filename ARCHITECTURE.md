@@ -321,6 +321,15 @@ could:
 - **Reap.** A session whose process has gone is dropped. An agent killed without
   an `end` event used to leave a row nothing would ever take away.
 
+A hook that fires inside a subagent or a teammate names that child as well.
+Claude gives a child no session id, so every such hook carries the id of the
+lead and names the child beside it. The daemon composes an id for the child out
+of the pair. It files the child as an agent of its own, and that record names
+its lead. It reads the child's own transcript, which sits under a directory
+named for the lead session. The name and the title of a child come from the meta
+file beside that transcript. A child runs inside the process of its lead, so a
+lead that leaves takes its children with it.
+
 The daemon and the hook are the same executable, and a hook starts the daemon by
 running its own path, so the two can never be different builds. What can differ
 is the daemon and the plugin, so a state message names the format it is written

@@ -18,7 +18,17 @@ session=$1
 zellij_session=$2
 pane=$3
 event=$4
+# A fifth word makes this the hook of a child of that session. Claude names the
+# child in agent_id and leaves session_id naming the lead, so the body below is
+# the body that a real subagent and a real teammate both send.
+agent=${5:-}
 
-printf '%s' "{\"session_id\":\"$session\",\"cwd\":\"/home/u/quarry\",\"transcript_path\":\"$root/tests/out/e2e-transcript.jsonl\"}" |
+if [ -n "$agent" ]; then
+    child=",\"agent_id\":\"$agent\",\"agent_type\":\"Explore\""
+else
+    child=""
+fi
+
+printf '%s' "{\"session_id\":\"$session\",\"cwd\":\"/home/u/quarry\",\"transcript_path\":\"$root/tests/out/e2e-transcript.jsonl\"$child}" |
     ZELLIJ=0 ZELLIJ_SESSION_NAME="$zellij_session" ZELLIJ_PANE_ID="$pane" \
         "$root/target/debug/agent-wrangler" hook claude "$event"

@@ -9,7 +9,8 @@ use serde_json::Value;
 
 /// The fields that the sidebar takes from a hook body. `recoverable` is present
 /// only when the body carried a real JSON boolean. An agent that says nothing
-/// about `recoverable` does not say `false`.
+/// about `recoverable` does not say `false`. `agent_id` and `agent_type` are
+/// present only for a hook that fired inside a child of the session.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Payload {
     pub session_id: String,
@@ -18,6 +19,13 @@ pub struct Payload {
     /// where the agent says what it calls the session.
     pub transcript_path: String,
     pub recoverable: Option<bool>,
+    /// The child that this hook fired inside, or `None` for a hook that fired
+    /// in the session itself. Claude sets it for a subagent and for a teammate
+    /// alike, and `session_id` still names the lead.
+    pub agent_id: Option<String>,
+    /// What kind of child this is. Claude writes the built in type of a
+    /// subagent, such as `Explore`, and the name that the lead gave a teammate.
+    pub agent_type: Option<String>,
 }
 
 impl Payload {
@@ -30,11 +38,22 @@ impl Payload {
                 .unwrap_or_default()
                 .to_string()
         };
+        // A field that names a child is absent far more often than it is
+        // present, so an empty answer and a missing key mean the same thing.
+        let named = |keys: &[&str]| -> Option<String> {
+            let found = first_nonempty(keys);
+            match found.is_empty() {
+                true => None,
+                false => Some(found),
+            }
+        };
         Payload {
             session_id: first_nonempty(&["session_id", "sessionId"]),
             cwd: first_nonempty(&["cwd"]),
             transcript_path: first_nonempty(&["transcript_path", "transcriptPath"]),
             recoverable: value.get("recoverable").and_then(Value::as_bool),
+            agent_id: named(&["agent_id", "agentId"]),
+            agent_type: named(&["agent_type", "agentType"]),
         }
     }
 }
@@ -62,6 +81,8 @@ mod tests {
                 cwd: "/home/u/repo".to_string(),
                 transcript_path: "/t.jsonl".to_string(),
                 recoverable: None,
+                agent_id: None,
+                agent_type: None,
             }
         );
     }
@@ -81,6 +102,38 @@ mod tests {
             Payload::parse(r#"{"sessionId":"s","recoverable":"true"}"#).recoverable,
             None
         );
+    }
+
+    #[test]
+    fn a_hook_that_fires_inside_a_child_names_that_child() {
+        // Measured on Claude Code 2.1.258. A subagent and a teammate both carry
+        // these two fields, and both leave session_id naming the lead.
+        let body = r#"{"session_id":"lead","agent_id":"a9a352ae014362aad","agent_type":"Explore"}"#;
+        let payload = Payload::parse(body);
+        assert_eq!(payload.session_id, "lead");
+        assert_eq!(payload.agent_id.as_deref(), Some("a9a352ae014362aad"));
+        assert_eq!(payload.agent_type.as_deref(), Some("Explore"));
+    }
+
+    #[test]
+    fn a_hook_that_fires_in_a_session_names_no_child() {
+        let payload = Payload::parse(r#"{"session_id":"lead"}"#);
+        assert_eq!(payload.agent_id, None);
+        assert_eq!(payload.agent_type, None);
+    }
+
+    #[test]
+    fn the_camel_case_spelling_of_a_child_is_read() {
+        let body = r#"{"sessionId":"lead","agentId":"a1","agentType":"Plan"}"#;
+        let payload = Payload::parse(body);
+        assert_eq!(payload.agent_id.as_deref(), Some("a1"));
+        assert_eq!(payload.agent_type.as_deref(), Some("Plan"));
+    }
+
+    #[test]
+    fn an_empty_child_field_names_no_child() {
+        let payload = Payload::parse(r#"{"session_id":"lead","agent_id":""}"#);
+        assert_eq!(payload.agent_id, None);
     }
 
     #[test]
