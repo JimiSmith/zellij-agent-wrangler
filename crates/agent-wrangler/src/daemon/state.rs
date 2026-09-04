@@ -1134,8 +1134,15 @@ mod tests {
     }
 
     /// The transcript that the daemon builds for a child of session `one`.
+    ///
+    /// The path comes from the same function that the daemon calls. A path
+    /// written out here holds a separator, and a separator differs by system.
+    /// The fake world keys its files by the exact text of a path, so a written
+    /// path finds nothing on Windows and the test asserts against empty facts.
     fn child_transcript(agent: &str) -> String {
-        format!("/t/one/subagents/agent-{agent}.jsonl")
+        session_facts::claude_child_paths("/t/one.jsonl", agent)
+            .unwrap()
+            .transcript
     }
 
     /// A lead, a teammate under it, and a subagent under that teammate.
@@ -1329,11 +1336,7 @@ mod tests {
         let world = Fake::default();
         world.running(AGENT);
         world.says("/t/one.jsonl", titled("the lead"), 1);
-        world.says(
-            "/t/one/subagents/agent-a9a352.jsonl",
-            titled("the child"),
-            1,
-        );
+        world.says(&child_transcript("a9a352"), titled("the child"), 1);
 
         let mut state = State::default();
         // The lead files itself first. The daemon holds no child whose parent
@@ -1360,7 +1363,7 @@ mod tests {
             ""
         );
 
-        world.says("/t/one/subagents/agent-a9a352.jsonl", titled("at last"), 1);
+        world.says(&child_transcript("a9a352"), titled("at last"), 1);
         assert!(state.poll(&world));
         assert_eq!(
             state.registry().get(&child("a9a352")).unwrap().meta.title,
