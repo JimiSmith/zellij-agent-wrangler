@@ -43,10 +43,18 @@ printf '%s\n' '{"type":"custom-title","customTitle":"QUARRYMARK"}' \
 # the daemon builds both paths from the transcript that a hook names.
 children="$root/tests/out/e2e-transcript/subagents"
 mkdir -p "$children"
-printf '%s\n' '{"agentType":"Explore","description":"read the quarry"}' \
+printf '%s\n' '{"agentType":"Explore","description":"read the quarry","color":"purple"}' \
     >"$children/agent-probe-one.meta.json"
 printf '%s\n' '{"type":"user","message":"hello"}' \
     >"$children/agent-probe-one.jsonl"
+
+# A child of that child. Claude writes parentAgentId exactly when the parent is
+# not the session, so this one file is what puts the row two levels deep.
+printf '%s\n' \
+    '{"agentType":"Plan","description":"plan the quarry","parentAgentId":"probe-one"}' \
+    >"$children/agent-probe-two.meta.json"
+printf '%s\n' '{"type":"user","message":"hello"}' \
+    >"$children/agent-probe-two.jsonl"
 
 cat >"$root/tests/out/cache/zellij/permissions.kdl" <<KDL
 "$wasm" {

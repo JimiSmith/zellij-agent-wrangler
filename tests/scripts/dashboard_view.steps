@@ -98,5 +98,21 @@ sh: tests/scripts/expect-lead.sh dash-one ''
 wait: @Explore @ 20
 dump: dashboard_child
 
+# A hook that fires inside a child of that child. The body is the same shape:
+# every hook reports the top lead in session_id, and no field in it names the
+# agent in between. The meta file of this child names that agent, and the daemon
+# composes an id that holds the whole chain.
+sh: sh -c 'tests/scripts/raise-call.sh dash-one wrangler-test-dashboard "$(cat tests/out/dashboard-pane.txt)" working probe-two'
+sleep: 2
+
+# The id is the path, so the record sits two levels down and names the agent
+# above it.
+sh: tests/scripts/expect-lead.sh dash-one.probe-one.probe-two dash-one.probe-one
+
+# The row of the grandchild draws its stem before the kind icon, two columns for
+# each level of depth.
+wait: @Plan @ 20
+dump: dashboard_grandchild
+
 keys: <C-q>
 sleep: 1

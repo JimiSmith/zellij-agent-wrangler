@@ -28,8 +28,8 @@ use ratatui_core::widgets::Widget;
 use agent_wrangler_core::agent::Turn;
 
 use crate::model::{
-    Branch, CellAlignment, NamedColor, Placement, Row, RowContent, RowKey, RowPreview, TableCell,
-    TextEmphasis, TextRun,
+    Branch, CellAlignment, NamedColor, Placement, Row, RowContent, RowKey, RowPreview, RowStem,
+    TableCell, TextEmphasis, TextRun,
 };
 
 /// Column 0: a block marks "where you are", and a space does not.
@@ -102,6 +102,42 @@ fn preview_glyph(branch: Branch) -> char {
         Branch::More => '│',
         Branch::Last => '└',
     }
+}
+
+/// The columns that carry the tree down to one dashboard row.
+///
+/// Every level before the last draws a line where that ancestor has a later
+/// sibling, and spaces where it does not. The last level draws the branch of the
+/// row itself. The design draws `├ ` for a child with more below it, and
+/// `│ └ ` for the last child of a child.
+fn row_stem(stem: &RowStem) -> String {
+    let levels = stem.levels();
+    let last = levels.len().saturating_sub(1);
+    levels
+        .iter()
+        .enumerate()
+        .map(|(at, branch)| match (at == last, branch) {
+            (true, Branch::More) => "├ ",
+            (true, Branch::Last) => "└ ",
+            (false, Branch::More) => "│ ",
+            (false, Branch::Last) => "  ",
+        })
+        .collect()
+}
+
+/// The same columns, under a row rather than at it.
+///
+/// Every level draws a continuation, because a line of a block is not a child of
+/// the row above it. The children of that row hang below the block, and the tree
+/// must reach them.
+fn block_stem(stem: &RowStem) -> String {
+    stem.levels()
+        .iter()
+        .map(|branch| match branch {
+            Branch::More => "│ ",
+            Branch::Last => "  ",
+        })
+        .collect()
 }
 
 /// A description row hangs under its title. The row is indented to the column
@@ -192,6 +228,9 @@ enum Field {
     /// Text drawn as written, in the style of the row: the gutter, a gap, or a
     /// cell already padded to its columns.
     Text(String),
+    /// The stem that carries the tree down to this row. It draws dim, because
+    /// it is structure and the kind icon beside it is identity.
+    Stem(String),
     /// The kind icon, drawn in the color of the session.
     Icon {
         glyph: char,
@@ -235,9 +274,10 @@ enum Parts {
     },
     /// A dashboard row, as a run of fields at fixed offsets.
     Columns(Vec<Field>),
-    /// A line whose text is emphasised in places: the message under an open
-    /// dashboard row, which the agent wrote in markdown.
-    Runs { head: String, runs: Vec<TextRun> },
+    /// A line whose text is emphasised in places: any line of the block under an
+    /// open dashboard row. The stem is one dim run, and the message that the
+    /// agent wrote in markdown is the runs after it.
+    Runs(Vec<TextRun>),
 }
 
 /// The pieces of a child row: the gutter, the branch and the index, then the
@@ -302,21 +342,42 @@ fn status_parts(placement: Placement, position: Branch, index: &str, text: &str)
 /// above rather than pointing at a thing of its own, so it takes no color and
 /// needs nothing to carry one. It keeps the gutter. The block belongs to the
 /// same pane as its row, and the mark must not break between the two.
-fn preview_parts(placement: Placement, branch: Branch, text: &str) -> Parts {
-    Parts::Whole(format!("{}{text}", preview_head(placement, branch)))
+fn preview_parts(placement: Placement, stem: &RowStem, branch: Branch, text: &str) -> Parts {
+    Parts::Runs(vec![
+        dim_run(block_stem(stem)),
+        TextRun::plain(format!("{}{text}", preview_head(placement, branch))),
+    ])
 }
 
 /// The pieces of the message line of a block. The message is the one line that
 /// markdown divides into runs, so it alone carries an emphasis of its own.
-fn preview_message_parts(placement: Placement, branch: Branch, runs: &[TextRun]) -> Parts {
-    Parts::Runs {
-        head: preview_head(placement, branch),
-        runs: runs.to_vec(),
+fn preview_message_parts(
+    placement: Placement,
+    stem: &RowStem,
+    branch: Branch,
+    runs: &[TextRun],
+) -> Parts {
+    let mut lines = vec![
+        dim_run(block_stem(stem)),
+        TextRun::plain(preview_head(placement, branch)),
+    ];
+    lines.extend(runs.iter().cloned());
+    Parts::Runs(lines)
+}
+
+/// One run of text that recedes behind the rest of its line.
+fn dim_run(text: String) -> TextRun {
+    TextRun {
+        text,
+        emphasis: TextEmphasis {
+            dim: true,
+            ..TextEmphasis::default()
+        },
     }
 }
 
-/// Everything a line of the block draws before its text: the gutter, the indent
-/// and the tree glyph.
+/// Everything a line of the block draws between its stem and its text: the
+/// gutter, the indent and the tree glyph.
 fn preview_head(placement: Placement, branch: Branch) -> String {
     let lead = format!("{}", gutter(placement.is_focused_pane()));
     let indent = (DASHBOARD_NAME_COLUMN - ICON_AND_GAP).saturating_sub(lead.chars().count());
@@ -381,6 +442,7 @@ fn parts(content: &RowContent) -> Parts {
         }
         RowContent::DashboardAgent {
             placement,
+            stem,
             name,
             cells,
             color,
@@ -393,6 +455,7 @@ fn parts(content: &RowContent) -> Parts {
                     gutter(placement.is_focused_pane()),
                     open_marker(*preview)
                 )),
+                Field::Stem(row_stem(stem)),
                 Field::Icon {
                     glyph: ICON_AGENT,
                     color: *color,
@@ -405,19 +468,22 @@ fn parts(content: &RowContent) -> Parts {
         }
         RowContent::PreviewMessage {
             placement,
+            stem,
             branch,
             runs,
-        } => preview_message_parts(*placement, *branch, runs),
+        } => preview_message_parts(*placement, stem, *branch, runs),
         RowContent::PreviewTime {
             placement,
+            stem,
             branch,
             text,
         }
         | RowContent::PreviewTool {
             placement,
+            stem,
             branch,
             text,
-        } => preview_parts(*placement, *branch, text),
+        } => preview_parts(*placement, stem, *branch, text),
         RowContent::DashboardNoAgents => Parts::Whole(format!("  {NO_AGENTS}")),
         RowContent::DashboardPaneTooNarrow => Parts::Whole(format!("  {PANE_TOO_NARROW}")),
     }
@@ -429,19 +495,14 @@ fn parts(content: &RowContent) -> Parts {
 pub fn row_text(content: &RowContent) -> String {
     match parts(content) {
         Parts::Whole(text) => text,
-        Parts::Runs { head, runs } => {
-            format!(
-                "{head}{}",
-                runs.iter().map(|run| run.text.as_str()).collect::<String>()
-            )
-        }
+        Parts::Runs(runs) => runs.iter().map(|run| run.text.as_str()).collect(),
         Parts::Split {
             head, icon, tail, ..
         } => format!("{head}{icon}{tail}"),
         Parts::Columns(fields) => fields
             .iter()
             .map(|field| match field {
-                Field::Text(text) => text.clone(),
+                Field::Text(text) | Field::Stem(text) => text.clone(),
                 Field::Icon { glyph, .. } => glyph.to_string(),
             })
             .collect(),
@@ -458,12 +519,9 @@ pub fn row_line(content: &RowContent) -> Line<'static> {
     let base = base_style(content);
     match parts(content) {
         Parts::Whole(text) => Line::from(Span::styled(text, base)),
-        Parts::Runs { head, runs } => Line::from(
-            std::iter::once(Span::styled(head, base))
-                .chain(
-                    runs.into_iter()
-                        .map(|run| Span::styled(run.text, base.patch(emphasised(run.emphasis)))),
-                )
+        Parts::Runs(runs) => Line::from(
+            runs.into_iter()
+                .map(|run| Span::styled(run.text, base.patch(emphasised(run.emphasis))))
                 .collect::<Vec<Span<'static>>>(),
         ),
         Parts::Split {
@@ -481,6 +539,7 @@ pub fn row_line(content: &RowContent) -> Line<'static> {
                 .into_iter()
                 .map(|field| match field {
                     Field::Text(text) => Span::styled(text, base),
+                    Field::Stem(text) => Span::styled(text, base.add_modifier(Modifier::DIM)),
                     Field::Icon { glyph, color } => {
                         Span::styled(glyph.to_string(), own_color(base, color))
                     }
@@ -1158,12 +1217,79 @@ mod tests {
     ) -> RowContent {
         RowContent::DashboardAgent {
             placement,
+            stem: RowStem::default(),
             turn,
             color,
             preview: RowPreview::Closed,
             name: cell(name, width),
             cells: vec![cell("working", 9), cell("1 wrangler", 10)],
         }
+    }
+
+    /// One agent row of a group, drawn at the depth that `stem` says.
+    fn nested_agent(name: &str, width: usize, stem: Vec<Branch>) -> RowContent {
+        match dashboard_agent(name, width, Turn::Idle, Placement::SameTab, None) {
+            RowContent::DashboardAgent {
+                placement,
+                turn,
+                color,
+                preview,
+                name,
+                cells,
+                ..
+            } => RowContent::DashboardAgent {
+                placement,
+                stem: RowStem::new(stem),
+                turn,
+                color,
+                preview,
+                name,
+                cells,
+            },
+            other => other,
+        }
+    }
+
+    #[test]
+    fn a_stem_draws_two_columns_for_each_level() {
+        // Every level before the last carries the line down. The last level
+        // draws the branch of the row itself.
+        for (stem, want) in [
+            (vec![], ""),
+            (vec![Branch::More], "\u{251c} "),
+            (vec![Branch::Last], "\u{2514} "),
+            (vec![Branch::More, Branch::Last], "\u{2502} \u{2514} "),
+            (vec![Branch::Last, Branch::More], "  \u{251c} "),
+        ] {
+            let row = nested_agent("scout", 8, stem.clone());
+            let drawn = row_text(&row);
+            let head = format!("{} {} ", gutter(false), open_marker(RowPreview::Closed));
+            assert!(drawn.starts_with(&format!("{head}{want}")), "{stem:?}");
+            // The stem spends exactly the columns that the builder took off the
+            // AGENT cell.
+            assert_eq!(
+                want.chars().count(),
+                stem.len() * crate::model::STEM_COLUMNS_PER_LEVEL
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_and_its_block_start_their_text_in_the_same_column() {
+        // The block hangs under its row, so the stem of the row reaches the
+        // block. Every level of that stem draws a continuation, because a line
+        // of a block is not a child of the row above it.
+        let stem = vec![Branch::More, Branch::Last];
+        let row = row_text(&nested_agent("scout", 8, stem.clone()));
+        let block = row_text(&RowContent::PreviewTime {
+            placement: Placement::SameTab,
+            stem: RowStem::new(stem),
+            branch: Branch::Last,
+            text: "30s ago".to_string(),
+        });
+        let at = |line: &str, glyph: char| line.chars().position(|c| c == glyph);
+        // The tree glyph of the block sits in the column of the kind icon.
+        assert_eq!(at(&block, '\u{2514}'), at(&row, ICON_AGENT));
     }
 
     #[test]

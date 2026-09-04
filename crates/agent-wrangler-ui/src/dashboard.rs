@@ -12,22 +12,24 @@
 //! [`build_tree`]: crate::tree::build_tree
 //! [`build_frame`]: crate::frame::build_frame
 
-use agent_wrangler_core::agent::{Agent, Turn};
+use std::collections::{BTreeMap, BTreeSet};
+
+use agent_wrangler_core::agent::{Agent, SessionId, Turn};
 use agent_wrangler_core::label::label;
 use agent_wrangler_core::preview::{Preview, ToolCall};
 use agent_wrangler_core::status_line::{short_model_name, short_token_count};
 
 use crate::markdown::message_lines;
 use crate::model::{
-    Branch, CellAlignment, NamedColor, OpenPreviews, Placement, Row, RowContent, RowKey,
-    RowPreview, TableCell, TextRun,
+    Branch, CellAlignment, Indicator, NamedColor, OpenPreviews, Placement, Row, RowContent, RowKey,
+    RowPreview, RowStem, TableCell, TextRun,
 };
 use crate::options::DrawingOptions;
 use crate::render::{
     cut_to_columns, DASHBOARD_CELL_GAP, DASHBOARD_MARKER_GAP, DASHBOARD_MARKER_INSET,
     DASHBOARD_NAME_COLUMN, PREVIEW_TEXT_COLUMN,
 };
-use crate::tree::{indicator, pane_placement, Pane, Tab};
+use crate::tree::{indicator_for_turn, pane_placement, Pane, Tab};
 
 /// The word that the TURN column draws for each turn state. The user reads
 /// these, so they say what the agent does rather than name a variant.
@@ -150,38 +152,138 @@ impl Column {
     }
 }
 
-/// One agent as the table lists it: the record, and where it runs.
+/// One agent as the table lists it: the record, where it runs, and where it
+/// sits in the tree of its own group.
 struct AgentPlace<'a> {
     tab: &'a Tab,
     pane: &'a Pane,
     agent: &'a Agent,
+    /// How far under its lead this agent sits, and what the tree draws at each
+    /// level of that depth.
+    stem: RowStem,
+    /// Whether an agent hangs under this one. The block of such a row carries
+    /// the tree past it, so the children below stay attached to the row.
+    has_children: bool,
+    /// Whether this agent, or anything under it, wants the user. The marker at
+    /// the right edge says so, and the TURN column does not.
+    wants_user: bool,
 }
 
-/// Every agent of the session, in the order the tree draws them.
-fn agents_in_tree_order(tabs: &[Tab]) -> Vec<AgentPlace<'_>> {
-    tabs.iter()
-        .flat_map(|tab| {
-            tab.panes.iter().flat_map(move |pane| {
-                pane.agents
-                    .iter()
-                    .map(move |agent| AgentPlace { tab, pane, agent })
-            })
-        })
-        .collect()
+/// One lead and everything under it.
+///
+/// A group draws as one thing and moves as one thing. It takes the urgency of
+/// the most urgent row in it, so a call from a child lifts the whole group.
+struct AgentGroup<'a> {
+    urgency: Urgency,
+    rows: Vec<AgentPlace<'a>>,
 }
 
-/// How urgent one row is: the group it sits in, and how long it has waited
-/// inside that group.
+/// How urgent one row is: the group it sits in, and how long it waited inside
+/// that group.
+type Urgency = (u8, u64);
+
+/// The urgency group of an agent that wants the user, which leads the table.
+const URGENCY_ATTENTION: u8 = 0;
+
+/// How urgent one row is.
 ///
 /// A call carries the clock reading of the moment it was raised, and nothing
 /// else carries one. An older reading is a longer wait, so the first group
 /// sorts by the reading itself. Every other agent reads zero and ties there,
 /// which leaves the tree order in place under a stable sort.
-fn urgency(agent: &Agent) -> (u8, u64) {
+fn urgency(agent: &Agent) -> Urgency {
     match agent.turn {
-        Turn::Attention => (0, agent.raised),
+        Turn::Attention => (URGENCY_ATTENTION, agent.raised),
         Turn::Working => (1, 0),
         Turn::Idle => (2, 0),
+    }
+}
+
+/// Every group of one pane: each agent that no agent of the pane started, with
+/// everything under that agent.
+fn groups_of_pane<'a>(tab: &'a Tab, pane: &'a Pane) -> Vec<AgentGroup<'a>> {
+    let held: BTreeSet<&SessionId> = pane.agents.iter().map(|agent| &agent.session).collect();
+    let mut children: BTreeMap<&SessionId, Vec<&Agent>> = BTreeMap::new();
+    let mut roots: Vec<&Agent> = Vec::new();
+    for agent in &pane.agents {
+        // An agent whose lead is not in this pane leads a group of its own. The
+        // daemon files no such record, and a row must not vanish because two
+        // reports arrived out of order.
+        match agent.lead.as_ref().filter(|lead| held.contains(lead)) {
+            Some(lead) => children.entry(lead).or_default().push(agent),
+            None => roots.push(agent),
+        }
+    }
+    // The children of one agent draw in the order of their own ids, so one set
+    // of records always draws in one order. A Claude agent id is random, so the
+    // order says nothing about which child began first.
+    for under in children.values_mut() {
+        under.sort_by(|one, other| one.session.cmp(&other.session));
+    }
+    roots.sort_by(|one, other| one.session.cmp(&other.session));
+    roots
+        .into_iter()
+        .map(|root| {
+            let mut rows = Vec::new();
+            let urgency = walk_group(tab, pane, root, &children, Vec::new(), &mut rows);
+            AgentGroup { urgency, rows }
+        })
+        .collect()
+}
+
+/// One agent and everything under it, in the order they draw, appended to
+/// `into`. The result is the urgency of the most urgent row of the lot.
+///
+/// A child follows its parent, so the walk is depth first. Nothing sorts inside
+/// a group by urgency. A child that raises a call keeps its place, and no row
+/// moves under the cursor while children work.
+fn walk_group<'a>(
+    tab: &'a Tab,
+    pane: &'a Pane,
+    agent: &'a Agent,
+    children: &BTreeMap<&SessionId, Vec<&'a Agent>>,
+    stem: Vec<Branch>,
+    into: &mut Vec<AgentPlace<'a>>,
+) -> Urgency {
+    let under: &[&Agent] = match children.get(&agent.session) {
+        Some(under) => under,
+        None => &[],
+    };
+    // The place of this row is written now and its urgency is known only once
+    // every child of it is walked, so the row is revisited at this position.
+    let at = into.len();
+    into.push(AgentPlace {
+        tab,
+        pane,
+        agent,
+        stem: RowStem::new(stem.clone()),
+        has_children: !under.is_empty(),
+        wants_user: false,
+    });
+    let mut worst = urgency(agent);
+    let last = under.len().saturating_sub(1);
+    for (position, child) in under.iter().enumerate() {
+        let mut deeper = stem.clone();
+        deeper.push(match position == last {
+            true => Branch::Last,
+            false => Branch::More,
+        });
+        worst = worst.min(walk_group(tab, pane, child, children, deeper, into));
+    }
+    into[at].wants_user = worst.0 == URGENCY_ATTENTION;
+    worst
+}
+
+/// The marker one dashboard row carries at its right edge.
+///
+/// The marker says that this row, or something under it, wants the user. A call
+/// two levels down therefore reaches the top of its group, and one glance down
+/// the leads finds every call on the pane. The TURN column of each row still
+/// says only what that row does, so the two channels stay apart.
+fn group_indicator(place: &AgentPlace<'_>, options: &DrawingOptions) -> Indicator {
+    match place.wants_user {
+        true => indicator_for_turn(Turn::Attention, options),
+        false => indicator_for_turn(place.agent.turn, options),
     }
 }
 
@@ -240,9 +342,11 @@ fn cell(text: &str, width: usize, alignment: CellAlignment) -> TableCell {
 /// The text starts past the tree glyph, and stops before the turn marker of the
 /// rows around it. The measure then holds the result down, so a wide pane does
 /// not draw one long line of prose.
-fn preview_field(width: usize) -> usize {
+fn preview_field(width: usize, stem_columns: usize) -> usize {
     width
-        .saturating_sub(PREVIEW_TEXT_COLUMN + DASHBOARD_MARKER_GAP + 1 + DASHBOARD_MARKER_INSET)
+        .saturating_sub(
+            PREVIEW_TEXT_COLUMN + stem_columns + DASHBOARD_MARKER_GAP + 1 + DASHBOARD_MARKER_INSET,
+        )
         .clamp(1, PREVIEW_MEASURE)
 }
 
@@ -277,21 +381,25 @@ enum PreviewLine {
 }
 
 impl PreviewLine {
-    /// The row content of this line. The line hangs from `branch`.
-    fn content(self, placement: Placement, branch: Branch) -> RowContent {
+    /// The row content of this line. The line hangs from `branch`, under a row
+    /// whose own place in the tree is `stem`.
+    fn content(self, placement: Placement, stem: RowStem, branch: Branch) -> RowContent {
         match self {
             PreviewLine::Message(runs) => RowContent::PreviewMessage {
                 placement,
+                stem,
                 branch,
                 runs,
             },
             PreviewLine::Time(text) => RowContent::PreviewTime {
                 placement,
+                stem,
                 branch,
                 text,
             },
             PreviewLine::Tool(text) => RowContent::PreviewTool {
                 placement,
+                stem,
                 branch,
                 text,
             },
@@ -305,7 +413,8 @@ impl PreviewLine {
 /// Every line carries the key of the agent it describes, the way a notification
 /// entry does. A click anywhere in the block therefore reaches the same pane,
 /// and the keys step over the block as one thing.
-fn preview_rows(place: &AgentPlace<'_>, field: usize) -> Vec<Row> {
+fn preview_rows(place: &AgentPlace<'_>, stem: &RowStem, width: usize) -> Vec<Row> {
+    let field = preview_field(width, stem.columns());
     let preview = Preview::from_records(&place.agent.records);
     let placement = pane_placement(place.tab.active, place.pane.focused);
     let key = RowKey::Agent(place.agent.session.clone());
@@ -322,17 +431,23 @@ fn preview_rows(place: &AgentPlace<'_>, field: usize) -> Vec<Row> {
         lines.push(PreviewLine::Tool(tool_line(call, field)));
     }
 
-    // The last line closes the tree, and nothing is drawn below it.
+    // The last line closes the tree, and nothing is drawn below it. A row with
+    // children of its own is the one exception: the last line of that block
+    // carries the tree on, and the children hang below it.
+    let closes = match place.has_children {
+        true => Branch::More,
+        false => Branch::Last,
+    };
     let count = lines.len();
     lines
         .into_iter()
         .enumerate()
         .map(|(at, line)| {
             let branch = match at + 1 == count {
-                true => Branch::Last,
+                true => closes,
                 false => Branch::More,
             };
-            Row::new(line.content(placement, branch)).with_key(key.clone())
+            Row::new(line.content(placement, stem.clone(), branch)).with_key(key.clone())
         })
         .collect()
 }
@@ -353,16 +468,21 @@ pub fn build_dashboard(
     open: &OpenPreviews,
     options: &DrawingOptions,
 ) -> Vec<Row> {
-    let mut places = agents_in_tree_order(tabs);
+    let mut groups: Vec<AgentGroup> = tabs
+        .iter()
+        .flat_map(|tab| tab.panes.iter().map(move |pane| (tab, pane)))
+        .flat_map(|(tab, pane)| groups_of_pane(tab, pane))
+        .collect();
+    // A stable sort. Two groups that report the same facts therefore keep the
+    // order that the tree gives them, and no row moves under the cursor.
+    groups.sort_by_key(|group| group.urgency);
+    let places: Vec<AgentPlace> = groups.into_iter().flat_map(|group| group.rows).collect();
     if places.is_empty() {
         return vec![Row::new(RowContent::DashboardNoAgents)];
     }
     let Some((columns, name_width)) = fit(&places, width) else {
         return vec![Row::new(RowContent::DashboardPaneTooNarrow)];
     };
-    // A stable sort. Two agents that report the same facts therefore keep the
-    // order that the tree gives them, and no row moves under the cursor.
-    places.sort_by_key(|place| urgency(place.agent));
 
     let mut rows = vec![Row::new(RowContent::DashboardHeading {
         name: cell("AGENT", name_width, CellAlignment::Left),
@@ -371,21 +491,25 @@ pub fn build_dashboard(
             .map(|(column, width)| cell(column.heading(), *width, column.alignment()))
             .collect(),
     })];
-    let field = preview_field(width);
     for place in &places {
         let showing = match open.holds(&place.agent.session) {
             true => RowPreview::Open,
             false => RowPreview::Closed,
         };
+        // The stem and the AGENT cell sum to one width on every row, so every
+        // column after AGENT stays aligned and the table never widens because a
+        // child appeared.
+        let stem = place.stem.held_to(name_width);
         rows.push(
             Row::new(RowContent::DashboardAgent {
                 placement: pane_placement(place.tab.active, place.pane.focused),
+                stem: stem.clone(),
                 turn: place.agent.turn,
                 color: NamedColor::for_agent(place.agent),
                 preview: showing,
                 name: cell(
                     &label(place.agent, options.label),
-                    name_width,
+                    name_width - stem.columns(),
                     CellAlignment::Left,
                 ),
                 cells: columns
@@ -393,11 +517,11 @@ pub fn build_dashboard(
                     .map(|(column, width)| cell(&column.spell(place), *width, column.alignment()))
                     .collect(),
             })
-            .with_indicator(indicator(place.agent, options))
+            .with_indicator(group_indicator(place, options))
             .with_key(RowKey::Agent(place.agent.session.clone())),
         );
         if showing == RowPreview::Open {
-            rows.extend(preview_rows(place, field));
+            rows.extend(preview_rows(place, &stem, width));
         }
     }
     rows
@@ -567,6 +691,251 @@ mod tests {
         for (row, word) in [(1, WANTS_YOU), (2, WORKING), (3, IDLE)] {
             assert_eq!(cell_text(&rows, row, 0), word);
         }
+    }
+
+    /// One agent that another agent started.
+    fn under_lead(id: &str, lead: &str, title: &str) -> Agent {
+        agent(id, title).with_lead(SessionId::new(lead).unwrap())
+    }
+
+    /// The stem of each agent row, in the order the rows draw.
+    fn stems(rows: &[Row]) -> Vec<Vec<Branch>> {
+        rows.iter()
+            .filter_map(|row| match &row.content {
+                RowContent::DashboardAgent { stem, .. } => Some(stem.levels().to_vec()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A lead, a teammate under it, and a subagent under that teammate, all in
+    /// one pane.
+    fn one_group() -> Vec<Tab> {
+        vec![tab(
+            0,
+            "wrangler",
+            true,
+            vec![pane(
+                1,
+                "claude",
+                true,
+                vec![
+                    agent("one", "the lead"),
+                    under_lead("one.mate", "one", "the teammate"),
+                    under_lead("one.mate.probe", "one.mate", "the subagent"),
+                ],
+            )],
+        )]
+    }
+
+    #[test]
+    fn a_child_draws_under_the_agent_that_started_it() {
+        let rows = dashboard(&one_group(), WIDE);
+        assert_eq!(names(&rows), ["the lead", "the teammate", "the subagent"]);
+        // The stem grows one level for each level of depth, and the last child
+        // of each level closes its own branch.
+        assert_eq!(
+            stems(&rows),
+            vec![vec![], vec![Branch::Last], vec![Branch::Last, Branch::Last],]
+        );
+    }
+
+    #[test]
+    fn children_of_one_agent_order_by_their_id() {
+        // A Claude agent id is random, so the order says nothing about which
+        // child began first. The order is stable, and a stable order keeps a row
+        // still.
+        let tabs = vec![tab(
+            0,
+            "wrangler",
+            true,
+            vec![pane(
+                1,
+                "claude",
+                true,
+                vec![
+                    agent("one", "the lead"),
+                    under_lead("one.c", "one", "third"),
+                    under_lead("one.a", "one", "first"),
+                    under_lead("one.b", "one", "second"),
+                ],
+            )],
+        )];
+        let rows = dashboard(&tabs, WIDE);
+        assert_eq!(names(&rows), ["the lead", "first", "second", "third"]);
+        // Only the last child closes the branch.
+        assert_eq!(
+            stems(&rows),
+            vec![
+                vec![],
+                vec![Branch::More],
+                vec![Branch::More],
+                vec![Branch::Last],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_group_sorts_as_one_by_the_most_urgent_row_in_it() {
+        // The lead is idle and its child wants the user. The whole group leads
+        // the table, and the child keeps its place inside the group.
+        let tabs = vec![tab(
+            0,
+            "wrangler",
+            true,
+            vec![
+                pane(1, "a", false, vec![working("busy", "a busy lead")]),
+                pane(
+                    2,
+                    "b",
+                    false,
+                    vec![
+                        agent("idle", "an idle lead"),
+                        under_lead("idle.a", "idle", "a quiet child"),
+                        {
+                            let mut child = under_lead("idle.b", "idle", "a calling child");
+                            child.turn = Turn::Attention;
+                            child.raised = 100;
+                            child
+                        },
+                    ],
+                ),
+            ],
+        )];
+        assert_eq!(
+            names(&dashboard(&tabs, WIDE)),
+            [
+                "an idle lead",
+                "a quiet child",
+                "a calling child",
+                "a busy lead"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_child_that_wants_the_user_marks_every_row_above_it() {
+        let mut tabs = one_group();
+        tabs[0].panes[0].agents[2].turn = Turn::Attention;
+        let rows = dashboard(&tabs, WIDE);
+        // The marker climbs every level, so a call two levels down reaches the
+        // top of its group.
+        let markers: Vec<Indicator> = rows[1..].iter().map(|row| row.indicator).collect();
+        assert_eq!(
+            markers,
+            [
+                Indicator::Attention,
+                Indicator::Attention,
+                Indicator::Attention
+            ]
+        );
+        // The TURN column of each row still says only what that row does.
+        assert_eq!(cell_text(&rows, 1, 0), IDLE);
+        assert_eq!(cell_text(&rows, 2, 0), IDLE);
+        assert_eq!(cell_text(&rows, 3, 0), WANTS_YOU);
+    }
+
+    #[test]
+    fn a_stem_narrows_the_agent_cell_by_exactly_its_own_width() {
+        let rows = dashboard(&one_group(), WIDE);
+        let widths: Vec<usize> = rows
+            .iter()
+            .filter_map(|row| match &row.content {
+                RowContent::DashboardAgent { stem, name, .. } => Some(stem.columns() + name.width),
+                _ => None,
+            })
+            .collect();
+        // Every row spends one width on the stem and the AGENT cell together,
+        // so every column after AGENT stays aligned.
+        assert_eq!(widths.len(), 3);
+        assert!(widths.windows(2).all(|pair| pair[0] == pair[1]));
+        // That width is the AGENT heading's own.
+        match &rows[0].content {
+            RowContent::DashboardHeading { name, .. } => assert_eq!(name.width, widths[0]),
+            other => panic!("the table opens with {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_name_with_no_columns_left_keeps_its_row() {
+        // A deep row can run out of the AGENT column. The name is cut, and
+        // every other column still says what it says.
+        let deep: Vec<Agent> = (0..12)
+            .map(|level| {
+                let id: String = (0..=level).map(|_| ".x").collect();
+                let id = format!("one{id}");
+                match level {
+                    0 => under_lead(&id, "one", "a child"),
+                    _ => {
+                        let lead: String = (0..level).map(|_| ".x").collect();
+                        under_lead(&id, &format!("one{lead}"), "a child")
+                    }
+                }
+            })
+            .collect();
+        let mut agents = vec![agent("one", "the lead")];
+        agents.extend(deep);
+        let tabs = vec![tab(
+            0,
+            "wrangler",
+            true,
+            vec![pane(1, "claude", true, agents)],
+        )];
+        for width in [NARROWEST, WIDE] {
+            let rows = dashboard(&tabs, width);
+            // Every agent still draws a row of its own.
+            assert_eq!(names(&rows).len(), 13, "{width}");
+            // The stem and the AGENT cell still sum to one width, however deep
+            // the row sits. The table never widens because a child appeared.
+            let widths: Vec<usize> = rows
+                .iter()
+                .filter_map(|row| match &row.content {
+                    RowContent::DashboardAgent { stem, name, .. } => {
+                        Some(stem.columns() + name.width)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(widths.windows(2).all(|pair| pair[0] == pair[1]), "{width}");
+        }
+    }
+
+    #[test]
+    fn a_block_under_a_row_with_children_carries_the_tree_past_it() {
+        let mut open = OpenPreviews::default();
+        open.open_or_close(&SessionId::new("one").unwrap());
+        let rows = build_dashboard(&one_group(), WIDE, &open, &DrawingOptions::default());
+        // The last line of the block continues the tree, so the teammate below
+        // it stays attached to the lead.
+        let branches: Vec<Branch> = rows
+            .iter()
+            .filter_map(|row| match &row.content {
+                RowContent::PreviewMessage { branch, .. }
+                | RowContent::PreviewTime { branch, .. }
+                | RowContent::PreviewTool { branch, .. } => Some(*branch),
+                _ => None,
+            })
+            .collect();
+        assert!(!branches.is_empty());
+        assert!(branches.iter().all(|branch| *branch == Branch::More));
+    }
+
+    #[test]
+    fn a_block_under_a_row_with_no_children_closes_the_tree() {
+        let mut open = OpenPreviews::default();
+        open.open_or_close(&SessionId::new("one.mate.probe").unwrap());
+        let rows = build_dashboard(&one_group(), WIDE, &open, &DrawingOptions::default());
+        let last = rows
+            .iter()
+            .rev()
+            .find_map(|row| match &row.content {
+                RowContent::PreviewMessage { branch, .. }
+                | RowContent::PreviewTime { branch, .. }
+                | RowContent::PreviewTool { branch, .. } => Some(*branch),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(last, Branch::Last);
     }
 
     #[test]

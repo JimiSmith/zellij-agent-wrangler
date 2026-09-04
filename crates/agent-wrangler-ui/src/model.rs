@@ -90,6 +90,55 @@ pub enum Branch {
     Last,
 }
 
+/// The columns that one level of a [`RowStem`] takes.
+///
+/// The builder narrows the AGENT cell by the width of the stem, and the drawing
+/// spends exactly that width. Both read this constant, so the two cannot drift
+/// apart and every column after AGENT stays aligned.
+pub const STEM_COLUMNS_PER_LEVEL: usize = 2;
+
+/// How far under its lead a dashboard row sits, and what the tree draws at each
+/// level of that depth.
+///
+/// The last entry is the branch of the row itself. Every entry before it says
+/// whether that ancestor has a later sibling, which decides whether the line
+/// carries on down past this row. An agent that no agent started carries no
+/// entry at all.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RowStem(Vec<Branch>);
+
+impl RowStem {
+    /// The stem of a row at this depth, outermost level first.
+    pub fn new(levels: Vec<Branch>) -> Self {
+        RowStem(levels)
+    }
+
+    /// The levels, outermost first. The drawing reads them in this order.
+    pub fn levels(&self) -> &[Branch] {
+        &self.0
+    }
+
+    /// The columns that this stem takes.
+    pub fn columns(&self) -> usize {
+        self.0.len() * STEM_COLUMNS_PER_LEVEL
+    }
+
+    /// The same stem, held to `columns`.
+    ///
+    /// The stem and the AGENT cell sum to one width on every row. A stem deeper
+    /// than the whole AGENT column therefore pushes every column after AGENT out
+    /// of place, and the table widens because a child appeared.
+    ///
+    /// The outermost levels are the ones that go. The last level is the branch
+    /// of the row itself, and that branch says that the row hangs under
+    /// something.
+    pub fn held_to(&self, columns: usize) -> RowStem {
+        let room = columns / STEM_COLUMNS_PER_LEVEL;
+        let dropped = self.0.len().saturating_sub(room);
+        RowStem(self.0[dropped..].to_vec())
+    }
+}
+
 /// Whether the block under a dashboard row is drawn. The row marks which it is,
 /// so a user knows that a closed row has something to open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -388,6 +437,9 @@ pub enum RowContent {
     DashboardAgent {
         /// Whether the user is in this agent's pane, which the gutter marks.
         placement: Placement,
+        /// How far under its lead this row sits. The stem draws before the kind
+        /// icon, and the AGENT cell is already narrowed by its width.
+        stem: RowStem,
         /// Whose turn it is, which decides how brightly the row draws.
         turn: Turn,
         color: Option<NamedColor>,
@@ -409,6 +461,9 @@ pub enum RowContent {
         /// the block carries it, so the gutter does not break in the middle of
         /// one pane.
         placement: Placement,
+        /// The stem of the row that the block hangs from. Every level draws a
+        /// continuation, so the tree reads as one structure through the block.
+        stem: RowStem,
         /// Whether more of the block follows this line. The last line closes
         /// the tree that the block hangs from.
         branch: Branch,
@@ -419,12 +474,14 @@ pub enum RowContent {
     /// When the agent wrote that message, in the block under its row.
     PreviewTime {
         placement: Placement,
+        stem: RowStem,
         branch: Branch,
         text: String,
     },
     /// The tool that the agent runs now, in the block under its row.
     PreviewTool {
         placement: Placement,
+        stem: RowStem,
         branch: Branch,
         text: String,
     },

@@ -15,14 +15,40 @@ use crate::model::{
 };
 use crate::options::DrawingOptions;
 
-/// The marker the row of an agent carries at its right edge. If the client is
-/// asked not to say whose turn it is, the marker is nothing at all.
-pub(crate) fn indicator(agent: &Agent, options: &DrawingOptions) -> Indicator {
-    match (options.turn_state, agent.turn) {
+/// The marker that one turn state draws at the right edge of a row. If the
+/// client is asked not to say whose turn it is, the marker is nothing at all.
+pub(crate) fn indicator_for_turn(turn: Turn, options: &DrawingOptions) -> Indicator {
+    match (options.turn_state, turn) {
         (false, _) | (_, Turn::Idle) => Indicator::None,
         (_, Turn::Working) => Indicator::Working,
         (_, Turn::Attention) => Indicator::Attention,
     }
+}
+
+/// The marker the row of an agent carries in the tree.
+///
+/// The tree draws one row for each session and no row for a child, so the row of
+/// a lead answers for everything under it. A call from a child therefore reaches
+/// the row of its lead. Before the daemon knew about children, a child raised
+/// the turn of its lead and this row drew the same marker.
+fn indicator(agent: &Agent, pane: &Pane, options: &DrawingOptions) -> Indicator {
+    let calling = pane
+        .agents
+        .iter()
+        .any(|under| under.session.is_under(&agent.session) && under.turn == Turn::Attention);
+    match calling {
+        true => indicator_for_turn(Turn::Attention, options),
+        false => indicator_for_turn(agent.turn, options),
+    }
+}
+
+/// The agents of a pane that the tree draws: the sessions, and no child.
+///
+/// A child of an agent is not a session of the pane. The dashboard draws the
+/// depth. Without this, one lead that runs twenty children fills its pane with
+/// twenty rows that carry no structure at all.
+fn sessions_of(pane: &Pane) -> impl Iterator<Item = &Agent> {
+    pane.agents.iter().filter(|agent| agent.lead.is_none())
 }
 
 /// The rows one agent draws, wherever it is drawn: its own row, and the status
@@ -33,8 +59,9 @@ pub(crate) fn indicator(agent: &Agent, options: &DrawingOptions) -> Indicator {
 /// the two back to one thing to navigate.
 ///
 /// [`selectable_row_keys`]: crate::selection::selectable_row_keys
-fn agent_rows(
-    agent: &Agent,
+fn agent_rows<'a>(
+    agent: &'a Agent,
+    pane: &'a Pane,
     index: String,
     branch: Branch,
     placement: Placement,
@@ -48,7 +75,7 @@ fn agent_rows(
         placement,
         color: NamedColor::for_agent(agent),
     })
-    .with_indicator(indicator(agent, options))
+    .with_indicator(indicator(agent, pane, options))
     .with_key(key.clone())];
     let spelled = options
         .status_line
@@ -146,13 +173,12 @@ fn children(tab: &Tab) -> Vec<Child<'_>> {
     tab.panes
         .iter()
         .flat_map(|pane| {
-            if pane.agents.is_empty() {
-                vec![Child::Pane(pane)]
-            } else {
-                pane.agents
-                    .iter()
-                    .map(|agent| Child::Agent(pane, agent))
-                    .collect()
+            let sessions: Vec<Child<'_>> = sessions_of(pane)
+                .map(|agent| Child::Agent(pane, agent))
+                .collect();
+            match sessions.is_empty() {
+                true => vec![Child::Pane(pane)],
+                false => sessions,
             }
         })
         .collect()
@@ -202,6 +228,7 @@ fn tab_rows(tab: &Tab, options: &DrawingOptions) -> Vec<Row> {
             // pane is, and the row takes you to that pane.
             Child::Agent(pane, agent) => rows.extend(agent_rows(
                 agent,
+                pane,
                 index,
                 branch,
                 pane_placement(tab.active, pane.focused),
@@ -218,7 +245,7 @@ fn kinds(tabs: &[Tab]) -> Vec<&str> {
     let mut kinds: Vec<&str> = tabs
         .iter()
         .flat_map(|tab| tab.panes.iter())
-        .flat_map(|pane| pane.agents.iter())
+        .flat_map(sessions_of)
         .map(|agent| agent.agent.as_str())
         .collect();
     kinds.sort_unstable();
@@ -240,7 +267,7 @@ fn kind_rows(tabs: &[Tab], kind: &str, options: &DrawingOptions) -> Vec<Row> {
         let agents: Vec<(&Pane, &Agent)> = tab
             .panes
             .iter()
-            .flat_map(|pane| pane.agents.iter().map(move |agent| (pane, agent)))
+            .flat_map(|pane| sessions_of(pane).map(move |agent| (pane, agent)))
             .filter(|(_, agent)| agent.agent == kind)
             .collect();
         if agents.is_empty() {
@@ -251,6 +278,7 @@ fn kind_rows(tabs: &[Tab], kind: &str, options: &DrawingOptions) -> Vec<Row> {
         for (position, (pane, agent)) in agents.iter().enumerate() {
             rows.extend(agent_rows(
                 agent,
+                pane,
                 (position + 1).to_string(),
                 branch_at(position, last),
                 pane_placement(tab.active, pane.focused),
@@ -460,6 +488,71 @@ mod tests {
                 Some(RowKey::Agent(SessionId::new("two").unwrap())),
             ]
         );
+    }
+
+    /// A pane holding one lead, one child of that lead, and one child of the
+    /// child. Every id is the path, as the daemon composes it.
+    fn with_a_group(mut pane: Pane) -> Pane {
+        pane = running(pane, "claude", &["one"]);
+        for (id, lead) in [("one.mate", "one"), ("one.mate.probe", "one.mate")] {
+            let mut child = running(Pane::new(0u32, "", false), "claude", &[id])
+                .agents
+                .remove(0);
+            child.lead = Some(SessionId::new(lead).unwrap());
+            pane.agents.push(child);
+        }
+        pane
+    }
+
+    #[test]
+    fn the_tree_draws_one_row_for_each_session_and_no_row_for_a_child() {
+        // The dashboard is where depth lives. Without this rule, a lead that
+        // runs twenty children fills its pane with twenty rows that say nothing
+        // about the structure.
+        let rows = tree(&[tab(
+            0,
+            "editor",
+            true,
+            vec![with_a_group(pane(1, "claude", false))],
+        )]);
+        let agents: Vec<&Row> = rows
+            .iter()
+            .filter(|row| matches!(row.content, RowContent::Agent { .. }))
+            .collect();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(
+            agents[0].key,
+            Some(RowKey::Agent(SessionId::new("one").unwrap()))
+        );
+    }
+
+    #[test]
+    fn a_lead_carries_the_marker_of_a_child_that_wants_the_user() {
+        // The tree draws no row for the child, so the row of the lead is the
+        // one place that can say a call is waiting under it.
+        let mut host = with_a_group(pane(1, "claude", false));
+        host.agents[2].turn = Turn::Attention;
+        let rows = tree(&[tab(0, "editor", true, vec![host])]);
+        let agent = rows
+            .iter()
+            .find(|row| matches!(row.content, RowContent::Agent { .. }))
+            .unwrap();
+        assert_eq!(agent.indicator, Indicator::Attention);
+    }
+
+    #[test]
+    fn a_pane_whose_agents_are_all_children_still_draws_its_lead() {
+        // A child shares the pane of its lead, so this pane always holds one
+        // session as well. The tree draws that session and nothing else.
+        let rows = tree(&[tab(
+            0,
+            "editor",
+            true,
+            vec![with_a_group(pane(1, "claude", false))],
+        )]);
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row.content, RowContent::Pane { .. })));
     }
 
     #[test]
