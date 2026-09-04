@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::agent::{Agent, SessionId, Turn, RECORD};
+use crate::agent::{Agent, AgentId, SessionId, Turn, RECORD};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Registry {
@@ -70,34 +70,48 @@ impl Registry {
         self.sessions.insert(agent.session.clone(), agent.clone()) != Some(agent)
     }
 
-    /// Drop an agent's session, and every agent that names it as its lead.
+    /// Drop an agent's session, and every agent under it at any depth.
     ///
     /// A child runs inside the process of its lead, so it cannot outlive that
-    /// process. A lead that leaves therefore takes its children with it, and no
-    /// row is left behind that names a session which is gone.
+    /// process. A lead that leaves therefore takes its whole subtree with it,
+    /// and no row is left behind that names a session which is gone.
     ///
-    /// A child leads nothing, so one pass over the sessions is enough. If this
-    /// dropped anything, the result is `true`.
-    pub fn end(&mut self, session: &SessionId) -> bool {
-        let dropped = self.sessions.remove(session).is_some();
-        let children = self.children_of(session);
-        for child in &children {
-            self.sessions.remove(child);
+    /// If this dropped anything, the result is `true`.
+    pub fn end(&mut self, root: &SessionId) -> bool {
+        let dropped = self.sessions.remove(root).is_some();
+        let under = self.agents_under(root);
+        for agent in &under {
+            self.sessions.remove(agent);
         }
-        dropped || !children.is_empty()
+        dropped || !under.is_empty()
     }
 
-    /// Every agent that names `lead` as the agent which started it.
+    /// Every agent under `root`, at any depth. `root` itself is not listed.
     ///
-    /// A child leads nothing itself, so one pass over the sessions finds them
-    /// all. The daemon calls this to drop what it watches for a child, which
-    /// the registry knows nothing about.
-    pub fn children_of(&self, lead: &SessionId) -> Vec<SessionId> {
+    /// A composed id holds the session and then one agent id for each level, so
+    /// the id is the path. One pass over the sessions therefore returns the
+    /// whole subtree. The daemon calls this to drop what it watches for a child,
+    /// which the registry knows nothing about.
+    pub fn agents_under(&self, root: &SessionId) -> Vec<SessionId> {
         self.sessions
-            .values()
-            .filter(|agent| agent.lead.as_ref() == Some(lead))
-            .map(|agent| agent.session.clone())
+            .keys()
+            .filter(|session| session.is_under(root))
+            .cloned()
             .collect()
+    }
+
+    /// The composed id of the agent that `agent` names, somewhere under
+    /// `session`.
+    ///
+    /// `SubagentStop` names an agent id and never the chain, so the daemon
+    /// cannot compute the key of the child that stopped. It matches instead.
+    /// The match is against the whole last level of an id, and never against a
+    /// substring of one. Claude gives one agent id to one child of a session, so
+    /// at most one agent answers.
+    pub fn session_of_agent_id(&self, session: &SessionId, agent: &AgentId) -> Option<&SessionId> {
+        self.sessions
+            .keys()
+            .find(|held| held.is_under(session) && held.last_segment() == agent.as_str())
     }
 
     /// Every agent calling for the user, the most recent call first.
@@ -155,6 +169,11 @@ mod tests {
     use crate::agent::tests::{agent, at_pane, colored, meta, reporting, session};
     use crate::agent::{Record, FORMAT};
 
+    /// The id of one child, for a test that states the chain outright.
+    fn agent_id(text: &str) -> AgentId {
+        AgentId::new(text).unwrap()
+    }
+
     #[test]
     fn re_filing_the_same_record_changes_nothing() {
         let mut registry = Registry::default();
@@ -180,6 +199,83 @@ mod tests {
         assert_eq!(registry.get(&session("lead.a2")), None);
         // An agent that the ended session does not lead stays.
         assert!(registry.get(&session("other")).is_some());
+    }
+
+    #[test]
+    fn ending_a_lead_ends_a_grandchild() {
+        // A teammate starts a subagent of its own. Both go with the lead.
+        let mut registry = Registry::default();
+        registry.start(agent("lead", 3));
+        registry.start(child("lead.mate", "lead", 3));
+        registry.start(child("lead.mate.probe", "lead.mate", 3));
+        assert!(registry.end(&session("lead")));
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn ending_a_teammate_ends_its_own_children_and_leaves_the_lead() {
+        let mut registry = Registry::default();
+        registry.start(agent("lead", 3));
+        registry.start(child("lead.mate", "lead", 3));
+        registry.start(child("lead.mate.probe", "lead.mate", 3));
+        registry.start(child("lead.other", "lead", 3));
+        assert!(registry.end(&session("lead.mate")));
+        assert_eq!(registry.get(&session("lead.mate.probe")), None);
+        assert!(registry.get(&session("lead")).is_some());
+        assert!(registry.get(&session("lead.other")).is_some());
+    }
+
+    #[test]
+    fn agents_under_a_lead_lists_every_depth() {
+        let mut registry = Registry::default();
+        registry.start(agent("lead", 3));
+        registry.start(child("lead.mate", "lead", 3));
+        registry.start(child("lead.mate.probe", "lead.mate", 3));
+        assert_eq!(
+            registry.agents_under(&session("lead")),
+            vec![session("lead.mate"), session("lead.mate.probe")]
+        );
+        // A leaf leads nothing.
+        assert!(registry
+            .agents_under(&session("lead.mate.probe"))
+            .is_empty());
+    }
+
+    #[test]
+    fn an_agent_id_finds_the_child_that_carries_it_at_any_depth() {
+        let mut registry = Registry::default();
+        registry.start(agent("lead", 3));
+        registry.start(child("lead.mate", "lead", 3));
+        registry.start(child("lead.mate.probe", "lead.mate", 3));
+        assert_eq!(
+            registry.session_of_agent_id(&session("lead"), &agent_id("probe")),
+            Some(&session("lead.mate.probe"))
+        );
+        // A session leads itself nowhere, so its own id answers nothing.
+        assert_eq!(
+            registry.session_of_agent_id(&session("lead"), &agent_id("lead")),
+            None
+        );
+    }
+
+    #[test]
+    fn an_agent_id_matches_a_whole_level_and_never_a_substring() {
+        // A teammate agent id carries the name that the user chose. A substring
+        // match ends an agent that nothing stopped.
+        let mut registry = Registry::default();
+        registry.start(agent("lead", 3));
+        registry.start(child("lead.mate-probe", "lead", 3));
+        assert_eq!(
+            registry.session_of_agent_id(&session("lead"), &agent_id("probe")),
+            None
+        );
+        // Another session's child is not this session's child either.
+        registry.start(agent("other", 4));
+        registry.start(child("other.probe", "other", 4));
+        assert_eq!(
+            registry.session_of_agent_id(&session("lead"), &agent_id("probe")),
+            None
+        );
     }
 
     #[test]

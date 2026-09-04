@@ -1,10 +1,11 @@
 //! What an agent's own files say about one session.
 //!
-//! A reader here returns three groups of facts.
+//! A reader here returns four groups of facts.
 //!
 //! - The label: the name, the title and the color.
 //! - The status: the branch, the model and the context.
 //! - The records: the last message, and the tool that still runs.
+//! - The parent, for a child that another child started.
 //!
 //! No agent puts any of that in a hook body. A reader therefore takes it off
 //! disk at the moment when a hook fires. That is what keeps a row current. An
@@ -18,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::agent::{LabelFacts, StatusFacts, TranscriptRecords};
+use crate::agent::{AgentId, LabelFacts, StatusFacts, TranscriptRecords};
 // The reader that finds a record and the reader that draws it ask the same
 // three questions of it. Those three live beside the drawing's reader, which is
 // behind `json`, and `native` takes `json` with it.
@@ -34,6 +35,13 @@ pub struct SessionFacts {
     pub label: LabelFacts,
     pub status: StatusFacts,
     pub records: TranscriptRecords,
+    /// The agent that started this child, for a child that another child
+    /// started. Claude writes `parentAgentId` exactly when the parent is not
+    /// the session, so `None` says that the session started this agent.
+    ///
+    /// A session and a Copilot agent report `None` here, because neither reads
+    /// a meta file.
+    pub parent: Option<AgentId>,
 }
 
 /// The model that Claude writes for a message it composed itself rather than
@@ -254,6 +262,9 @@ pub fn read_claude_session(transcript: &str) -> SessionFacts {
                 .map(|(_, record)| record)
                 .unwrap_or_default(),
         },
+        // A transcript never names a parent. Only a meta file does, and only a
+        // child has one. [`read_claude_child`] fills this in afterwards.
+        parent: None,
     }
 }
 
@@ -335,8 +346,8 @@ pub fn claude_child_paths(lead_transcript: &str, agent_id: &str) -> Option<Child
 ///
 /// The transcript of a child holds the branch, the model, the context, the last
 /// message and the running tool, in the records that
-/// [`read_claude_session`] already reads. It holds no name, no title and no
-/// color, so the meta file supplies the first two.
+/// [`read_claude_session`] already reads. It holds no name, no title, no color
+/// and no parent, so the meta file supplies those four.
 ///
 /// A file that is not there says nothing, and this function guesses nothing.
 pub fn read_claude_child(paths: &ChildPaths) -> SessionFacts {
@@ -351,6 +362,13 @@ pub fn read_claude_child(paths: &ChildPaths) -> SessionFacts {
     // gave a teammate. Either one is what a user calls the child.
     facts.label.name = string_field(&meta, "agentType").unwrap_or("").to_string();
     facts.label.title = string_field(&meta, "description").unwrap_or("").to_string();
+    // A teammate is a session of its own and names its own color. A subagent
+    // names none, and the daemon fills it from the agent that started it.
+    facts.label.color = string_field(&meta, "color").unwrap_or("").to_string();
+    // Claude writes `parentAgentId` only when the parent is not the session.
+    // Measurement on Claude Code 2.1.258 found it on a subagent of a teammate,
+    // and on nothing else.
+    facts.parent = string_field(&meta, "parentAgentId").and_then(AgentId::new);
     facts
 }
 
@@ -369,6 +387,10 @@ pub fn read_copilot_session(home: &Path, session: &str) -> SessionFacts {
         },
         status: StatusFacts::default(),
         records: TranscriptRecords::default(),
+        // Copilot has subagent events of its own, and refinement measured none
+        // of them. A Copilot agent therefore starts nothing that the daemon
+        // draws under it.
+        parent: None,
     }
 }
 
@@ -496,6 +518,57 @@ mod tests {
     }
 
     #[test]
+    fn a_teammate_takes_its_color_and_a_subagent_takes_none() {
+        // Measured on Claude Code 2.1.258. A teammate meta file carries color,
+        // name and taskKind. A subagent meta file carries none of the three.
+        let scratch = Scratch::new("child-color");
+        let teammate = write_child(
+            scratch.path(),
+            "adepth-probe-7b57",
+            concat!(
+                r#"{"agentType":"depth-probe","description":"Measure depth two","#,
+                r#""name":"depth-probe","taskKind":"in_process_teammate","color":"purple"}"#
+            ),
+            &[r#"{"type":"user","message":"hello"}"#],
+        );
+        assert_eq!(read_claude_child(&teammate).label.color, "purple");
+        let subagent = write_child(
+            scratch.path(),
+            "ae4c3164",
+            r#"{"agentType":"Explore","description":"a look","toolUseId":"t1"}"#,
+            &[r#"{"type":"user","message":"hello"}"#],
+        );
+        assert_eq!(read_claude_child(&subagent).label.color, "");
+    }
+
+    #[test]
+    fn a_child_of_a_child_names_its_parent() {
+        // Claude writes parentAgentId exactly when the parent is not the
+        // session. A subagent that the lead itself started carries none.
+        let scratch = Scratch::new("child-parent");
+        let nested = write_child(
+            scratch.path(),
+            "ae4c3164",
+            concat!(
+                r#"{"agentType":"Explore","description":"a look","#,
+                r#""parentAgentId":"adepth-probe-7b57","spawnDepth":1}"#
+            ),
+            &[r#"{"type":"user","message":"hello"}"#],
+        );
+        assert_eq!(
+            read_claude_child(&nested).parent,
+            AgentId::new("adepth-probe-7b57")
+        );
+        let plain = write_child(
+            scratch.path(),
+            "ab1234",
+            r#"{"agentType":"Explore","description":"a look","toolUseId":"t1"}"#,
+            &[r#"{"type":"user","message":"hello"}"#],
+        );
+        assert_eq!(read_claude_child(&plain).parent, None);
+    }
+
+    #[test]
     fn a_child_with_no_meta_file_reports_no_name() {
         let scratch = Scratch::new("child-no-meta");
         let paths = write_child(
@@ -507,6 +580,8 @@ mod tests {
         let facts = read_claude_child(&paths);
         assert_eq!(facts.label.name, "");
         assert_eq!(facts.label.title, "");
+        assert_eq!(facts.label.color, "");
+        assert_eq!(facts.parent, None);
     }
 
     #[test]

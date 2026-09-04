@@ -94,13 +94,30 @@ pub fn read_state_message(payload: &str) -> Option<(u32, &str)> {
     }
 }
 
+/// The character between one level of a composed id and the next.
+const LEVEL: char = '.';
+
+/// Whether an id can hold this character.
+///
+/// An id travels inside delimited text, so every character that can split a
+/// field or a record is replaced. [`LEVEL`] is excluded here and allowed by
+/// [`SessionId::new`] alone, because it means something: it separates the
+/// levels of a composed id.
+fn id_character(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-')
+}
+
 /// The id that an agent gives its own session. A session is stored under this
 /// id.
 ///
 /// The id travels inside delimited text. The only constructor therefore replaces
-/// every character that is not a letter, a digit, `.`, `_` or `-`. The
+/// every character that is not a letter, a digit, [`LEVEL`], `_` or `-`. The
 /// constructor refuses an id with no characters at all. Nothing can build a
 /// `SessionId` that splits a field or a record.
+///
+/// [`SessionId::child_of`] composes an id out of a parent and one [`AgentId`].
+/// A composed id holds one [`LEVEL`] between each pair of levels. The id of a
+/// session itself holds none, because a Claude session id is a UUID.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SessionId(String);
 
@@ -111,36 +128,105 @@ impl SessionId {
         }
         Some(SessionId(
             text.chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                        c
-                    } else {
-                        '_'
-                    }
+                .map(|c| match id_character(c) || c == LEVEL {
+                    true => c,
+                    false => '_',
                 })
                 .collect(),
         ))
     }
 
-    /// The id that the daemon files a child of `lead` under.
+    /// The id that the daemon files a child of `parent` under.
     ///
     /// Claude gives a subagent and a teammate no session id of their own. Every
-    /// hook that fires inside one carries the session id of the lead, and names
-    /// the child in `agent_id` beside it. The daemon therefore composes an id
-    /// out of the pair.
+    /// hook that fires inside one carries the session id of the top lead, and
+    /// names the child in `agent_id` beside it. A child that another child
+    /// started names its parent in its own meta file. The daemon therefore
+    /// composes an id out of the parent and the agent id.
     ///
-    /// A Claude session id is a UUID, so it holds no dot. A composed id can
-    /// therefore never collide with the id of a session. A composed id also
-    /// holds the id of its own lead, so no chain of children closes on itself.
-    /// Claude alone composes ids this way.
+    /// The result holds the session, and then one agent id for each level. So
+    /// the id states the whole chain, the count of levels is the depth of the
+    /// agent, and no chain of children closes on itself. A composed id can never
+    /// collide with the id of a session, because a Claude session id is a UUID
+    /// and holds no [`LEVEL`].
     ///
-    /// The result is `None` for an agent id with no characters at all, the way
-    /// [`SessionId::new`] refuses an empty id.
-    pub fn child_of(lead: &SessionId, agent_id: &str) -> Option<Self> {
-        if agent_id.is_empty() {
+    /// [`AgentId::new`] refuses an empty id and replaces a [`LEVEL`], and
+    /// [`SessionId::new`] already replaced everything else. This function
+    /// therefore runs no check and cannot fail. Claude alone composes ids this
+    /// way.
+    pub fn child_of(parent: &SessionId, agent: &AgentId) -> Self {
+        SessionId(format!("{}{LEVEL}{}", parent.0, agent.0))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The id of the session that this agent runs in. A session that no agent
+    /// started returns its own id.
+    ///
+    /// The first level of a composed id is the session, and every level after it
+    /// is one agent id. A whole chain therefore sits under one session.
+    pub fn session_segment(&self) -> &str {
+        match self.0.split_once(LEVEL) {
+            Some((session, _)) => session,
+            None => &self.0,
+        }
+    }
+
+    /// The agent id of a child, which is the last level of a composed id. A
+    /// session that no agent started returns its own id.
+    pub fn last_segment(&self) -> &str {
+        match self.0.rsplit_once(LEVEL) {
+            Some((_, agent)) => agent,
+            None => &self.0,
+        }
+    }
+
+    /// Whether this agent sits under `root`, at any depth. `root` is not under
+    /// itself.
+    ///
+    /// The test is the whole id of `root` and then a [`LEVEL`], and never a
+    /// substring of a level. A teammate agent id carries the name that the user
+    /// chose, so one id can hold the shape of another one inside it.
+    pub fn is_under(&self, root: &SessionId) -> bool {
+        self.0
+            .strip_prefix(&root.0)
+            .and_then(|rest| rest.strip_prefix(LEVEL))
+            .is_some()
+    }
+}
+
+/// The id that Claude gives one subagent or one teammate.
+///
+/// [`SessionId::child_of`] joins a parent and one agent id with a [`LEVEL`]
+/// between them. A [`LEVEL`] inside an agent id therefore adds a level that no
+/// agent started, and the depth of the composed id is then untrue. This
+/// constructor replaces it, along with every character that [`SessionId::new`]
+/// replaces.
+///
+/// A teammate agent id carries the name that the user chose, such as
+/// `adepth-probe-7b57156e12dd403f`. A user is free to type a dot in that name,
+/// which is why a type carries this guarantee rather than a comment.
+///
+/// The constructor refuses an id with no characters at all, so
+/// [`SessionId::child_of`] runs no check.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AgentId(String);
+
+impl AgentId {
+    pub fn new(text: &str) -> Option<Self> {
+        if text.is_empty() {
             return None;
         }
-        SessionId::new(&format!("{}.{agent_id}", lead.as_str()))
+        Some(AgentId(
+            text.chars()
+                .map(|c| match id_character(c) {
+                    true => c,
+                    false => '_',
+                })
+                .collect(),
+        ))
     }
 
     pub fn as_str(&self) -> &str {
@@ -667,30 +753,81 @@ pub(crate) mod tests {
         assert_eq!(read.process, None);
     }
 
-    #[test]
-    fn a_child_id_holds_the_id_of_its_lead() {
-        let lead = session("4630d1cb-3381-4fef-91a9-be9e5741ac83");
-        let child = SessionId::child_of(&lead, "a9a352ae014362aad").unwrap();
-        assert_eq!(
-            child.as_str(),
-            "4630d1cb-3381-4fef-91a9-be9e5741ac83.a9a352ae014362aad"
-        );
-        // The id names its own lead, so a child cannot lead itself.
-        assert_ne!(child, lead);
+    /// The id of one child, for a test that states the chain outright.
+    fn agent_id(text: &str) -> AgentId {
+        AgentId::new(text).unwrap()
     }
 
     #[test]
-    fn a_child_id_cannot_be_the_id_of_a_session() {
+    fn a_composed_id_holds_the_whole_chain() {
+        let lead = session("4630d1cb-3381-4fef-91a9-be9e5741ac83");
+        let teammate = SessionId::child_of(&lead, &agent_id("adepth-probe-7b57"));
+        let subagent = SessionId::child_of(&teammate, &agent_id("ae4c3164f96e90be6"));
+        assert_eq!(
+            subagent.as_str(),
+            "4630d1cb-3381-4fef-91a9-be9e5741ac83.adepth-probe-7b57.ae4c3164f96e90be6"
+        );
+        // The id states its own chain, so no chain of children closes on itself.
+        assert_ne!(subagent, teammate);
+        assert_ne!(subagent, lead);
+    }
+
+    #[test]
+    fn a_composed_id_cannot_be_the_id_of_a_session() {
         // A Claude session id is a UUID, and a UUID holds no dot.
         let lead = session("4630d1cb-3381-4fef-91a9-be9e5741ac83");
-        let child = SessionId::child_of(&lead, "a9a352ae014362aad").unwrap();
+        let child = SessionId::child_of(&lead, &agent_id("a9a352ae014362aad"));
         assert!(child.as_str().contains('.'));
         assert!(!lead.as_str().contains('.'));
     }
 
     #[test]
-    fn an_agent_id_with_no_characters_names_no_child() {
-        assert_eq!(SessionId::child_of(&session("one"), ""), None);
+    fn an_agent_id_with_no_characters_is_refused() {
+        assert_eq!(AgentId::new(""), None);
+    }
+
+    #[test]
+    fn an_agent_id_loses_a_dot_so_the_depth_stays_true() {
+        // A user is free to type a dot in the name of a teammate. A dot that
+        // survives adds a level that no agent started.
+        let child = SessionId::child_of(&session("one"), &agent_id("my.probe"));
+        assert_eq!(child.as_str(), "one.my_probe");
+        assert_eq!(child.as_str().matches('.').count(), 1);
+    }
+
+    #[test]
+    fn an_agent_sits_under_its_session_and_under_every_parent() {
+        let lead = session("one");
+        let teammate = SessionId::child_of(&lead, &agent_id("mate"));
+        let subagent = SessionId::child_of(&teammate, &agent_id("probe"));
+        assert!(teammate.is_under(&lead));
+        assert!(subagent.is_under(&teammate));
+        assert!(subagent.is_under(&lead));
+        // Nothing is under itself, and a parent is not under its own child.
+        assert!(!lead.is_under(&lead));
+        assert!(!teammate.is_under(&subagent));
+    }
+
+    #[test]
+    fn an_id_that_only_starts_the_same_way_sits_under_nothing() {
+        // A teammate agent id carries the name that the user chose, so one id
+        // can hold the whole of another one at the front of it. The test is a
+        // whole level and never a substring of one.
+        let lead = session("one");
+        assert!(!session("onelong.mate").is_under(&lead));
+        let teammate = SessionId::child_of(&lead, &agent_id("mate"));
+        assert!(!SessionId::child_of(&lead, &agent_id("mate-two")).is_under(&teammate));
+    }
+
+    #[test]
+    fn an_id_names_the_session_it_runs_in_and_the_agent_it_is() {
+        let subagent = session("one.mate.probe");
+        assert_eq!(subagent.session_segment(), "one");
+        assert_eq!(subagent.last_segment(), "probe");
+        // A session that no agent started is its own session and its own id.
+        let lead = session("one");
+        assert_eq!(lead.session_segment(), "one");
+        assert_eq!(lead.last_segment(), "one");
     }
 
     #[test]

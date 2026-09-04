@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use agent_wrangler_core::agent::{self, Agent, LabelFacts, Process, SessionId, Turn};
+use agent_wrangler_core::agent::{self, Agent, AgentId, LabelFacts, Process, SessionId, Turn};
 use agent_wrangler_core::label::{label, Label};
 use agent_wrangler_core::notify::Notifier;
 use agent_wrangler_core::origin::Origin;
@@ -314,7 +314,11 @@ struct ReportedAgent {
     lead: Option<SessionId>,
 }
 
-/// The agent id that a hook names, for a hook that fired inside a child.
+/// The agent id that a hook names, exactly as Claude wrote it, for a hook that
+/// fired inside a child.
+///
+/// Claude names the files of a child with this text, so a path is built from
+/// this and never from [`claude_child_id`], which replaces characters.
 ///
 /// Only Claude is read this way. Copilot has subagent events of its own, and
 /// refinement measured none of them, so a Copilot hook always speaks for its
@@ -327,23 +331,13 @@ fn claude_child_of(hook: &Hook) -> Option<&str> {
     }
 }
 
-/// Which agent a hook speaks for, worked out from what it named.
+/// The same id, as the daemon composes a session id out of it.
 ///
-/// Claude gives a subagent and a teammate no session id of their own, so a hook
-/// inside either carries the id of the lead and names the child beside it. The
-/// daemon composes an id for the child out of the pair.
-fn reported_agent(hook: &Hook) -> Option<ReportedAgent> {
-    let lead = SessionId::new(&hook.session_id)?;
-    match claude_child_of(hook).and_then(|id| SessionId::child_of(&lead, id)) {
-        Some(child) => Some(ReportedAgent {
-            session: child,
-            lead: Some(lead),
-        }),
-        None => Some(ReportedAgent {
-            session: lead,
-            lead: None,
-        }),
-    }
+/// [`AgentId`] replaces a dot, so the levels of a composed id stay countable. A
+/// meta file names a parent that goes through the same constructor, and so does
+/// every id that the registry matches. All three therefore agree.
+fn claude_child_id(hook: &Hook) -> Option<AgentId> {
+    claude_child_of(hook).and_then(AgentId::new)
 }
 
 /// The files that a hook names, for the agent that the hook speaks for.
@@ -352,6 +346,9 @@ fn reported_agent(hook: &Hook) -> Option<ReportedAgent> {
 /// the child. The daemon therefore builds the child's own pair of files from
 /// that path and the agent id.
 fn files_named_by(hook: &Hook) -> SessionFiles {
+    // The raw id names the file. A composed session id is built from the
+    // replaced form, and the two are the same for every id that Claude has been
+    // measured to write.
     let child = claude_child_of(hook)
         .and_then(|agent_id| session_facts::claude_child_paths(&hook.transcript, agent_id));
     match child {
@@ -387,27 +384,137 @@ pub fn read_hook(hook: &Hook, world: &dyn World) -> Reading {
 }
 
 impl State {
+    /// Which agent a hook speaks for, worked out from what it named and from
+    /// what the meta file of a child said.
+    ///
+    /// Claude gives a subagent and a teammate no session id of their own, so a
+    /// hook inside either carries the id of the top lead and names the child
+    /// beside it. The parent of that child is the session, unless the meta file
+    /// names another child. The daemon composes the id out of the parent and
+    /// the agent id, so the id holds the whole chain.
+    ///
+    /// The result is nothing for a child whose parent the registry does not
+    /// hold. No record then names a lead that is not there. The order of events
+    /// makes that safe: a teammate is filed on its own start event, which fires
+    /// before any child of that teammate starts.
+    fn reported_agent(
+        &self,
+        lead: &SessionId,
+        child_agent: Option<&AgentId>,
+        reading: &Reading,
+    ) -> Option<ReportedAgent> {
+        let Some(agent) = child_agent else {
+            return Some(ReportedAgent {
+                session: lead.clone(),
+                lead: None,
+            });
+        };
+        let parent = match &reading.facts.parent {
+            None => lead.clone(),
+            Some(named) => self.registry.session_of_agent_id(lead, named)?.clone(),
+        };
+        // No record ever names a lead that the registry does not hold.
+        self.registry.get(&parent)?;
+        Some(ReportedAgent {
+            session: SessionId::child_of(&parent, agent),
+            lead: Some(parent),
+        })
+    }
+
+    /// Where a child that is already filed belongs, given what its meta file
+    /// now says: the agent that started it, and the id composed out of that
+    /// agent.
+    ///
+    /// The held id carries everything the answer needs. Its first level is the
+    /// session, and its last level is the agent id of the child. Nothing at all
+    /// says that the record stays where it is, which covers a session, a child
+    /// of the session itself, and a child whose parent the registry does not
+    /// hold.
+    fn place_of(
+        &self,
+        held: &SessionId,
+        parent_agent: Option<&AgentId>,
+    ) -> Option<(SessionId, SessionId)> {
+        let named = parent_agent?;
+        let lead = SessionId::new(held.session_segment())?;
+        let agent = AgentId::new(held.last_segment())?;
+        let parent = self.registry.session_of_agent_id(&lead, named)?.clone();
+        let session = SessionId::child_of(&parent, &agent);
+        Some((parent, session))
+    }
+
+    /// Move a record, and the files that the daemon watches for it, to the id
+    /// that `record` now names.
+    ///
+    /// The old id leaves the registry, so the selection falls back and an open
+    /// block closes, exactly as they do for any agent that leaves. A grandchild
+    /// under the old id leaves with it, and files itself again on its own next
+    /// event.
+    fn refile(&mut self, from: &SessionId, record: Agent) -> bool {
+        let files = self.session_files.get(from).cloned();
+        self.end_session(from);
+        if let Some(files) = files {
+            self.session_files.insert(record.session.clone(), files);
+        }
+        self.registry.report(record);
+        true
+    }
+
     /// This method takes in what a hook reported, with what its files already
     /// said.
     pub fn apply_hook(&mut self, hook: &Hook, reading: Reading) -> Applied {
-        let Some(reported) = reported_agent(hook) else {
+        let Some(lead) = SessionId::new(&hook.session_id) else {
+            return Applied::Nothing;
+        };
+        let child_agent = claude_child_id(hook);
+        let event = event(&hook.agent, &hook.event, hook.recoverable);
+
+        // The child word acts on the record that an agent id names, and it
+        // reads no meta file. A hook that names no child ends nothing here, so
+        // a lead is safe from the stop event of its own child.
+        if event == Event::ChildEnd {
+            let ended = child_agent
+                .as_ref()
+                .and_then(|agent| self.registry.session_of_agent_id(&lead, agent))
+                .cloned();
+            return match ended {
+                Some(child) => Applied::told(self.end_session(&child)),
+                None => Applied::Nothing,
+            };
+        }
+
+        let Some(reported) = self.reported_agent(&lead, child_agent.as_ref(), &reading) else {
             return Applied::Nothing;
         };
         let session = reported.session.clone();
-        let event = event(&hook.agent, &hook.event, hook.recoverable);
-        match event {
-            Event::End => return Applied::told(self.end_session(&session)),
-            // A hook that names no child ends nothing here. A lead is therefore
-            // safe from the stop event of its own child.
-            Event::ChildEnd if reported.lead.is_none() => return Applied::Nothing,
-            Event::ChildEnd => return Applied::told(self.end_session(&session)),
-            _ => {}
+        if event == Event::End {
+            return Applied::told(self.end_session(&session));
         }
 
-        let meta = LabelFacts {
+        // A meta file that lands late files a child under the session rather
+        // than under the agent that started it. This hook composes the true id,
+        // and the record under the old id must go, or the child draws twice.
+        if let Some(agent) = &child_agent {
+            if let Some(stale) = self.registry.session_of_agent_id(&lead, agent).cloned() {
+                if stale != session {
+                    self.end_session(&stale);
+                }
+            }
+        }
+
+        let mut meta = LabelFacts {
             dir: directory_name(&hook.cwd),
             ..reading.facts.label
         };
+        // A teammate is a session of its own and names its own color. A
+        // subagent names none, so it draws in the color of the agent that
+        // started it, because the work belongs to that agent. The daemon fills
+        // a parent before a child, so the color composes down every level.
+        if meta.color.is_empty() {
+            if let Some(parent) = reported.lead.as_ref().and_then(|it| self.registry.get(it)) {
+                meta.color = parent.meta.color.clone();
+            }
+        }
         let turn = match event {
             Event::Turn(turn) => turn,
             _ => Turn::Idle,
@@ -589,14 +696,14 @@ impl State {
         &self.registry
     }
 
-    /// Drop a session, and drop the files of every child that goes with it.
+    /// Drop a session, and drop the files of every agent under it at any depth.
     ///
     /// A child runs inside the process of its lead, so a lead that leaves takes
-    /// its children with it. [`Registry::end`] drops the records. This method
-    /// drops the files that the daemon watches for them, which the registry
-    /// knows nothing about.
+    /// its whole subtree with it. [`Registry::end`] drops the records. This
+    /// method drops the files that the daemon watches for them, which the
+    /// registry knows nothing about.
     fn end_session(&mut self, session: &SessionId) -> bool {
-        for child in self.registry.children_of(session) {
+        for child in self.registry.agents_under(session) {
             self.session_files.remove(&child);
         }
         self.session_files.remove(session);
@@ -654,9 +761,8 @@ impl State {
             // other fact is in the transcript, so the scan states all of them
             // afresh.
             //
-            // The lead comes from the hook and from no file at all, so it rides
-            // along with the rest of the held record and a scan never touches
-            // it.
+            // The lead is worked out below and never read off a transcript, so
+            // it rides along with the rest of the held record.
             let record = Agent {
                 meta: LabelFacts {
                     dir: held.meta.dir.clone(),
@@ -666,7 +772,20 @@ impl State {
             }
             .with_status(found.status)
             .with_records(found.records);
-            changed |= self.registry.report(record);
+            // A meta file that lands after the child started names a parent
+            // that the hook did not see. The record moves to its true place on
+            // this tick.
+            changed |= match self.place_of(&session, found.parent.as_ref()) {
+                Some((parent, moved_to)) if moved_to != session => self.refile(
+                    &session,
+                    Agent {
+                        session: moved_to,
+                        lead: Some(parent),
+                        ..record
+                    },
+                ),
+                _ => self.registry.report(record),
+            };
         }
 
         changed
@@ -816,6 +935,13 @@ mod tests {
         }
     }
 
+    fn colored(color: &str) -> LabelFacts {
+        LabelFacts {
+            color: color.to_string(),
+            ..LabelFacts::default()
+        }
+    }
+
     fn hook(event: &str) -> Hook {
         Hook {
             agent: "claude".to_string(),
@@ -850,8 +976,25 @@ mod tests {
     }
 
     /// The id that the daemon files a child of session `one` under.
-    fn child(agent_id: &str) -> SessionId {
-        SessionId::child_of(&session("one"), agent_id).unwrap()
+    fn child(agent: &str) -> SessionId {
+        SessionId::child_of(&session("one"), &agent_id(agent))
+    }
+
+    /// The id that the daemon files a child of `parent` under.
+    fn under(parent: &SessionId, agent: &str) -> SessionId {
+        SessionId::child_of(parent, &agent_id(agent))
+    }
+
+    fn agent_id(text: &str) -> AgentId {
+        AgentId::new(text).unwrap()
+    }
+
+    /// What the meta file of a child that another child started says.
+    fn started_by(parent: &str) -> SessionFacts {
+        SessionFacts {
+            parent: Some(agent_id(parent)),
+            ..SessionFacts::default()
+        }
     }
 
     fn session(text: &str) -> SessionId {
@@ -990,6 +1133,195 @@ mod tests {
         assert_eq!(state.registry().get(&child("a9a352")), None);
     }
 
+    /// The transcript that the daemon builds for a child of session `one`.
+    fn child_transcript(agent: &str) -> String {
+        format!("/t/one/subagents/agent-{agent}.jsonl")
+    }
+
+    /// A lead, a teammate under it, and a subagent under that teammate.
+    ///
+    /// The meta file of the subagent names the teammate, which is the only
+    /// place that says so. Every hook reports the top lead in `session_id`.
+    fn depth_two(world: &Fake, state: &mut State) -> (SessionId, SessionId) {
+        world.running(AGENT);
+        world.reads(&child_transcript("probe"), started_by("mate"), 1);
+        state.on_hook(&hook("working"), world);
+        state.on_hook(&child_hook("working", "mate"), world);
+        state.on_hook(&child_hook("working", "probe"), world);
+        let teammate = child("mate");
+        let subagent = under(&teammate, "probe");
+        (teammate, subagent)
+    }
+
+    #[test]
+    fn a_subagent_of_a_teammate_is_filed_under_that_teammate() {
+        // The hook flattens. Measurement on Claude Code 2.1.258 found the top
+        // lead in session_id, and no field that names the teammate. The meta
+        // file of the subagent is the one place that names it.
+        let world = Fake::default();
+        let mut state = State::default();
+        let (teammate, subagent) = depth_two(&world, &mut state);
+
+        let filed = state.registry().get(&subagent).unwrap();
+        assert_eq!(filed.lead, Some(teammate.clone()));
+        // The id is the path, so the count of dots is the depth.
+        assert_eq!(subagent.as_str().matches('.').count(), 2);
+        assert!(subagent.as_str().starts_with(teammate.as_str()));
+        // Nothing is filed at the flat place any more.
+        assert_eq!(state.registry().get(&child("probe")), None);
+    }
+
+    #[test]
+    fn a_child_whose_parent_the_registry_does_not_hold_is_dropped() {
+        // Nothing names a lead that is not there. A row that points at a
+        // session which is gone never leaves.
+        let world = Fake::default();
+        world.running(AGENT);
+        world.reads(&child_transcript("probe"), started_by("mate"), 1);
+        let mut state = State::default();
+        state.on_hook(&hook("working"), &world);
+        assert_eq!(
+            state.on_hook(&child_hook("working", "probe"), &world),
+            Applied::Nothing
+        );
+        assert!(state.registry().get(&child("probe")).is_none());
+    }
+
+    #[test]
+    fn a_late_meta_file_moves_the_row_on_the_next_hook() {
+        // Claude writes the meta file at spawn, so the parent is usually known
+        // when the child starts. A meta file that lands later changes the
+        // answer, and the record moves from depth one to depth two.
+        let world = Fake::default();
+        world.running(AGENT);
+        let mut state = State::default();
+        state.on_hook(&hook("working"), &world);
+        state.on_hook(&child_hook("working", "mate"), &world);
+        state.on_hook(&child_hook("working", "probe"), &world);
+        assert!(state.registry().get(&child("probe")).is_some());
+
+        world.reads(&child_transcript("probe"), started_by("mate"), 2);
+        state.on_hook(&child_hook("working", "probe"), &world);
+        let moved_to = under(&child("mate"), "probe");
+        assert!(state.registry().get(&moved_to).is_some());
+        // The old id leaves, so the child does not draw twice.
+        assert_eq!(state.registry().get(&child("probe")), None);
+        assert!(!state
+            .plan()
+            .watch
+            .iter()
+            .any(|(at, _)| at == &child("probe")));
+    }
+
+    #[test]
+    fn a_late_meta_file_moves_the_row_on_the_next_tick() {
+        // The child writes its transcript, the daemon reads the pair again, and
+        // the meta file is there this time.
+        let world = Fake::default();
+        world.running(AGENT);
+        let mut state = State::default();
+        state.on_hook(&hook("working"), &world);
+        state.on_hook(&child_hook("working", "mate"), &world);
+        state.on_hook(&child_hook("working", "probe"), &world);
+
+        world.reads(&child_transcript("probe"), started_by("mate"), 5);
+        assert!(state.poll(&world));
+        let moved_to = under(&child("mate"), "probe");
+        assert_eq!(
+            state.registry().get(&moved_to).unwrap().lead,
+            Some(child("mate"))
+        );
+        assert_eq!(state.registry().get(&child("probe")), None);
+        // The daemon reads the same pair of files under the new id.
+        assert!(state
+            .plan()
+            .watch
+            .iter()
+            .any(|(at, files)| at == &moved_to && files.transcript == child_transcript("probe")));
+    }
+
+    #[test]
+    fn the_child_end_word_ends_the_named_child_and_everything_under_it() {
+        let world = Fake::default();
+        let mut state = State::default();
+        let (teammate, subagent) = depth_two(&world, &mut state);
+
+        state.on_hook(&child_hook("childEnd", "mate"), &world);
+        assert_eq!(state.registry().get(&teammate), None);
+        assert_eq!(state.registry().get(&subagent), None);
+        // The lead runs on, and nothing is watched for what left.
+        assert!(state.registry().get(&session("one")).is_some());
+        assert_eq!(state.plan().watch.len(), 1);
+    }
+
+    #[test]
+    fn the_child_end_word_matches_a_whole_agent_id() {
+        // A teammate agent id carries the name that the user chose, so one id
+        // can hold the shape of another one inside it. A substring match ends
+        // an agent that nothing stopped.
+        let world = Fake::default();
+        world.running(AGENT);
+        let mut state = State::default();
+        state.on_hook(&hook("working"), &world);
+        state.on_hook(&child_hook("working", "mate-probe"), &world);
+
+        assert_eq!(
+            state.on_hook(&child_hook("childEnd", "probe"), &world),
+            Applied::Nothing
+        );
+        assert!(state.registry().get(&child("mate-probe")).is_some());
+    }
+
+    #[test]
+    fn a_subagent_takes_the_color_of_the_agent_that_started_it() {
+        // A subagent writes no color, and the work it does belongs to the agent
+        // that started it. A teammate writes its own color, and keeps it.
+        let world = Fake::default();
+        world.running(AGENT);
+        world.says("/t/one.jsonl", colored("blue"), 1);
+        world.says(&child_transcript("mate"), colored("purple"), 1);
+        world.reads(&child_transcript("probe"), started_by("mate"), 1);
+        let mut state = State::default();
+        state.on_hook(&hook("working"), &world);
+        state.on_hook(&child_hook("working", "mate"), &world);
+        state.on_hook(&child_hook("working", "probe"), &world);
+        state.on_hook(&child_hook("working", "own"), &world);
+
+        let teammate = child("mate");
+        assert_eq!(
+            state.registry().get(&teammate).unwrap().meta.color,
+            "purple"
+        );
+        // The rule composes down every level.
+        assert_eq!(
+            state
+                .registry()
+                .get(&under(&teammate, "probe"))
+                .unwrap()
+                .meta
+                .color,
+            "purple"
+        );
+        // A subagent of the lead takes the color of the lead.
+        assert_eq!(
+            state.registry().get(&child("own")).unwrap().meta.color,
+            "blue"
+        );
+    }
+
+    #[test]
+    fn ending_a_lead_stops_watching_the_files_of_a_grandchild() {
+        let world = Fake::default();
+        let mut state = State::default();
+        let (teammate, subagent) = depth_two(&world, &mut state);
+
+        state.on_hook(&hook("end"), &world);
+        assert!(state.registry().is_empty());
+        assert_eq!(state.registry().get(&teammate), None);
+        assert_eq!(state.registry().get(&subagent), None);
+        assert!(state.plan().watch.is_empty());
+    }
+
     #[test]
     fn a_child_reads_its_facts_from_its_own_transcript() {
         // The hook names the transcript of the lead. The daemon reads the file
@@ -1004,6 +1336,9 @@ mod tests {
         );
 
         let mut state = State::default();
+        // The lead files itself first. The daemon holds no child whose parent
+        // it does not hold.
+        state.on_hook(&hook("working"), &world);
         state.on_hook(&child_hook("working", "a9a352"), &world);
         assert_eq!(
             state.registry().get(&child("a9a352")).unwrap().meta.title,
@@ -1018,6 +1353,7 @@ mod tests {
         let world = Fake::default();
         world.running(AGENT);
         let mut state = State::default();
+        state.on_hook(&hook("working"), &world);
         state.on_hook(&child_hook("working", "a9a352"), &world);
         assert_eq!(
             state.registry().get(&child("a9a352")).unwrap().meta.title,
