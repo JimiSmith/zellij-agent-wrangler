@@ -27,15 +27,22 @@ use crate::model::{
 use crate::options::DrawingOptions;
 use crate::render::{
     cut_to_columns, DASHBOARD_CELL_GAP, DASHBOARD_MARKER_GAP, DASHBOARD_MARKER_INSET,
-    DASHBOARD_NAME_COLUMN, PREVIEW_TEXT_COLUMN,
+    DASHBOARD_NAME_COLUMN, PREVIEW_TEXT_COLUMN, STATUS_COLUMNS,
 };
 use crate::tree::{indicator_for_turn, pane_placement, Pane, Tab};
 
-/// The word that the TURN column draws for each turn state. The user reads
+/// The word that the STATUS column draws for each turn state. The user reads
 /// these, so they say what the agent does rather than name a variant.
+///
+/// The STATUS column is held at one fixed width, so every word here must fit in
+/// it. `the_status_column_is_as_wide_as_its_longest_word` holds the pair in
+/// step.
 const WANTS_YOU: &str = "wants you";
 const WORKING: &str = "working";
 const IDLE: &str = "idle";
+
+/// The heading that the STATUS column draws.
+const STATUS_HEADING: &str = "STATUS";
 
 /// What the block says for an agent that reports no message.
 ///
@@ -71,9 +78,11 @@ const TOOL_ARGUMENT_COLUMNS: usize = 40;
 const MINIMUM_NAME_COLUMNS: usize = 12;
 
 /// One column of the dashboard table, after the AGENT column.
+///
+/// STATUS is not here. That column leads the table and never drops, so the
+/// builder draws it from the turn state of the row rather than from this list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Column {
-    Turn,
     Tab,
     Pane,
     Branch,
@@ -87,8 +96,7 @@ impl Column {
     /// A narrow pane takes them away from the end of this list. The table
     /// therefore shortens from its right edge, and a column never disappears
     /// from the middle.
-    const IN_DRAW_ORDER: [Column; 6] = [
-        Column::Turn,
+    const IN_DRAW_ORDER: [Column; 5] = [
         Column::Tab,
         Column::Pane,
         Column::Branch,
@@ -99,7 +107,6 @@ impl Column {
     /// What the heading row calls this column.
     fn heading(self) -> &'static str {
         match self {
-            Column::Turn => "TURN",
             Column::Tab => "TAB",
             Column::Pane => "PANE",
             Column::Branch => "BRANCH",
@@ -115,7 +122,6 @@ impl Column {
     /// its mark.
     fn widest(self) -> usize {
         match self {
-            Column::Turn => WANTS_YOU.chars().count(),
             Column::Tab => 16,
             Column::Pane => 16,
             Column::Branch => 18,
@@ -138,17 +144,21 @@ impl Column {
     fn spell(self, place: &AgentPlace<'_>) -> String {
         let agent = place.agent;
         match self {
-            Column::Turn => match agent.turn {
-                Turn::Attention => WANTS_YOU.to_string(),
-                Turn::Working => WORKING.to_string(),
-                Turn::Idle => IDLE.to_string(),
-            },
             Column::Tab => format!("{} {}", place.tab.displayed_index, place.tab.name),
             Column::Pane => place.pane.title.clone(),
             Column::Branch => agent.status.branch.clone(),
             Column::Model => short_model_name(&agent.status.model),
             Column::ContextTokens => short_token_count(agent.status.context_tokens),
         }
+    }
+}
+
+/// What the STATUS column says about one turn state.
+fn status_word(turn: Turn) -> &'static str {
+    match turn {
+        Turn::Attention => WANTS_YOU,
+        Turn::Working => WORKING,
+        Turn::Idle => IDLE,
     }
 }
 
@@ -165,7 +175,7 @@ struct AgentPlace<'a> {
     /// the tree past it, so the children below stay attached to the row.
     has_children: bool,
     /// Whether this agent, or anything under it, wants the user. The marker at
-    /// the right edge says so, and the TURN column does not.
+    /// the right edge says so, and the STATUS column does not.
     wants_user: bool,
 }
 
@@ -278,7 +288,7 @@ fn walk_group<'a>(
 ///
 /// The marker says that this row, or something under it, wants the user. A call
 /// two levels down therefore reaches the top of its group, and one glance down
-/// the leads finds every call on the pane. The TURN column of each row still
+/// the leads finds every call on the pane. The STATUS column of each row still
 /// says only what that row does, so the two channels stay apart.
 fn group_indicator(place: &AgentPlace<'_>, options: &DrawingOptions) -> Indicator {
     match place.wants_user {
@@ -485,6 +495,7 @@ pub fn build_dashboard(
     };
 
     let mut rows = vec![Row::new(RowContent::DashboardHeading {
+        status: cell(STATUS_HEADING, STATUS_COLUMNS, CellAlignment::Left),
         name: cell("AGENT", name_width, CellAlignment::Left),
         cells: columns
             .iter()
@@ -507,6 +518,11 @@ pub fn build_dashboard(
                 turn: place.agent.turn,
                 color: NamedColor::for_agent(place.agent),
                 preview: showing,
+                status: cell(
+                    status_word(place.agent.turn),
+                    STATUS_COLUMNS,
+                    CellAlignment::Left,
+                ),
                 name: cell(
                     &label(place.agent, options.label),
                     name_width - stem.columns(),
@@ -649,10 +665,17 @@ mod tests {
     /// The headings of the table, in the order they draw.
     fn headings(rows: &[Row]) -> Vec<String> {
         match &rows[0].content {
-            RowContent::DashboardHeading { name, cells } => [name.text.trim_end().to_string()]
-                .into_iter()
-                .chain(cells.iter().map(|cell| cell.text.trim().to_string()))
-                .collect(),
+            RowContent::DashboardHeading {
+                status,
+                name,
+                cells,
+            } => [
+                status.text.trim_end().to_string(),
+                name.text.trim_end().to_string(),
+            ]
+            .into_iter()
+            .chain(cells.iter().map(|cell| cell.text.trim().to_string()))
+            .collect(),
             other => panic!("the table opens with {other:?}"),
         }
     }
@@ -661,6 +684,14 @@ mod tests {
     fn cell_text(rows: &[Row], row: usize, column: usize) -> String {
         match &rows[row].content {
             RowContent::DashboardAgent { cells, .. } => cells[column].text.trim().to_string(),
+            other => panic!("row {row} is {other:?}"),
+        }
+    }
+
+    /// The STATUS cell of one agent row, with the padding dropped.
+    fn status_text(rows: &[Row], row: usize) -> String {
+        match &rows[row].content {
+            RowContent::DashboardAgent { status, .. } => status.text.trim().to_string(),
             other => panic!("row {row} is {other:?}"),
         }
     }
@@ -681,16 +712,30 @@ mod tests {
     fn the_table_names_its_columns_in_the_order_they_draw() {
         assert_eq!(
             headings(&dashboard(&session(), WIDE)),
-            ["AGENT", "TURN", "TAB", "PANE", "BRANCH", "MODEL", "CTX"]
+            ["STATUS", "AGENT", "TAB", "PANE", "BRANCH", "MODEL", "CTX"]
         );
     }
 
     #[test]
-    fn the_turn_column_holds_the_word_for_the_group_the_row_sits_in() {
+    fn the_status_column_holds_the_word_for_the_group_the_row_sits_in() {
         let rows = dashboard(&session(), WIDE);
         for (row, word) in [(1, WANTS_YOU), (2, WORKING), (3, IDLE)] {
-            assert_eq!(cell_text(&rows, row, 0), word);
+            assert_eq!(status_text(&rows, row), word);
         }
+    }
+
+    #[test]
+    fn the_status_column_is_as_wide_as_its_longest_word() {
+        // The column is held at a fixed width, and that width decides where the
+        // tree starts. A word wider than the column would be cut.
+        for word in [WANTS_YOU, WORKING, IDLE, STATUS_HEADING] {
+            assert!(word.chars().count() <= STATUS_COLUMNS, "{word}");
+        }
+        assert_eq!(
+            WANTS_YOU.chars().count(),
+            STATUS_COLUMNS,
+            "the column spends no more than its longest word needs"
+        );
     }
 
     /// One agent that another agent started.
@@ -829,10 +874,10 @@ mod tests {
                 Indicator::Attention
             ]
         );
-        // The TURN column of each row still says only what that row does.
-        assert_eq!(cell_text(&rows, 1, 0), IDLE);
-        assert_eq!(cell_text(&rows, 2, 0), IDLE);
-        assert_eq!(cell_text(&rows, 3, 0), WANTS_YOU);
+        // The STATUS column of each row still says only what that row does.
+        assert_eq!(status_text(&rows, 1), IDLE);
+        assert_eq!(status_text(&rows, 2), IDLE);
+        assert_eq!(status_text(&rows, 3), WANTS_YOU);
     }
 
     #[test]
@@ -991,7 +1036,7 @@ mod tests {
         // No dash and no zero. A session that has answered nothing has no
         // branch, no model and no count.
         let rows = dashboard(&session(), WIDE);
-        for column in [3, 4, 5] {
+        for column in [2, 3, 4] {
             assert_eq!(cell_text(&rows, 1, column), "", "column {column}");
         }
     }
@@ -1011,17 +1056,18 @@ mod tests {
             vec![pane(4, "ssh prod-1", false, vec![record])],
         )];
         let rows = dashboard(&tabs, WIDE);
-        assert_eq!(cell_text(&rows, 1, 1), "3 infra");
-        assert_eq!(cell_text(&rows, 1, 2), "ssh prod-1");
-        assert_eq!(cell_text(&rows, 1, 3), "infra/ci");
-        assert_eq!(cell_text(&rows, 1, 4), "opus-5");
-        assert_eq!(cell_text(&rows, 1, 5), "122k");
+        assert_eq!(cell_text(&rows, 1, 0), "3 infra");
+        assert_eq!(cell_text(&rows, 1, 1), "ssh prod-1");
+        assert_eq!(cell_text(&rows, 1, 2), "infra/ci");
+        assert_eq!(cell_text(&rows, 1, 3), "opus-5");
+        assert_eq!(cell_text(&rows, 1, 4), "122k");
     }
 
     #[test]
     fn columns_drop_from_the_right_and_each_one_drops_whole() {
         // The pane shortens the table from its right edge, so a column never
-        // disappears from the middle. AGENT never drops.
+        // disappears from the middle. STATUS and AGENT never drop, so the
+        // shortest table the pane can hold is those two.
         let tabs = session();
         let mut seen: Vec<Vec<String>> = Vec::new();
         for width in (NARROWEST..=WIDE).rev() {
@@ -1030,10 +1076,10 @@ mod tests {
                 seen.push(columns);
             }
         }
-        let want: Vec<Vec<String>> = (0..=6)
+        let want: Vec<Vec<String>> = (1..=6)
             .rev()
             .map(|kept| {
-                ["AGENT", "TURN", "TAB", "PANE", "BRANCH", "MODEL", "CTX"][..=kept]
+                ["STATUS", "AGENT", "TAB", "PANE", "BRANCH", "MODEL", "CTX"][..=kept]
                     .iter()
                     .map(|heading| heading.to_string())
                     .collect()
@@ -1104,7 +1150,7 @@ mod tests {
     }
 
     #[test]
-    fn the_marker_says_whose_turn_it_is_and_the_turn_column_stays_without_it() {
+    fn the_marker_says_whose_turn_it_is_and_the_status_column_stays_without_it() {
         let rows = dashboard(&session(), WIDE);
         let markers: Vec<Indicator> = rows[1..].iter().map(|row| row.indicator).collect();
         assert_eq!(
@@ -1118,7 +1164,7 @@ mod tests {
         };
         let rows = build_dashboard(&session(), WIDE, &OpenPreviews::default(), &quiet);
         assert!(rows[1..].iter().all(|row| row.indicator == Indicator::None));
-        assert_eq!(cell_text(&rows, 1, 0), WANTS_YOU);
+        assert_eq!(status_text(&rows, 1), WANTS_YOU);
     }
 
     #[test]
@@ -1258,9 +1304,9 @@ mod tests {
             [
                 // The gutter carries down the block, because the block belongs
                 // to the same pane as the row above it.
-                "\u{258c}   \u{2502}   the port is done",
-                "\u{258c}   \u{2502}   2026-09-01 05:11Z",
-                "\u{258c}   \u{2514}   now: Bash(cargo test)",
+                "\u{258c}              \u{2502}   the port is done",
+                "\u{258c}              \u{2502}   2026-09-01 05:11Z",
+                "\u{258c}              \u{2514}   now: Bash(cargo test)",
             ]
         );
     }
@@ -1318,7 +1364,7 @@ mod tests {
         );
         assert_eq!(
             block_lines(&rows),
-            [format!("\u{258c}   \u{2514}   {NO_MESSAGE}")]
+            [format!("\u{258c}              \u{2514}   {NO_MESSAGE}")]
         );
     }
 

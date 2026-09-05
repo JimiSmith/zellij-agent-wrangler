@@ -32,15 +32,93 @@ use crate::model::{
     TableCell, TextEmphasis, TextRun,
 };
 
+/// The color of the block that marks where the user is. A bright cyan, so the
+/// mark carries across a long list.
+///
+/// The color is stated exactly rather than taken from the theme. A theme color
+/// belongs to a session, and this mark must never read as one of those.
+const GUTTER_COLOR: Color = Color::Rgb(92, 200, 216);
+
+/// The columns that the gutter spends. A head that starts past the gutter counts
+/// from here.
+const GUTTER_COLUMNS: usize = 1;
+
+/// The background that the block under an open dashboard row draws on.
+///
+/// The block is a body of text and not a row to point at, so the selection never
+/// reaches it. It keeps this one background whatever the selection does, and the
+/// block therefore reads as one panel under its row.
+const PREVIEW_BACKGROUND: Color = Color::Rgb(19, 19, 19);
+
+/// The background of one row, and nothing for a row that draws on the ground of
+/// the terminal.
+fn row_background(content: &RowContent) -> Option<Color> {
+    match content {
+        RowContent::PreviewMessage { .. }
+        | RowContent::PreviewTime { .. }
+        | RowContent::PreviewTool { .. } => Some(PREVIEW_BACKGROUND),
+        _ => None,
+    }
+}
+
+/// The colors that the STATUS cell draws its word in.
+///
+/// The colors are stated exactly rather than taken from the theme, for the same
+/// reason that the gutter states its own. A theme color belongs to a session,
+/// and these two words say something else.
+const STATUS_ATTENTION_COLOR: Color = Color::Rgb(226, 164, 78);
+const STATUS_WORKING_COLOR: Color = Color::Rgb(92, 200, 216);
+
+/// The color that the STATUS cell of a row takes, and nothing for a row that
+/// takes the color of the terminal.
+///
+/// An idle agent gets no color. Its row is already dim, and a color there pulls
+/// the eye to the one agent that wants nothing.
+fn status_color(turn: Turn) -> Option<Color> {
+    match turn {
+        Turn::Attention => Some(STATUS_ATTENTION_COLOR),
+        Turn::Working => Some(STATUS_WORKING_COLOR),
+        Turn::Idle => None,
+    }
+}
+
 /// Column 0: a block marks "where you are", and a space does not.
 ///
 /// The position is fixed, and no row color can imitate it. Exactly two rows
 /// carry the block: the active tab, and the pane you are in inside that tab.
-fn gutter(here: bool) -> char {
-    if here {
-        '▌'
-    } else {
-        ' '
+#[derive(Clone, Copy)]
+enum Gutter {
+    /// The user is in this row. Column 0 draws the block.
+    Here,
+    /// The user is elsewhere, or the row points at no pane. Column 0 is blank.
+    Elsewhere,
+}
+
+impl Gutter {
+    fn of(placement: Placement) -> Self {
+        if placement.is_focused_pane() {
+            Gutter::Here
+        } else {
+            Gutter::Elsewhere
+        }
+    }
+
+    /// What column 0 holds. Both glyphs are one column wide, so the text after
+    /// the gutter starts in the same place either way.
+    fn glyph(self) -> char {
+        match self {
+            Gutter::Here => '▌',
+            Gutter::Elsewhere => ' ',
+        }
+    }
+
+    /// How the block draws over the style of its row. A blank gutter takes the
+    /// style of the row and nothing more.
+    fn style(self, base: Style) -> Style {
+        match self {
+            Gutter::Here => base.fg(GUTTER_COLOR),
+            Gutter::Elsewhere => base,
+        }
     }
 }
 
@@ -166,13 +244,29 @@ pub fn notification_body_field(width: usize) -> usize {
     width.saturating_sub(BODY_INDENT.len() + 1).max(1)
 }
 
+/// The columns that a dashboard row spends before its STATUS cell: the gutter, a
+/// space, the open marker, and a space after it.
+const ROW_LEAD_COLUMNS: usize = 4;
+
+/// The columns that the STATUS column of the dashboard takes.
+///
+/// The width is fixed, and the values on screen do not decide it. The column
+/// stands before the tree, so its width says where the tree starts. A width that
+/// followed the values would move the whole tree whenever one agent changed
+/// state.
+///
+/// The longest word that the column draws must fit in this width. The builder
+/// owns those words, and a test there holds the two in step.
+pub const STATUS_COLUMNS: usize = 9;
+
 /// The column that a dashboard row starts its AGENT cell in.
 ///
-/// The gutter, the open marker with a space on each side, the kind icon
-/// and the gap after the icon come before that column. The builder lays the
-/// table out from here, and [`parts`] draws it from here. The two therefore
-/// cannot drift apart.
-pub const DASHBOARD_NAME_COLUMN: usize = 4 + ICON_AND_GAP;
+/// The gutter, the open marker with a space on each side, the STATUS column with
+/// the gap after it, the kind icon and the gap after the icon come before that
+/// column. The builder lays the table out from here, and [`parts`] draws it from
+/// here. The two therefore cannot drift apart.
+pub const DASHBOARD_NAME_COLUMN: usize =
+    ROW_LEAD_COLUMNS + STATUS_COLUMNS + DASHBOARD_CELL_GAP + ICON_AND_GAP;
 
 /// The column that a line of a preview block starts its text in.
 ///
@@ -223,11 +317,16 @@ pub fn cut_to_columns(text: &str, columns: usize) -> String {
     cut
 }
 
-/// One piece of a table row.
+/// One piece of a row.
 enum Field {
-    /// Text drawn as written, in the style of the row: the gutter, a gap, or a
-    /// cell already padded to its columns.
+    /// Column 0, which says whether the user is in this row.
+    Gutter(Gutter),
+    /// Text drawn as written, in the style of the row: a gap, or a cell already
+    /// padded to its columns.
     Text(String),
+    /// A stretch of text with an emphasis of its own. The message that an agent
+    /// wrote in markdown arrives as runs of this kind.
+    Run(TextRun),
     /// The stem that carries the tree down to this row. It draws dim, because
     /// it is structure and the kind icon beside it is identity.
     Stem(String),
@@ -236,6 +335,21 @@ enum Field {
         glyph: char,
         color: Option<NamedColor>,
     },
+    /// The STATUS cell, drawn in the color of the turn state it names.
+    Status { text: String, turn: Turn },
+}
+
+impl Field {
+    /// The columns this piece takes on the row. Every glyph the module draws is
+    /// one column wide, so characters count as columns.
+    fn columns(&self) -> usize {
+        match self {
+            Field::Gutter(_) | Field::Icon { .. } => 1,
+            Field::Text(text) | Field::Stem(text) => text.chars().count(),
+            Field::Run(run) => run.text.chars().count(),
+            Field::Status { text, .. } => text.chars().count(),
+        }
+    }
 }
 
 /// The text of one cell, padded to the columns of that cell.
@@ -260,25 +374,9 @@ fn cell_fields(cells: &[TableCell]) -> Vec<Field> {
         .collect()
 }
 
-/// The text of a row, split so that a color can land on the kind icon alone.
-enum Parts {
-    /// One undivided run of text: a heading, a blank, or a tab row. A tab row
-    /// has no icon column of its own.
-    Whole(String),
-    /// A child row, with the color its icon is drawn in.
-    Split {
-        head: String,
-        icon: char,
-        tail: String,
-        color: Option<NamedColor>,
-    },
-    /// A dashboard row, as a run of fields at fixed offsets.
-    Columns(Vec<Field>),
-    /// A line whose text is emphasised in places: any line of the block under an
-    /// open dashboard row. The stem is one dim run, and the message that the
-    /// agent wrote in markdown is the runs after it.
-    Runs(Vec<TextRun>),
-}
+/// The pieces one row is drawn as, in the order they draw. The split is what
+/// lets a color land on the gutter and on the kind icon alone.
+type Parts = Vec<Field>;
 
 /// The pieces of a child row: the gutter, the branch and the index, then the
 /// kind icon and the name. The icon sits with the name it labels rather than out
@@ -292,22 +390,18 @@ fn child_parts(
     name: &str,
     color: Option<NamedColor>,
 ) -> Parts {
-    Parts::Split {
-        head: child_head(placement, position, index),
-        icon,
-        tail: format!("{ICON_GAP}{name}"),
-        color,
-    }
+    vec![
+        Field::Gutter(Gutter::of(placement)),
+        Field::Text(child_head(position, index)),
+        Field::Icon { glyph: icon, color },
+        Field::Text(format!("{ICON_GAP}{name}")),
+    ]
 }
 
-/// Everything a child row draws before its kind icon: the gutter, the branch
-/// and the index.
-fn child_head(placement: Placement, position: Branch, index: &str) -> String {
-    format!(
-        "{} {}─ {index}: ",
-        gutter(placement.is_focused_pane()),
-        branch(position)
-    )
+/// Everything a child row draws between its gutter and its kind icon: the
+/// branch and the index.
+fn child_head(position: Branch, index: &str) -> String {
+    format!(" {}─ {index}: ", branch(position))
 }
 
 /// The column that a child row starts its name in.
@@ -315,8 +409,8 @@ fn child_head(placement: Placement, position: Branch, index: &str) -> String {
 /// A status row pads to this column, so its text sits directly under the label
 /// it describes. Both rows read the column from here, so the two cannot drift
 /// apart.
-fn child_name_column(placement: Placement, position: Branch, index: &str) -> usize {
-    child_head(placement, position, index).chars().count() + ICON_AND_GAP
+fn child_name_column(position: Branch, index: &str) -> usize {
+    GUTTER_COLUMNS + child_head(position, index).chars().count() + ICON_AND_GAP
 }
 
 /// The pieces of the status row under an agent. The row draws the gutter, then
@@ -326,13 +420,13 @@ fn child_name_column(placement: Placement, position: Branch, index: &str) -> usi
 /// The row draws no kind icon. It describes the row above rather than pointing
 /// at a thing of its own, so it takes no color and needs nothing to carry one.
 fn status_parts(placement: Placement, position: Branch, index: &str, text: &str) -> Parts {
-    let lead = format!(
-        "{} {}",
-        gutter(placement.is_focused_pane()),
-        continuation(position)
-    );
-    let indent = child_name_column(placement, position, index).saturating_sub(lead.chars().count());
-    Parts::Whole(format!("{lead}{:indent$}{text}", ""))
+    let lead = format!(" {}", continuation(position));
+    let indent =
+        child_name_column(position, index).saturating_sub(GUTTER_COLUMNS + lead.chars().count());
+    vec![
+        Field::Gutter(Gutter::of(placement)),
+        Field::Text(format!("{lead}{:indent$}{text}", "")),
+    ]
 }
 
 /// The pieces of one line of the block under a dashboard row: the gutter, the
@@ -343,10 +437,11 @@ fn status_parts(placement: Placement, position: Branch, index: &str, text: &str)
 /// needs nothing to carry one. It keeps the gutter. The block belongs to the
 /// same pane as its row, and the mark must not break between the two.
 fn preview_parts(placement: Placement, stem: &RowStem, branch: Branch, text: &str) -> Parts {
-    Parts::Runs(vec![
-        dim_run(block_stem(stem)),
-        TextRun::plain(format!("{}{text}", preview_head(placement, branch))),
-    ])
+    vec![
+        Field::Run(dim_run(block_stem(stem))),
+        Field::Gutter(Gutter::of(placement)),
+        Field::Text(format!("{}{text}", preview_head(branch))),
+    ]
 }
 
 /// The pieces of the message line of a block. The message is the one line that
@@ -357,12 +452,13 @@ fn preview_message_parts(
     branch: Branch,
     runs: &[TextRun],
 ) -> Parts {
-    let mut lines = vec![
-        dim_run(block_stem(stem)),
-        TextRun::plain(preview_head(placement, branch)),
+    let mut fields = vec![
+        Field::Run(dim_run(block_stem(stem))),
+        Field::Gutter(Gutter::of(placement)),
+        Field::Text(preview_head(branch)),
     ];
-    lines.extend(runs.iter().cloned());
-    Parts::Runs(lines)
+    fields.extend(runs.iter().cloned().map(Field::Run));
+    fields
 }
 
 /// One run of text that recedes behind the rest of its line.
@@ -376,30 +472,29 @@ fn dim_run(text: String) -> TextRun {
     }
 }
 
-/// Everything a line of the block draws between its stem and its text: the
-/// gutter, the indent and the tree glyph.
-fn preview_head(placement: Placement, branch: Branch) -> String {
-    let lead = format!("{}", gutter(placement.is_focused_pane()));
-    let indent = (DASHBOARD_NAME_COLUMN - ICON_AND_GAP).saturating_sub(lead.chars().count());
+/// Everything a line of the block draws between its gutter and its text: the
+/// indent and the tree glyph.
+fn preview_head(branch: Branch) -> String {
+    let indent = (DASHBOARD_NAME_COLUMN - ICON_AND_GAP).saturating_sub(GUTTER_COLUMNS);
     let gap = PREVIEW_TEXT_COLUMN - (DASHBOARD_NAME_COLUMN - ICON_AND_GAP) - 1;
-    format!("{lead}{:indent$}{}{:gap$}", "", preview_glyph(branch), "")
+    format!("{:indent$}{}{:gap$}", "", preview_glyph(branch), "")
 }
 
 /// The pieces one row is drawn as.
 fn parts(content: &RowContent) -> Parts {
     match content {
         // The single leading space is necessary. It aligns the underline.
-        RowContent::Header { text } => Parts::Whole(format!(" {}", text.to_uppercase())),
-        RowContent::Blank => Parts::Whole(String::new()),
+        RowContent::Header { text } => vec![Field::Text(format!(" {}", text.to_uppercase()))],
+        RowContent::Blank => vec![Field::Text(String::new())],
         RowContent::Tab {
             index,
             name,
             placement,
             ..
-        } => Parts::Whole(format!(
-            "{} {index}: {name}",
-            gutter(placement.is_focused_pane())
-        )),
+        } => vec![
+            Field::Gutter(Gutter::of(*placement)),
+            Field::Text(format!(" {index}: {name}")),
+        ],
         RowContent::Pane {
             index,
             title,
@@ -422,39 +517,51 @@ fn parts(content: &RowContent) -> Parts {
         } => status_parts(*placement, *branch, index, text),
         // No gutter and no branch: the entry hangs off nothing, and the area it
         // sits in is never where you are.
-        RowContent::NotificationTitle { title, color } => Parts::Split {
-            head: " ".to_string(),
-            icon: ICON_AGENT,
-            tail: format!("  {title}"),
-            color: *color,
-        },
-        RowContent::NotificationBody { text } => Parts::Whole(format!("{BODY_INDENT}{text}")),
-        // The heading row draws spaces where an agent row draws its kind icon
-        // and the gap after it. Both rows therefore start the AGENT column in
-        // the same place.
-        RowContent::DashboardHeading { name, cells } => {
+        RowContent::NotificationTitle { title, color } => vec![
+            Field::Text(" ".to_string()),
+            Field::Icon {
+                glyph: ICON_AGENT,
+                color: *color,
+            },
+            Field::Text(format!("  {title}")),
+        ],
+        RowContent::NotificationBody { text } => vec![Field::Text(format!("{BODY_INDENT}{text}"))],
+        // The heading row draws spaces where an agent row draws its gutter, its
+        // open marker and its kind icon. Both rows therefore start the STATUS
+        // column and the AGENT column in the same places.
+        RowContent::DashboardHeading {
+            status,
+            name,
+            cells,
+        } => {
             let mut fields = vec![
-                Field::Text(format!("{:DASHBOARD_NAME_COLUMN$}", "")),
+                Field::Text(format!("{:ROW_LEAD_COLUMNS$}", "")),
+                Field::Text(padded(status)),
+                Field::Text(format!("{:DASHBOARD_CELL_GAP$}", "")),
+                Field::Text(format!("{:ICON_AND_GAP$}", "")),
                 Field::Text(padded(name)),
             ];
             fields.extend(cell_fields(cells));
-            Parts::Columns(fields)
+            fields
         }
         RowContent::DashboardAgent {
             placement,
             stem,
+            status,
+            turn,
             name,
             cells,
             color,
             preview,
-            ..
         } => {
             let mut fields = vec![
-                Field::Text(format!(
-                    "{} {} ",
-                    gutter(placement.is_focused_pane()),
-                    open_marker(*preview)
-                )),
+                Field::Gutter(Gutter::of(*placement)),
+                Field::Text(format!(" {} ", open_marker(*preview))),
+                Field::Status {
+                    text: padded(status),
+                    turn: *turn,
+                },
+                Field::Text(format!("{:DASHBOARD_CELL_GAP$}", "")),
                 Field::Stem(row_stem(stem)),
                 Field::Icon {
                     glyph: ICON_AGENT,
@@ -464,7 +571,7 @@ fn parts(content: &RowContent) -> Parts {
                 Field::Text(padded(name)),
             ];
             fields.extend(cell_fields(cells));
-            Parts::Columns(fields)
+            fields
         }
         RowContent::PreviewMessage {
             placement,
@@ -484,8 +591,8 @@ fn parts(content: &RowContent) -> Parts {
             branch,
             text,
         } => preview_parts(*placement, stem, *branch, text),
-        RowContent::DashboardNoAgents => Parts::Whole(format!("  {NO_AGENTS}")),
-        RowContent::DashboardPaneTooNarrow => Parts::Whole(format!("  {PANE_TOO_NARROW}")),
+        RowContent::DashboardNoAgents => vec![Field::Text(format!("  {NO_AGENTS}"))],
+        RowContent::DashboardPaneTooNarrow => vec![Field::Text(format!("  {PANE_TOO_NARROW}"))],
     }
 }
 
@@ -493,20 +600,59 @@ fn parts(content: &RowContent) -> Parts {
 /// drawing composes the same line out of styled spans. A test of the glyphs
 /// around a name therefore asserts on this line.
 pub fn row_text(content: &RowContent) -> String {
-    match parts(content) {
-        Parts::Whole(text) => text,
-        Parts::Runs(runs) => runs.iter().map(|run| run.text.as_str()).collect(),
-        Parts::Split {
-            head, icon, tail, ..
-        } => format!("{head}{icon}{tail}"),
-        Parts::Columns(fields) => fields
-            .iter()
-            .map(|field| match field {
-                Field::Text(text) | Field::Stem(text) => text.clone(),
-                Field::Icon { glyph, .. } => glyph.to_string(),
-            })
-            .collect(),
+    parts(content)
+        .iter()
+        .map(|field| match field {
+            Field::Gutter(gutter) => gutter.glyph().to_string(),
+            Field::Text(text) | Field::Stem(text) => text.clone(),
+            Field::Run(run) => run.text.clone(),
+            Field::Icon { glyph, .. } => glyph.to_string(),
+            Field::Status { text, .. } => text.clone(),
+        })
+        .collect()
+}
+
+/// One run of a row that keeps its own color when the selection draws over the
+/// row.
+struct KeptColor {
+    /// The first column of the run, counted from the left edge of the row.
+    column: usize,
+    /// How many columns the run holds.
+    columns: usize,
+    color: Color,
+}
+
+/// The runs of a row that keep their own color under the selection: the block in
+/// the gutter, and the word in the STATUS cell.
+///
+/// The selection states one foreground for its whole row. These two runs answer
+/// questions that the selection does not, so the drawing puts them back after
+/// the selection lands. Every other color goes, because a colored icon under the
+/// selection draws a block of color across the row.
+///
+/// The columns are counted from the same fields the row is drawn from. A row
+/// that draws its stem before its gutter therefore reports the column it truly
+/// used.
+fn colors_kept_under_selection(content: &RowContent) -> Vec<KeptColor> {
+    let mut kept = Vec::new();
+    let mut column = 0;
+    for field in parts(content) {
+        let columns = field.columns();
+        let color = match field {
+            Field::Gutter(Gutter::Here) => Some(GUTTER_COLOR),
+            Field::Status { turn, .. } => status_color(turn),
+            _ => None,
+        };
+        if let Some(color) = color {
+            kept.push(KeptColor {
+                column,
+                columns,
+                color,
+            });
+        }
+        column += columns;
     }
+    kept
 }
 
 /// The styled spans a row is drawn as, before they are fitted to the width of
@@ -517,36 +663,29 @@ pub fn row_text(content: &RowContent) -> String {
 /// enough to tie the row to the thing it points at.
 pub fn row_line(content: &RowContent) -> Line<'static> {
     let base = base_style(content);
-    match parts(content) {
-        Parts::Whole(text) => Line::from(Span::styled(text, base)),
-        Parts::Runs(runs) => Line::from(
-            runs.into_iter()
-                .map(|run| Span::styled(run.text, base.patch(emphasised(run.emphasis))))
-                .collect::<Vec<Span<'static>>>(),
-        ),
-        Parts::Split {
-            head,
-            icon,
-            tail,
-            color,
-        } => Line::from(vec![
-            Span::styled(head, base),
-            Span::styled(icon.to_string(), own_color(base, color)),
-            Span::styled(tail, base),
-        ]),
-        Parts::Columns(fields) => Line::from(
-            fields
-                .into_iter()
-                .map(|field| match field {
-                    Field::Text(text) => Span::styled(text, base),
-                    Field::Stem(text) => Span::styled(text, base.add_modifier(Modifier::DIM)),
-                    Field::Icon { glyph, color } => {
-                        Span::styled(glyph.to_string(), own_color(base, color))
-                    }
-                })
-                .collect::<Vec<Span<'static>>>(),
-        ),
-    }
+    Line::from(
+        parts(content)
+            .into_iter()
+            .map(|field| match field {
+                Field::Gutter(gutter) => {
+                    Span::styled(gutter.glyph().to_string(), gutter.style(base))
+                }
+                Field::Text(text) => Span::styled(text, base),
+                Field::Stem(text) => Span::styled(text, base.add_modifier(Modifier::DIM)),
+                Field::Run(run) => Span::styled(run.text, base.patch(emphasised(run.emphasis))),
+                Field::Icon { glyph, color } => {
+                    Span::styled(glyph.to_string(), own_color(base, color))
+                }
+                Field::Status { text, turn } => Span::styled(
+                    text,
+                    match status_color(turn) {
+                        Some(color) => base.fg(color),
+                        None => base,
+                    },
+                ),
+            })
+            .collect::<Vec<Span<'static>>>(),
+    )
 }
 
 /// The style the text of a row draws in. If the right-edge indicator carries no
@@ -666,21 +805,37 @@ fn color_of(color: NamedColor) -> Color {
     }
 }
 
-/// What the cells of a selected row take on: reverse video, with the color and
-/// the dimming of whatever it covers dropped.
+/// The background of the selected row. A dark blue green, which marks the row
+/// without the flare of reverse video.
 ///
-/// Under reverse video both land on what is now the background. A colored icon
-/// there draws a block of color across the selected row, and a dimmed one washes
-/// the row out. The selection points at somewhere you are not, so the selected
-/// row is usually a dimmed one.
+/// Reverse video takes the brightest color the theme has. The bar then shouts
+/// louder than the turn markers, which are the thing the pane is for. This color
+/// is stated exactly, so the bar looks the same under every theme.
+const SELECTION_BACKGROUND: Color = Color::Rgb(30, 43, 46);
+
+/// The text of the selected row. The background above is dark, and the default
+/// foreground of a light theme is dark as well, so the row needs a foreground of
+/// its own. This one is light enough to read on that background under any theme.
+const SELECTION_FOREGROUND: Color = Color::Rgb(214, 224, 232);
+
+/// What the cells of a selected row take on: the selection colors, with the
+/// color and the dimming of whatever they cover dropped.
+///
+/// The two colors are fixed, so a colored icon cannot draw a block of color
+/// across the selected row, and a dimmed one cannot wash it out. The selection
+/// points at somewhere you are not, so the selected row is usually a dimmed one.
+///
+/// The block in the gutter and the word in the STATUS cell are the two
+/// exceptions. [`Sidebar::repaint_kept_colors`] draws them again after this
+/// style lands.
 ///
 /// The style goes over the finished row rather than into each span, which is
 /// what makes the bar span the full width. The same patch covers the text of a
 /// short row and the padding after it.
 fn selection() -> Style {
     Style::new()
-        .fg(Color::Reset)
-        .add_modifier(Modifier::REVERSED)
+        .fg(SELECTION_FOREGROUND)
+        .bg(SELECTION_BACKGROUND)
         .remove_modifier(Modifier::DIM)
 }
 
@@ -743,8 +898,8 @@ fn marker_inset(content: &RowContent) -> u16 {
     }
 }
 
-/// The finished pane: every row drawn in order, with the selected row in reverse
-/// video.
+/// The finished pane: every row drawn in order, with the selected row in the
+/// selection colors.
 ///
 /// The rightmost column stays free for the turn-state indicator. A long name is
 /// cut before it can reach that column, and an ellipsis marks the cut.
@@ -777,8 +932,35 @@ impl Sidebar<'_> {
                 cell.set_char(glyph).set_style(own_color(base, color));
             }
         }
-        if self.is_selected(row) {
-            buf.set_style(area, selection());
+        match row_background(&row.content) {
+            // A row with a background of its own keeps it. The selection never
+            // reaches such a row, so the background does not have to fight it.
+            Some(color) => buf.set_style(area, Style::new().bg(color)),
+            None => {
+                if self.is_selected(row) {
+                    buf.set_style(area, selection());
+                    self.repaint_kept_colors(row, area, buf);
+                }
+            }
+        }
+    }
+
+    /// The runs that keep their own color, drawn again over the selection.
+    ///
+    /// The selection states a foreground for every cell of its row. Without this
+    /// step the block in the gutter and the word in the STATUS cell both take
+    /// that foreground. The user then loses which pane they are in and which
+    /// agent wants them, which the selection does not answer.
+    fn repaint_kept_colors(&self, row: &Row, area: Rect, buf: &mut Buffer) {
+        for kept in colors_kept_under_selection(&row.content) {
+            for column in kept.column..kept.column + kept.columns {
+                let Ok(column) = u16::try_from(column) else {
+                    break;
+                };
+                if let Some(cell) = buf.cell_mut((area.x + column, area.y)) {
+                    cell.set_fg(kept.color);
+                }
+            }
         }
     }
 }
@@ -833,6 +1015,8 @@ pub fn wrap(text: &str, field: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use agent_wrangler_core::agent::SessionId;
 
     use crate::model::Indicator;
 
@@ -907,6 +1091,32 @@ mod tests {
             row_text(&tab("2", "shell", Placement::OtherTab)),
             "  2: shell"
         );
+    }
+
+    #[test]
+    fn the_gutter_draws_in_its_own_color_and_takes_no_other() {
+        // The mark must read the same on a tab of any color. Only the block
+        // takes the gutter color, so the text beside it keeps the color of its
+        // row.
+        let row = Row::new(RowContent::Tab {
+            index: "1".to_string(),
+            name: "editor".to_string(),
+            placement: Placement::FocusedPane,
+            color: Some(NamedColor::Cyan),
+        });
+        let buf = drawn(&row, 12, false);
+        assert_eq!(buf[(0, 0)].fg, GUTTER_COLOR);
+        assert_eq!(buf[(1, 0)].fg, Color::Cyan);
+
+        // A row the user is not in draws a blank gutter, which takes the color
+        // of the row and nothing more.
+        let elsewhere = Row::new(RowContent::Tab {
+            index: "2".to_string(),
+            name: "shell".to_string(),
+            placement: Placement::OtherTab,
+            color: Some(NamedColor::Cyan),
+        });
+        assert_eq!(drawn(&elsewhere, 12, false)[(0, 0)].fg, Color::Cyan);
     }
 
     #[test]
@@ -1074,7 +1284,7 @@ mod tests {
 
     #[test]
     fn selecting_a_row_drops_the_color_and_the_dimming_it_covers() {
-        // Under reverse video both land on what is now the background.
+        // The selection states both colors, so neither one survives under it.
         let row = Row::new(RowContent::Agent {
             index: "0".to_string(),
             label: "a".to_string(),
@@ -1087,9 +1297,99 @@ mod tests {
         let buf = drawn(&row, 20, true);
         for x in 0..20 {
             let cell = &buf[(x, 0)];
-            assert!(cell.modifier.contains(Modifier::REVERSED), "{x}");
             assert!(!cell.modifier.contains(Modifier::DIM), "{x}");
-            assert_eq!(cell.fg, Color::Reset, "{x}");
+            assert_eq!(cell.fg, SELECTION_FOREGROUND, "{x}");
+            assert_eq!(cell.bg, SELECTION_BACKGROUND, "{x}");
+        }
+    }
+
+    #[test]
+    fn the_gutter_keeps_its_color_under_the_selection() {
+        // The selection says which row the user points at, and the gutter says
+        // which pane the user is in. A selected row can be the pane the user is
+        // in, so the two marks must both read.
+        let row = Row::new(RowContent::Agent {
+            index: "0".to_string(),
+            label: "a".to_string(),
+            branch: Branch::Last,
+            placement: Placement::FocusedPane,
+            color: Some(NamedColor::Cyan),
+        })
+        .with_key(RowKey::Pane(1.into()));
+        let buf = drawn(&row, 20, true);
+        assert_eq!(buf[(0, 0)].symbol(), "▌");
+        assert_eq!(buf[(0, 0)].fg, GUTTER_COLOR);
+        assert_eq!(buf[(0, 0)].bg, SELECTION_BACKGROUND);
+        // The text beside the mark takes the selection colors, as every cell
+        // with no color of its own does.
+        assert_eq!(buf[(1, 0)].fg, SELECTION_FOREGROUND);
+    }
+
+    #[test]
+    fn the_status_cell_keeps_its_color_under_the_selection() {
+        // The selection says which row the user points at, and the STATUS cell
+        // says which agent wants them. A selected row answers both.
+        for (turn, want) in [
+            (Turn::Attention, STATUS_ATTENTION_COLOR),
+            (Turn::Working, STATUS_WORKING_COLOR),
+        ] {
+            let row = Row::new(dashboard_agent(
+                "docs",
+                8,
+                turn,
+                Placement::SameTab,
+                Some(NamedColor::Cyan),
+            ))
+            .with_key(RowKey::Agent(SessionId::new("one").unwrap()));
+            let buf = drawn(&row, 40, true);
+            let status = ROW_LEAD_COLUMNS as u16;
+            for offset in 0..STATUS_COLUMNS as u16 {
+                assert_eq!(buf[(status + offset, 0)].fg, want, "{turn:?} {offset}");
+                assert_eq!(
+                    buf[(status + offset, 0)].bg,
+                    SELECTION_BACKGROUND,
+                    "{turn:?} {offset}"
+                );
+            }
+            // The kind icon keeps no color of its own. A block of color across
+            // a selected row is what the selection is there to stop.
+            let icon = (DASHBOARD_NAME_COLUMN - ICON_AND_GAP) as u16;
+            assert_eq!(buf[(icon, 0)].fg, SELECTION_FOREGROUND, "{turn:?}");
+        }
+    }
+
+    #[test]
+    fn an_idle_row_takes_the_selection_colors_across_its_whole_status_cell() {
+        // An idle agent has no color to keep, so nothing is drawn back.
+        let row = Row::new(dashboard_agent(
+            "docs",
+            8,
+            Turn::Idle,
+            Placement::SameTab,
+            None,
+        ))
+        .with_key(RowKey::Agent(SessionId::new("one").unwrap()));
+        let buf = drawn(&row, 40, true);
+        assert_eq!(buf[(ROW_LEAD_COLUMNS as u16, 0)].fg, SELECTION_FOREGROUND);
+    }
+
+    #[test]
+    fn a_block_line_keeps_its_own_background_and_the_selection_never_reaches_it() {
+        // A block is a body of text under its row rather than a row to point
+        // at. Every line of a block carries the key of its agent, so a selected
+        // agent row would otherwise drag the whole block into the bar.
+        let row = Row::new(RowContent::PreviewTime {
+            placement: Placement::SameTab,
+            stem: RowStem::default(),
+            branch: Branch::Last,
+            text: "30s ago".to_string(),
+        })
+        .with_key(RowKey::Agent(SessionId::new("one").unwrap()));
+        for selected in [false, true] {
+            let buf = drawn(&row, 40, selected);
+            for x in 0..40 {
+                assert_eq!(buf[(x, 0)].bg, PREVIEW_BACKGROUND, "{selected} {x}");
+            }
         }
     }
 
@@ -1099,7 +1399,7 @@ mod tests {
         // nothing is selected.
         let row = Row::new(RowContent::Blank);
         let buf = drawn(&row, 8, true);
-        assert!(!buf[(0, 0)].modifier.contains(Modifier::REVERSED));
+        assert_ne!(buf[(0, 0)].bg, SELECTION_BACKGROUND);
     }
 
     #[test]
@@ -1117,9 +1417,9 @@ mod tests {
             assert_eq!(text(&buf, 0).chars().count(), width as usize);
             let last = width - 1;
             assert_eq!(buf[(last, 0)].symbol(), "●", "the marker keeps its column");
-            assert!(buf[(last, 0)].modifier.contains(Modifier::REVERSED));
+            assert_eq!(buf[(last, 0)].bg, SELECTION_BACKGROUND);
             // The bar covers the padding a short row leaves as well as its text.
-            assert!(buf[(0, 0)].modifier.contains(Modifier::REVERSED));
+            assert_eq!(buf[(0, 0)].bg, SELECTION_BACKGROUND);
         }
     }
 
@@ -1221,8 +1521,9 @@ mod tests {
             turn,
             color,
             preview: RowPreview::Closed,
+            status: cell("working", STATUS_COLUMNS),
             name: cell(name, width),
-            cells: vec![cell("working", 9), cell("1 wrangler", 10)],
+            cells: vec![cell("1 wrangler", 10)],
         }
     }
 
@@ -1234,6 +1535,7 @@ mod tests {
                 turn,
                 color,
                 preview,
+                status,
                 name,
                 cells,
                 ..
@@ -1243,6 +1545,7 @@ mod tests {
                 turn,
                 color,
                 preview,
+                status,
                 name,
                 cells,
             },
@@ -1263,7 +1566,15 @@ mod tests {
         ] {
             let row = nested_agent("scout", 8, stem.clone());
             let drawn = row_text(&row);
-            let head = format!("{} {} ", gutter(false), open_marker(RowPreview::Closed));
+            // The head is the gutter, the open marker and the STATUS cell,
+            // with the gaps around them. The stem starts after all of that.
+            let head = format!(
+                "{} {} {:STATUS_COLUMNS$}{:DASHBOARD_CELL_GAP$}",
+                Gutter::Elsewhere.glyph(),
+                open_marker(RowPreview::Closed),
+                "working",
+                ""
+            );
             assert!(drawn.starts_with(&format!("{head}{want}")), "{stem:?}");
             // The stem spends exactly the columns that the builder took off the
             // AGENT cell.
@@ -1302,8 +1613,9 @@ mod tests {
         // because the drawing pads a cell and never shortens one.
         for width in [5usize, 8, 20] {
             let heading = RowContent::DashboardHeading {
+                status: cell("STATUS", STATUS_COLUMNS),
                 name: cell("AGENT", width),
-                cells: vec![cell("TURN", 9), cell("TAB", 10)],
+                cells: vec![cell("TAB", 10)],
             };
             let row = dashboard_agent("docs", width, Turn::Working, Placement::SameTab, None);
             let above = row_text(&heading);
@@ -1314,8 +1626,8 @@ mod tests {
                 "width {width}"
             );
             for (name, value) in [
+                ("STATUS", "working"),
                 ("AGENT", "docs"),
-                ("TURN", "working"),
                 ("TAB", "1 wrangler"),
             ] {
                 assert_eq!(
@@ -1340,13 +1652,14 @@ mod tests {
                 Placement::SameTab,
                 None
             )),
-            "  \u{25b8} \u{f167a}  docs      working    1 wrangler"
+            "  \u{25b8} working    \u{f167a}  docs      1 wrangler"
         );
     }
 
     #[test]
     fn a_count_sits_against_the_right_of_its_column() {
         let row = RowContent::DashboardHeading {
+            status: cell("STATUS", STATUS_COLUMNS),
             name: cell("AGENT", 5),
             cells: vec![TableCell {
                 text: "122k".to_string(),
@@ -1354,7 +1667,37 @@ mod tests {
                 alignment: CellAlignment::Right,
             }],
         };
-        assert_eq!(row_text(&row), "       AGENT    122k");
+        assert_eq!(row_text(&row), "    STATUS        AGENT    122k");
+    }
+
+    #[test]
+    fn the_status_cell_draws_in_the_color_of_the_turn_state_it_names() {
+        // The word leads the row, so the color there says at a glance which
+        // agents want the user. An idle row takes no color of its own.
+        //
+        // Every row here holds the same word. The color comes from `turn` and
+        // not from the text, which is what this pins.
+        for (turn, want) in [
+            (Turn::Attention, Some(STATUS_ATTENTION_COLOR)),
+            (Turn::Working, Some(STATUS_WORKING_COLOR)),
+            (Turn::Idle, None),
+        ] {
+            let row = Row::new(dashboard_agent(
+                "docs",
+                8,
+                turn,
+                Placement::SameTab,
+                Some(NamedColor::Cyan),
+            ));
+            let buf = drawn(&row, 40, false);
+            let status = ROW_LEAD_COLUMNS as u16;
+            assert_eq!(buf[(status, 0)].symbol(), "w", "{turn:?}");
+            assert_eq!(
+                buf[(status, 0)].fg,
+                want.unwrap_or(Color::Reset),
+                "{turn:?}"
+            );
+        }
     }
 
     #[test]
@@ -1367,9 +1710,14 @@ mod tests {
             Some(NamedColor::Cyan),
         );
         let buf = drawn(&Row::new(content), 40, false);
-        assert_eq!(buf[(4, 0)].symbol(), ICON_AGENT.to_string());
-        assert_eq!(buf[(4, 0)].fg, Color::Cyan, "the icon carries the color");
-        assert_eq!(buf[(7, 0)].fg, Color::Reset, "the name stays default");
+        let icon = (DASHBOARD_NAME_COLUMN - ICON_AND_GAP) as u16;
+        assert_eq!(buf[(icon, 0)].symbol(), ICON_AGENT.to_string());
+        assert_eq!(buf[(icon, 0)].fg, Color::Cyan, "the icon carries the color");
+        assert_eq!(
+            buf[(DASHBOARD_NAME_COLUMN as u16, 0)].fg,
+            Color::Reset,
+            "the name stays default"
+        );
     }
 
     #[test]

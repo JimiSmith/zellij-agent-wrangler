@@ -134,10 +134,13 @@ raw bytes, then exits non-zero.
 
 `<name>.sgr.json` carries the attributes. It lists `runs`: contiguous stretches
 of one row that share a single set of attributes, with cells at default
-attributes left out. So the whole reverse video question is one assertion:
+attributes left out. So the whole selection question is one assertion. The
+sidebar draws its selection bar on one background color, and this is the
+introducer for it:
 
-    reverse = [r for r in dump["runs"] if r["sgr"].get("reverse")]
-    assert len(reverse) == 1, "more than one pane drew a selection bar"
+    SELECTION = [48, 2, 30, 43, 46]
+    bars = [r for r in dump["runs"] if r["sgr"].get("bg") == SELECTION]
+    assert len(bars) == 1, "more than one pane drew a selection bar"
 
 It also carries `unhandled` and `unhandled_seen`. A non-zero `unhandled` means
 the program under test emitted something the emulator skipped, and the screen

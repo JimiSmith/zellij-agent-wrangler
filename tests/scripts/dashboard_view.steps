@@ -75,7 +75,7 @@ sleep: 2
 # another tab. The sidebar of this tab draws every agent of the session.
 sh: sh -c 'tests/scripts/raise-call.sh dash-one wrangler-test-dashboard "$(cat tests/out/dashboard-pane.txt)" needsAttention'
 
-# The TURN column says in words what the marker says at the right edge.
+# The STATUS column says in words what the marker says at the right edge.
 wait: wants you @ 20
 dump: dashboard_wants_you
 

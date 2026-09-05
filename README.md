@@ -188,10 +188,10 @@ in a group for each agent, not in a group for each tab.
 and every fact takes a column. No row draws for a tab or for a pane.
 
 ```
-     AGENT               TURN       TAB         PANE        BRANCH    MODEL   CTX
-  󱙺  migrate the runner  wants you  3 infra     ssh prod-1  infra/ci  opus-5  122k ●
-▌ 󱙺  the zellij port     working    1 wrangler  claude      main      opus-5  196k ○
-  󱙺  docs                idle       2 notes     copilot     docs      opus-5   88k
+    STATUS        AGENT               TAB         PANE        BRANCH    MODEL   CTX
+    wants you  󱙺  migrate the runner  3 infra     ssh prod-1  infra/ci  opus-5  122k ●
+▌   working    󱙺  the zellij port     1 wrangler  claude      main      opus-5  196k ○
+    idle       󱙺  docs                2 notes     copilot     docs      opus-5   88k
 ```
 
 The rows sort by urgency. An agent that wants you leads. An agent mid-turn
@@ -205,8 +205,9 @@ brightness says where you are. The `▌` gutter says where you are in both views
 
 Give the pane more width than a sidebar needs. The table drops a column at a
 time from its right edge as the pane narrows: CTX first, then MODEL, BRANCH,
-PANE, TAB and TURN. The AGENT column and the turn marker never drop. A pane too
-narrow even for the AGENT column draws one line that asks you to widen it.
+PANE and TAB. The STATUS column, the AGENT column and the turn marker never
+drop. A pane too narrow even for the AGENT column draws one line that asks you
+to widen it.
 
 `sections` and `status_line` do nothing while the dashboard draws. The table
 gives the branch, the model and the count a column each, and one row for each

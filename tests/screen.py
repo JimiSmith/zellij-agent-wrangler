@@ -183,7 +183,7 @@ class Screen:
         This method drops the trailing blank cells that hold default attributes,
         so a dump stays readable. With `include_default` false, the result lists
         everything on screen that has any style. One assertion of one line can
-        then state that the screen holds exactly one reverse video bar.
+        then state that the screen holds exactly one selection bar.
         """
         out = []
         for row in range(self.rows):

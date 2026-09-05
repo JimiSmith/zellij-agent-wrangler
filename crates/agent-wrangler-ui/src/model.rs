@@ -422,10 +422,12 @@ pub enum RowContent {
     /// The row carries the same cell widths as every agent row under it, so a
     /// heading sits over the column it names and the two cannot drift apart.
     DashboardHeading {
+        /// The STATUS heading, which leads the table.
+        status: TableCell,
         /// The AGENT heading, which sits over the kind icon and the name
         /// together.
         name: TableCell,
-        /// The headings from TURN onward, in the order they draw.
+        /// The headings from TAB onward, in the order they draw.
         cells: Vec<TableCell>,
     },
     /// One agent as one row of the dashboard table.
@@ -440,15 +442,19 @@ pub enum RowContent {
         /// How far under its lead this row sits. The stem draws before the kind
         /// icon, and the AGENT cell is already narrowed by its width.
         stem: RowStem,
-        /// Whose turn it is, which decides how brightly the row draws.
+        /// Whose turn it is. The value decides how brightly the row draws, and
+        /// which color the STATUS cell takes.
         turn: Turn,
         color: Option<NamedColor>,
         /// Whether the block under this row is drawn, which the disclosure
         /// marker says.
         preview: RowPreview,
+        /// The STATUS column, which leads the row and says in a word what
+        /// `turn` holds.
+        status: TableCell,
         /// The AGENT column, which the kind icon leads.
         name: TableCell,
-        /// The columns from TURN onward, in the order they draw.
+        /// The columns from TAB onward, in the order they draw.
         cells: Vec<TableCell>,
     },
     /// One line of what an agent last told the user, in the block that the
