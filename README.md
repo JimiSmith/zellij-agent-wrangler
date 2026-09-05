@@ -45,7 +45,7 @@ a sidebar.
 
 ```kdl
 pane size=32 borderless=true {
-    plugin location="https://github.com/JimiSmith/zellij-agent-wrangler/releases/download/v0.1.19/zellij-agent-wrangler-v0.1.19.wasm" {
+    plugin location="https://github.com/JimiSmith/zellij-agent-wrangler/releases/download/v0.1.20/zellij-agent-wrangler-v0.1.20.wasm" {
         install_hooks "/home/you/.local/bin/agent-wrangler"
     }
 }
