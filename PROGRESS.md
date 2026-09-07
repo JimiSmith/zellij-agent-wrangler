@@ -880,6 +880,52 @@ reason the silence that retires a client is three beats and not one: a single
 beat that went missing for a passing reason would otherwise retire it
 permanently.
 
+**A workflow keeps its children one directory deeper, and no hook says so.** A
+subagent and a teammate write `subagents/agent-<id>.jsonl`. A child that the
+`Workflow` tool started writes `subagents/workflows/<run id>/agent-<id>.jsonl`.
+The `SubagentStart` body carries the session, the transcript of the lead, the
+cwd, the prompt id, the agent id and the agent type, and nothing that names the
+run. So the daemon reads the run directories to find the pair. It reads none
+while the plain place holds the child, which is every child outside a workflow.
+Only `SubagentStop` carries `agent_transcript_path`, and by then the child is
+over. Measured on Claude Code 2.1.263.
+
+**A child that wrote no transcript is not a child to draw.** Claude runs a hook
+whose `type` is `agent` as an agent of its own, under an id of the shape
+`hook-agent-<uuid>`. Hooks that fire inside it name that id, so the daemon used
+to file a row for it, and nothing ever removed the row: such an agent writes no
+file, so it fires no `SubagentStop` and offers no transcript to measure silence
+on. One editing session with a `PreToolUse` agent hook left fifteen of them. The
+daemon now files no child until a transcript for it is there. Measured on
+Claude Code 2.1.263: a real child has neither of its files when `SubagentStart`
+fires, and has both by its first tool call. So a child is filed one hook later
+than before, and a child that calls no tool at all is never filed. Such a child
+lives for about a second, and a row that appears and leaves inside one sweep is
+a row that nobody reads.
+
+**A child's own transcript says when its turn ended.** Claude writes
+`toolEndsTurn` on the user record that carries the result of a tool which ends
+the turn. A search of the Claude Code 2.1.263 bundle found one tool that asks
+for it, `StructuredOutput`, which a workflow gives an agent whose caller named a
+schema. `AskUserQuestion` and `ExitPlanMode` do not ask for it, so a teammate
+waiting for the user is not read as ended. Claude's own rule refuses the record
+when any result in it is an error, because the agent is then asked to call the
+tool again, and the reader here copies that. This ends a child in seconds where
+the clock below takes half an hour. It is read for a child alone. A lead takes
+another prompt from the user after every turn it ends.
+
+**Claude does not always end a child, so a clock has to.** A workflow agent that
+ends normally fires `SubagentStop`. One that its own runner aborts fires
+nothing: the Agent tool runs the stop hooks by hand when its query is
+interrupted, and the workflow runner does not. The runner then retries under a
+fresh agent id. One `agent()` call with a 300 ms stall budget started six agents
+and stopped none of them, and all six stayed in the daemon at `working` until
+the lead left. A child writes its transcript on every message, so silence on
+that file is the signal, and `CHILD_SILENCE` is set well above the longest tool
+call that a person waits through. A lead is not measured this way, because a
+lead waits for the user and has both an end event and a process to prove it.
+Measured on Claude Code 2.1.263.
+
 ## A note on method
 
 Two of the three detours in this port came from concluding "zellij cannot do

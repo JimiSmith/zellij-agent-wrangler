@@ -42,6 +42,37 @@ pub struct SessionFacts {
     /// A session and a Copilot agent report `None` here, because neither reads
     /// a meta file.
     pub parent: Option<AgentId>,
+    /// Whether the last record of the window is the tool result that ends the
+    /// agent's turn. See [`ends_the_turn`].
+    ///
+    /// A child of a session ends when its turn ends, which is what
+    /// `SubagentStop` says. Claude does not always say it, so this is the same
+    /// fact read off the transcript.
+    pub turn_ended: bool,
+}
+
+/// Whether this record is the tool result that ends the agent's turn.
+///
+/// Claude writes `toolEndsTurn` on the user record that carries the result of a
+/// tool which ends the turn. A search of the Claude Code 2.1.263 bundle found
+/// one tool that asks for it, `StructuredOutput`, which a workflow gives an
+/// agent whose caller named a schema. A result that failed does not end the
+/// turn, because Claude asks the agent to call the tool again.
+///
+/// Claude ends a turn on one other mark, an MCP result carrying
+/// `claude/endTurn` in its own metadata. Refinement measured none of those, so
+/// nothing here reads that mark, and such an agent leaves on the clock instead.
+fn ends_the_turn(record: &Value) -> bool {
+    if string_field(record, "type") != Some("user") {
+        return false;
+    }
+    if record.get("toolEndsTurn").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    !content_blocks(record).iter().any(|block| {
+        string_field(block, "type") == Some("tool_result")
+            && block.get("is_error").and_then(Value::as_bool) == Some(true)
+    })
 }
 
 /// The model that Claude writes for a message it composed itself rather than
@@ -180,7 +211,16 @@ pub fn read_claude_session(transcript: &str) -> SessionFacts {
     // Every tool call in this window that no result answers yet, oldest first.
     // Each entry holds the id that the call carries, and the record as read.
     let mut unpaired: Vec<(String, String)> = Vec::new();
+    let mut turn_ended = false;
     for line in lines {
+        // A file that ends in a newline splits into a last piece with nothing
+        // in it. That piece is not a record and does not end a turn.
+        if line.is_empty() {
+            continue;
+        }
+        // Only the last record of the window can be the one that ended the
+        // turn. Every record after such a record is the agent going on.
+        turn_ended = false;
         // A JSON parse of every record parses the whole conversation. The
         // records that matter name themselves in bytes, and a search for those
         // bytes comes first.
@@ -244,6 +284,7 @@ pub fn read_claude_session(transcript: &str) -> SessionFacts {
                 unpaired.retain(|(id, _)| id != answered);
             }
         }
+        turn_ended = ends_the_turn(&record);
     }
 
     SessionFacts {
@@ -265,6 +306,7 @@ pub fn read_claude_session(transcript: &str) -> SessionFacts {
         // A transcript never names a parent. Only a meta file does, and only a
         // child has one. [`read_claude_child`] fills this in afterwards.
         parent: None,
+        turn_ended,
     }
 }
 
@@ -318,9 +360,9 @@ pub struct ChildPaths {
 /// <project directory>/<lead session id>/subagents/agent-<agent id>.meta.json
 /// ```
 ///
-/// Measurement on Claude Code 2.1.258 confirmed the rule. A `SubagentStop` body
-/// carries `agent_transcript_path`, and its value is the path that this function
-/// builds.
+/// Measurement on Claude Code 2.1.258 confirmed the rule for a subagent and for
+/// a teammate. A workflow keeps its children one directory deeper, so
+/// [`find_claude_child_paths`] is what a caller with a disk to read must use.
 ///
 /// The result is nothing for a lead transcript with no file name, and for an
 /// agent id with no characters at all.
@@ -329,7 +371,21 @@ pub fn claude_child_paths(lead_transcript: &str, agent_id: &str) -> Option<Child
         return None;
     }
     let lead = Path::new(lead_transcript);
-    let directory = lead.parent()?.join(lead.file_stem()?).join("subagents");
+    child_paths_in(
+        &lead.parent()?.join(lead.file_stem()?).join(SUBAGENTS),
+        agent_id,
+    )
+}
+
+/// The directory, under the lead's own, that holds every child of a session.
+const SUBAGENTS: &str = "subagents";
+
+/// The directory, under [`SUBAGENTS`], that holds one directory for each
+/// workflow run.
+const WORKFLOW_RUNS: &str = "workflows";
+
+/// The two files of one child, in the directory named.
+fn child_paths_in(directory: &Path, agent_id: &str) -> Option<ChildPaths> {
     Some(ChildPaths {
         transcript: directory
             .join(format!("agent-{agent_id}.jsonl"))
@@ -340,6 +396,56 @@ pub fn claude_child_paths(lead_transcript: &str, agent_id: &str) -> Option<Child
             .to_str()?
             .to_string(),
     })
+}
+
+/// Where Claude keeps the files of one child, looked for on disk.
+///
+/// [`claude_child_paths`] names the place that holds a subagent and a teammate.
+/// A child that a workflow started sits one run directory deeper:
+///
+/// ```text
+/// <project directory>/<lead session id>/subagents/workflows/<run id>/agent-<agent id>.jsonl
+/// ```
+///
+/// No hook body names the run. A measured `SubagentStart` on Claude Code 2.1.263
+/// carries the agent id and the agent type and nothing else about the child, so
+/// this function reads the run directories to find which one holds the pair.
+///
+/// Side effect: this function reads directories. It reads none while the plain
+/// place holds the child, which covers every child outside a workflow.
+///
+/// The answer is the plain place when no directory holds the child. A child that
+/// Claude has written no file for yet reads that way, and the next hook for that
+/// child looks again.
+pub fn find_claude_child_paths(lead_transcript: &str, agent_id: &str) -> Option<ChildPaths> {
+    let plain = claude_child_paths(lead_transcript, agent_id)?;
+    if child_files_exist(&plain) {
+        return Some(plain);
+    }
+    let Some(subagents) = Path::new(&plain.transcript).parent() else {
+        return Some(plain);
+    };
+    let Ok(runs) = std::fs::read_dir(subagents.join(WORKFLOW_RUNS)) else {
+        return Some(plain);
+    };
+    for run in runs.flatten() {
+        let Some(found) = child_paths_in(&run.path(), agent_id) else {
+            continue;
+        };
+        if child_files_exist(&found) {
+            return Some(found);
+        }
+    }
+    Some(plain)
+}
+
+/// Whether Claude wrote either file of this child.
+///
+/// Claude writes the meta file when the child starts, and the transcript when
+/// the child first says something. Either file marks the directory that holds
+/// the child, and the order that the two land in does not matter here.
+fn child_files_exist(paths: &ChildPaths) -> bool {
+    Path::new(&paths.transcript).exists() || Path::new(&paths.meta_file).exists()
 }
 
 /// What a child's own two files say about it.
@@ -391,6 +497,9 @@ pub fn read_copilot_session(home: &Path, session: &str) -> SessionFacts {
         // of them. A Copilot agent therefore starts nothing that the daemon
         // draws under it.
         parent: None,
+        // The daemon never opens a Copilot transcript, so nothing here can say
+        // that a turn ended.
+        turn_ended: false,
     }
 }
 
@@ -501,6 +610,58 @@ mod tests {
     #[test]
     fn an_agent_id_with_no_characters_names_no_files() {
         assert_eq!(claude_child_paths("/p/4630d1cb.jsonl", ""), None);
+    }
+
+    /// The lead transcript of a scratch directory, written so that the search
+    /// has a directory to start from.
+    fn write_lead(dir: &Path) -> String {
+        let lead = dir.join("4630d1cb.jsonl");
+        std::fs::write(&lead, "").unwrap();
+        lead.to_string_lossy().to_string()
+    }
+
+    /// The meta file of one child of a workflow run, which is the file that
+    /// marks the run directory as the one that holds the child.
+    fn write_workflow_child(dir: &Path, run: &str, agent_id: &str) -> PathBuf {
+        let run_directory = dir
+            .join("4630d1cb")
+            .join(SUBAGENTS)
+            .join(WORKFLOW_RUNS)
+            .join(run);
+        std::fs::create_dir_all(&run_directory).unwrap();
+        let meta_file = run_directory.join(format!("agent-{agent_id}.meta.json"));
+        std::fs::write(&meta_file, "{}").unwrap();
+        meta_file
+    }
+
+    #[test]
+    fn a_child_of_a_workflow_is_found_under_the_directory_of_its_run() {
+        let scratch = Scratch::new("workflow-child");
+        let lead = write_lead(scratch.path());
+        let meta_file = write_workflow_child(scratch.path(), "wf_4c1f0027-063", "a9f93b0fd");
+        let found = find_claude_child_paths(&lead, "a9f93b0fd").unwrap();
+        assert_eq!(Path::new(&found.meta_file), meta_file);
+        assert!(found.transcript.ends_with("agent-a9f93b0fd.jsonl"));
+    }
+
+    #[test]
+    fn a_child_outside_a_workflow_is_found_where_it_always_was() {
+        let scratch = Scratch::new("plain-child-beside-runs");
+        let lead = write_lead(scratch.path());
+        // A run directory of another child, which the search must pass over.
+        write_workflow_child(scratch.path(), "wf_4c1f0027-063", "a9f93b0fd");
+        let paths = write_child(scratch.path(), "a9a352", "{}", &[]);
+        assert_eq!(find_claude_child_paths(&lead, "a9a352"), Some(paths));
+    }
+
+    #[test]
+    fn a_child_with_no_file_written_yet_reads_as_the_plain_place() {
+        let scratch = Scratch::new("child-with-no-file");
+        let lead = write_lead(scratch.path());
+        assert_eq!(
+            find_claude_child_paths(&lead, "a9a352"),
+            claude_child_paths(&lead, "a9a352")
+        );
     }
 
     #[test]
@@ -721,6 +882,58 @@ mod tests {
         let facts = read_claude_session(&path);
         assert_eq!(facts.label.title, "the long one");
         assert_eq!(facts.label.color, "");
+    }
+
+    /// The record that Claude writes when the turn-ending tool answers.
+    ///
+    /// Copied from a workflow agent's transcript on Claude Code 2.1.263, with
+    /// the fields that no reader here looks at left out.
+    const TURN_ENDED: &str = concat!(
+        r#"{"type":"user","isSidechain":true,"agentId":"ad9f4b2c32c64e6c6","toolEndsTurn":true,"#,
+        r#""message":{"role":"user","content":[{"tool_use_id":"toolu_01LB","type":"tool_result","#,
+        r#""content":"Structured output provided successfully"}]}}"#
+    );
+
+    #[test]
+    fn the_last_record_of_a_turn_ending_tool_says_that_the_turn_ended() {
+        let scratch = Scratch::new("turn-ended");
+        let path = write_transcript(scratch.path(), &[TURN_ENDED]);
+        assert!(read_claude_session(&path).turn_ended);
+    }
+
+    #[test]
+    fn a_turn_ending_tool_that_failed_ends_no_turn() {
+        // Claude asks the agent to call the tool again, so the agent runs on.
+        let scratch = Scratch::new("turn-ended-in-error");
+        let failed = TURN_ENDED.replace(
+            r#""type":"tool_result","#,
+            r#""type":"tool_result","is_error":true,"#,
+        );
+        let path = write_transcript(scratch.path(), &[&failed]);
+        assert!(!read_claude_session(&path).turn_ended);
+    }
+
+    #[test]
+    fn a_record_after_the_turn_ending_one_says_that_the_agent_runs_on() {
+        let scratch = Scratch::new("turn-ended-then-more");
+        let path = write_transcript(
+            scratch.path(),
+            &[
+                TURN_ENDED,
+                r#"{"type":"assistant","message":{"content":[]}}"#,
+            ],
+        );
+        assert!(!read_claude_session(&path).turn_ended);
+    }
+
+    #[test]
+    fn a_session_that_ended_no_turn_says_so() {
+        let scratch = Scratch::new("turn-not-ended");
+        let path = write_transcript(
+            scratch.path(),
+            &[r#"{"type":"user","message":{"content":[{"type":"tool_result"}]}}"#],
+        );
+        assert!(!read_claude_session(&path).turn_ended);
     }
 
     #[test]

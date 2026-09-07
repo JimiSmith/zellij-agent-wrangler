@@ -14,7 +14,7 @@ use agent_wrangler_core::notify::Notifier;
 use agent_wrangler_core::origin::Origin;
 use agent_wrangler_core::payload::directory_name;
 use agent_wrangler_core::registry::Registry;
-use agent_wrangler_core::session_facts::{self, SessionFacts};
+use agent_wrangler_core::session_facts::{self, ChildPaths, SessionFacts};
 
 use crate::proto::{DeliveryTarget, Hook};
 
@@ -55,6 +55,13 @@ pub trait World {
     fn mtime(&self, path: &str) -> Option<u64>;
     /// Whether a process still runs, and is still the intended one.
     fn alive(&self, process: &Process) -> bool;
+    /// Where the child that a hook named keeps its own two files.
+    ///
+    /// A hook names the transcript of the lead and never the file of a child,
+    /// so the place has to be looked for. A workflow keeps its children one run
+    /// directory deeper than every other agent does, which is why this is a
+    /// reading and not a rule that a caller can apply on its own.
+    fn claude_child_paths(&self, lead_transcript: &str, agent_id: &str) -> Option<ChildPaths>;
 }
 
 /// The real one: an agent's files, the filesystem, and this machine's processes.
@@ -96,6 +103,10 @@ impl World for Real {
 
     fn alive(&self, process: &Process) -> bool {
         crate::platform::running(process)
+    }
+
+    fn claude_child_paths(&self, lead_transcript: &str, agent_id: &str) -> Option<ChildPaths> {
+        session_facts::find_claude_child_paths(lead_transcript, agent_id)
     }
 }
 
@@ -183,6 +194,23 @@ pub struct State {
 ///
 /// [`HEARTBEAT_INTERVAL`]: agent_wrangler_core::client_message::HEARTBEAT_INTERVAL
 pub const SILENCE: Duration = Duration::from_secs(90);
+
+/// How long a child's transcript may sit still before the daemon takes the
+/// child as gone.
+///
+/// A child that ends fires `SubagentStop`, and the daemon drops it on that word
+/// alone. Claude does not always say the word. A workflow agent that its own
+/// runner aborts, for a stall or for a skip or for an error, fires nothing, and
+/// the runner then retries under a fresh agent id. Measurement on Claude Code
+/// 2.1.263 left six such records for one stalling step. Nothing but a clock
+/// removes them while the lead runs.
+///
+/// A child writes its transcript on every message, so a live child is silent
+/// only while one tool call runs. This is set well above the longest such call
+/// that a person waits through, because a row that goes early is worse than a
+/// row that goes late. A lead is not measured this way. A lead can wait for the
+/// user for hours, and it has both an end event and a process to prove it.
+pub const CHILD_SILENCE: Duration = Duration::from_secs(30 * 60);
 
 /// What an agent's files said, read before the daemon takes the lock.
 ///
@@ -343,14 +371,14 @@ fn claude_child_id(hook: &Hook) -> Option<AgentId> {
 /// The files that a hook names, for the agent that the hook speaks for.
 ///
 /// A hook inside a child names the transcript of the lead, and never the file of
-/// the child. The daemon therefore builds the child's own pair of files from
-/// that path and the agent id.
-fn files_named_by(hook: &Hook) -> SessionFiles {
+/// the child. The daemon therefore looks for the child's own pair of files,
+/// starting from that path and the agent id.
+fn files_named_by(hook: &Hook, world: &dyn World) -> SessionFiles {
     // The raw id names the file. A composed session id is built from the
     // replaced form, and the two are the same for every id that Claude has been
     // measured to write.
     let child = claude_child_of(hook)
-        .and_then(|agent_id| session_facts::claude_child_paths(&hook.transcript, agent_id));
+        .and_then(|agent_id| world.claude_child_paths(&hook.transcript, agent_id));
     match child {
         Some(paths) => SessionFiles {
             agent: hook.agent.clone(),
@@ -370,7 +398,7 @@ fn files_named_by(hook: &Hook) -> SessionFiles {
 /// This function reads what a hook named. It touches the filesystem and
 /// nothing else.
 pub fn read_hook(hook: &Hook, world: &dyn World) -> Reading {
-    let files = files_named_by(hook);
+    let files = files_named_by(hook, world);
     Reading {
         facts: world.read_session_files(
             &files.agent,
@@ -488,6 +516,32 @@ impl State {
         };
         let session = reported.session.clone();
         if event == Event::End {
+            return Applied::told(self.end_session(&session));
+        }
+
+        // A child that has written no transcript is not a child to draw.
+        //
+        // Claude runs a hook whose type is `agent` as an agent of its own, with
+        // an id like any other child, and such an agent writes no file at all.
+        // Nothing then ever ends its row: it fires no `SubagentStop`, and the
+        // sweep has no file to measure silence on. One editing session left
+        // fifteen of them.
+        //
+        // Measurement on Claude Code 2.1.263: a real child has neither of its
+        // files when `SubagentStart` fires, and has both by its first tool
+        // call. So a child is filed one hook later than it used to be, and a
+        // child that calls no tool at all is never filed. Such a child lives
+        // for about a second, and a row that appears and leaves inside one
+        // sweep is a row that nobody reads.
+        if child_agent.is_some() && reading.mtime.is_none() {
+            return Applied::Nothing;
+        }
+
+        // A child ends when its turn ends, and its own transcript says so. The
+        // hook that fires for the turn-ending tool call arrives after that
+        // record lands, so a child filed here would come straight back after
+        // the same record ended it on the sweep.
+        if child_agent.is_some() && reading.facts.turn_ended {
             return Applied::told(self.end_session(&session));
         }
 
@@ -756,6 +810,13 @@ impl State {
             let Some(held) = self.registry.get(&session).cloned() else {
                 continue;
             };
+            // A child whose turn ended is over, whatever Claude did or did not
+            // say about it. A lead is not read this way. A lead takes another
+            // prompt from the user after every turn it ends.
+            if held.lead.is_some() && found.turn_ended {
+                changed |= self.end_session(&session);
+                continue;
+            }
             // The directory is not in the transcript. The daemon keeps it from
             // what the last hook said, because a scan never looks for it. Every
             // other fact is in the transcript, so the scan states all of them
@@ -789,6 +850,45 @@ impl State {
         }
 
         changed
+    }
+
+    /// This method drops every child whose transcript stopped moving. It
+    /// returns whether it dropped one.
+    ///
+    /// `now` is the milliseconds since the epoch, which is the clock that a
+    /// file's modification time is in.
+    ///
+    /// A child with no time recorded is left alone. Silence is measured on a
+    /// file, and a file that was never read says nothing to measure. The daemon
+    /// files no child before its transcript is there, so this covers a record
+    /// that came back from disk and nothing else.
+    pub fn reap_silent_children(&mut self, now: u64) -> bool {
+        let mut changed = false;
+        for session in self.silent_children(now) {
+            changed |= self.end_session(&session);
+        }
+        changed
+    }
+
+    /// Every child whose transcript has not moved for [`CHILD_SILENCE`].
+    fn silent_children(&self, now: u64) -> Vec<SessionId> {
+        let silence = CHILD_SILENCE.as_millis() as u64;
+        self.registry
+            .iter()
+            // A record with a lead is a child. A lead answers for itself.
+            .filter(|agent| agent.lead.is_some())
+            .filter(|agent| {
+                match self
+                    .session_files
+                    .get(&agent.session)
+                    .and_then(|files| files.mtime)
+                {
+                    Some(mtime) => now.saturating_sub(mtime) >= silence,
+                    None => false,
+                }
+            })
+            .map(|agent| agent.session.clone())
+            .collect()
     }
 
     /// This method plans, looks and takes in, in one step. The daemon does the
@@ -866,9 +966,20 @@ mod tests {
         facts: RefCell<BTreeMap<String, SessionFacts>>,
         mtime: RefCell<BTreeMap<String, u64>>,
         alive: RefCell<BTreeMap<u32, Option<ProcessStartStamp>>>,
+        children_wrote: std::cell::Cell<bool>,
     }
 
     impl Fake {
+        /// Every child in this test has written its transcript, at a time that
+        /// the test did not state.
+        ///
+        /// The daemon passes over a child that has written no file at all, and
+        /// most tests here are about what happens to a child after that point.
+        /// A test that says nothing here says that no child wrote anything.
+        fn every_child_wrote_a_transcript(&self) {
+            self.children_wrote.set(true);
+        }
+
         fn says(&self, transcript: &str, label: LabelFacts, mtime: u64) {
             self.reads(
                 transcript,
@@ -914,11 +1025,26 @@ mod tests {
         }
 
         fn mtime(&self, path: &str) -> Option<u64> {
-            self.mtime.borrow().get(path).copied()
+            if let Some(stated) = self.mtime.borrow().get(path).copied() {
+                return Some(stated);
+            }
+            // Only a child's transcript sits under the subagents directory, so
+            // this answers for a child and never for a lead.
+            match self.children_wrote.get() && path.contains("subagents") {
+                true => Some(1),
+                false => None,
+            }
         }
 
         fn alive(&self, process: &Process) -> bool {
             self.alive.borrow().get(&process.pid) == Some(&process.started)
+        }
+
+        /// The plain place, with no directory read at all. A test states what a
+        /// path says through [`Fake::reads`], so a search of the real disk
+        /// would answer a question that no test asked.
+        fn claude_child_paths(&self, lead_transcript: &str, agent_id: &str) -> Option<ChildPaths> {
+            session_facts::claude_child_paths(lead_transcript, agent_id)
         }
     }
 
@@ -1033,6 +1159,7 @@ mod tests {
     #[test]
     fn a_hook_that_names_a_child_files_the_child_under_the_lead() {
         let world = Fake::default();
+        world.every_child_wrote_a_transcript();
         world.running(AGENT);
         let mut state = State::default();
         state.on_hook(&hook("working"), &world);
@@ -1057,6 +1184,7 @@ mod tests {
     #[test]
     fn a_lead_keeps_its_own_turn_while_a_child_works() {
         let world = Fake::default();
+        world.every_child_wrote_a_transcript();
         world.running(AGENT);
         let mut state = State::default();
         // The user submits a prompt, so the lead is working.
@@ -1077,6 +1205,7 @@ mod tests {
     #[test]
     fn the_child_end_word_ends_a_child() {
         let world = Fake::default();
+        world.every_child_wrote_a_transcript();
         world.running(AGENT);
         let mut state = State::default();
         state.on_hook(&hook("working"), &world);
@@ -1086,6 +1215,152 @@ mod tests {
         state.on_hook(&child_hook("childEnd", "a9a352"), &world);
         assert_eq!(state.registry().get(&child("a9a352")), None);
         // The lead runs on.
+        assert!(state.registry().get(&session("one")).is_some());
+    }
+
+    /// A lead, and one child under it whose transcript last moved at `mtime`.
+    fn state_with_a_child(world: &Fake, mtime: u64) -> State {
+        world.running(AGENT);
+        let mut state = State::default();
+        state.on_hook(&hook("working"), world);
+        world.says(&child_transcript("probe"), LabelFacts::default(), mtime);
+        state.on_hook(&child_hook("working", "probe"), world);
+        assert!(state.registry().get(&child("probe")).is_some());
+        state
+    }
+
+    #[test]
+    fn a_child_that_wrote_no_transcript_is_never_filed() {
+        // Claude runs a hook whose type is `agent` under an id of this shape,
+        // and such an agent writes no file. Nothing would ever end its row.
+        let world = Fake::default();
+        world.running(AGENT);
+        let mut state = State::default();
+        state.on_hook(&hook("working"), &world);
+
+        let started = child_hook("working", "hook-agent-1f6c34c1");
+        assert_eq!(state.on_hook(&started, &world), Applied::Nothing);
+        assert_eq!(state.registry().get(&child("hook-agent-1f6c34c1")), None);
+        // The lead is untouched by a child that the daemon passed over.
+        assert!(state.registry().get(&session("one")).is_some());
+    }
+
+    #[test]
+    fn a_child_is_filed_on_the_first_hook_that_finds_its_transcript() {
+        // Measured on Claude Code 2.1.263: a real child has neither of its
+        // files at SubagentStart, and both by its first tool call.
+        let world = Fake::default();
+        world.running(AGENT);
+        let mut state = State::default();
+        state.on_hook(&hook("working"), &world);
+
+        state.on_hook(&child_hook("working", "probe"), &world);
+        assert_eq!(state.registry().get(&child("probe")), None);
+
+        world.says(&child_transcript("probe"), titled("reading"), 1_000);
+        state.on_hook(&child_hook("working", "probe"), &world);
+        assert!(state.registry().get(&child("probe")).is_some());
+    }
+
+    /// Facts that say the agent's turn ended.
+    fn turn_ended() -> SessionFacts {
+        SessionFacts {
+            turn_ended: true,
+            ..SessionFacts::default()
+        }
+    }
+
+    #[test]
+    fn a_child_whose_transcript_says_its_turn_ended_leaves_on_the_sweep() {
+        // Claude ends a child with SubagentStop. A workflow agent that its own
+        // runner aborts fires nothing, and its transcript says so instead.
+        let world = Fake::default();
+        let mut state = state_with_a_child(&world, 1_000);
+
+        world.reads(&child_transcript("probe"), turn_ended(), 2_000);
+        assert!(state.poll(&world));
+        assert_eq!(state.registry().get(&child("probe")), None);
+        // The lead ends no turn this way, whatever its own transcript says.
+        assert!(state.registry().get(&session("one")).is_some());
+    }
+
+    #[test]
+    fn a_hook_does_not_bring_back_a_child_whose_turn_ended() {
+        // The hook for the turn-ending tool call arrives after that record
+        // lands. A child filed on it would come straight back.
+        let world = Fake::default();
+        world.every_child_wrote_a_transcript();
+        world.running(AGENT);
+        let mut state = State::default();
+        state.on_hook(&hook("working"), &world);
+        world.reads(&child_transcript("probe"), turn_ended(), 1_000);
+
+        state.on_hook(&child_hook("working", "probe"), &world);
+        assert_eq!(state.registry().get(&child("probe")), None);
+    }
+
+    #[test]
+    fn a_lead_whose_transcript_says_its_turn_ended_stays() {
+        // A lead takes another prompt from the user after every turn it ends.
+        let world = Fake::default();
+        world.running(AGENT);
+        let mut state = State::default();
+        world.reads("/t/one.jsonl", turn_ended(), 1_000);
+
+        state.on_hook(&hook("working"), &world);
+        assert!(state.registry().get(&session("one")).is_some());
+        state.poll(&world);
+        assert!(state.registry().get(&session("one")).is_some());
+    }
+
+    #[test]
+    fn a_child_whose_transcript_stopped_moving_leaves() {
+        // Claude ends a child with SubagentStop, and a workflow that aborts one
+        // of its agents fires nothing. The clock is the only way out.
+        let world = Fake::default();
+        let mut state = state_with_a_child(&world, 1_000);
+        let silence = CHILD_SILENCE.as_millis() as u64;
+
+        assert!(!state.reap_silent_children(1_000 + silence - 1));
+        assert!(state.reap_silent_children(1_000 + silence));
+        assert_eq!(state.registry().get(&child("probe")), None);
+        // The files go with the record, so no later look reads them.
+        assert!(!state
+            .plan()
+            .watch
+            .iter()
+            .any(|(at, _)| at == &child("probe")));
+    }
+
+    #[test]
+    fn a_child_that_is_still_writing_stays() {
+        let world = Fake::default();
+        let mut state = state_with_a_child(&world, 1_000);
+        let silence = CHILD_SILENCE.as_millis() as u64;
+
+        // The look takes in the new time. It reports no change, because the
+        // transcript still says exactly what it said before.
+        world.says(
+            &child_transcript("probe"),
+            LabelFacts::default(),
+            1_000 + silence,
+        );
+        state.poll(&world);
+        assert!(!state.reap_silent_children(1_000 + silence));
+        assert!(state.registry().get(&child("probe")).is_some());
+    }
+
+    #[test]
+    fn a_lead_that_wrote_nothing_for_a_long_time_stays() {
+        // A lead waits for the user for as long as the user takes. It has an
+        // end event and a process, and neither of those is a clock.
+        let world = Fake::default();
+        world.running(AGENT);
+        let mut state = State::default();
+        world.says("/t/one.jsonl", LabelFacts::default(), 1_000);
+        state.on_hook(&hook("working"), &world);
+
+        assert!(!state.reap_silent_children(1_000 + CHILD_SILENCE.as_millis() as u64 * 10));
         assert!(state.registry().get(&session("one")).is_some());
     }
 
@@ -1103,6 +1378,7 @@ mod tests {
     #[test]
     fn a_session_that_ends_takes_every_child_under_it() {
         let world = Fake::default();
+        world.every_child_wrote_a_transcript();
         world.running(AGENT);
         let mut state = State::default();
         state.on_hook(&hook("working"), &world);
@@ -1122,6 +1398,7 @@ mod tests {
         // A child runs inside the process of its lead, so one process check
         // reaps both.
         let world = Fake::default();
+        world.every_child_wrote_a_transcript();
         world.running(AGENT);
         let mut state = State::default();
         state.on_hook(&hook("working"), &world);
@@ -1151,6 +1428,7 @@ mod tests {
     /// place that says so. Every hook reports the top lead in `session_id`.
     fn depth_two(world: &Fake, state: &mut State) -> (SessionId, SessionId) {
         world.running(AGENT);
+        world.every_child_wrote_a_transcript();
         world.reads(&child_transcript("probe"), started_by("mate"), 1);
         state.on_hook(&hook("working"), world);
         state.on_hook(&child_hook("working", "mate"), world);
@@ -1183,6 +1461,7 @@ mod tests {
         // Nothing names a lead that is not there. A row that points at a
         // session which is gone never leaves.
         let world = Fake::default();
+        world.every_child_wrote_a_transcript();
         world.running(AGENT);
         world.reads(&child_transcript("probe"), started_by("mate"), 1);
         let mut state = State::default();
@@ -1200,6 +1479,7 @@ mod tests {
         // when the child starts. A meta file that lands later changes the
         // answer, and the record moves from depth one to depth two.
         let world = Fake::default();
+        world.every_child_wrote_a_transcript();
         world.running(AGENT);
         let mut state = State::default();
         state.on_hook(&hook("working"), &world);
@@ -1225,6 +1505,7 @@ mod tests {
         // The child writes its transcript, the daemon reads the pair again, and
         // the meta file is there this time.
         let world = Fake::default();
+        world.every_child_wrote_a_transcript();
         world.running(AGENT);
         let mut state = State::default();
         state.on_hook(&hook("working"), &world);
@@ -1250,6 +1531,7 @@ mod tests {
     #[test]
     fn the_child_end_word_ends_the_named_child_and_everything_under_it() {
         let world = Fake::default();
+        world.every_child_wrote_a_transcript();
         let mut state = State::default();
         let (teammate, subagent) = depth_two(&world, &mut state);
 
@@ -1267,6 +1549,7 @@ mod tests {
         // can hold the shape of another one inside it. A substring match ends
         // an agent that nothing stopped.
         let world = Fake::default();
+        world.every_child_wrote_a_transcript();
         world.running(AGENT);
         let mut state = State::default();
         state.on_hook(&hook("working"), &world);
@@ -1284,6 +1567,7 @@ mod tests {
         // A subagent writes no color, and the work it does belongs to the agent
         // that started it. A teammate writes its own color, and keeps it.
         let world = Fake::default();
+        world.every_child_wrote_a_transcript();
         world.running(AGENT);
         world.says("/t/one.jsonl", colored("blue"), 1);
         world.says(&child_transcript("mate"), colored("purple"), 1);
@@ -1334,6 +1618,7 @@ mod tests {
         // The hook names the transcript of the lead. The daemon reads the file
         // of the child, which sits under a directory named for the lead.
         let world = Fake::default();
+        world.every_child_wrote_a_transcript();
         world.running(AGENT);
         world.says("/t/one.jsonl", titled("the lead"), 1);
         world.says(&child_transcript("a9a352"), titled("the child"), 1);
@@ -1351,9 +1636,10 @@ mod tests {
 
     #[test]
     fn a_child_whose_transcript_appears_later_is_read_on_the_next_tick() {
-        // A child writes no transcript until it answers, so SubagentStart finds
-        // no file at all.
+        // A child is filed as soon as its transcript is there, and what that
+        // transcript says can arrive later still.
         let world = Fake::default();
+        world.every_child_wrote_a_transcript();
         world.running(AGENT);
         let mut state = State::default();
         state.on_hook(&hook("working"), &world);
@@ -1363,7 +1649,7 @@ mod tests {
             ""
         );
 
-        world.says(&child_transcript("a9a352"), titled("at last"), 1);
+        world.says(&child_transcript("a9a352"), titled("at last"), 2);
         assert!(state.poll(&world));
         assert_eq!(
             state.registry().get(&child("a9a352")).unwrap().meta.title,
@@ -1376,6 +1662,7 @@ mod tests {
         // Claude is the priority. Copilot has subagent events of its own, and
         // refinement measured none of them.
         let world = Fake::default();
+        world.every_child_wrote_a_transcript();
         world.running(AGENT);
         let mut state = State::default();
         let copilot = Hook {

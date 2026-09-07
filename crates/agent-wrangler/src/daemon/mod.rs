@@ -413,7 +413,11 @@ fn serve(
 }
 
 /// This function looks at every held transcript and pid, and takes in what
-/// changed.
+/// changed. It then drops every child that stopped writing.
+///
+/// The reaping happens after the look, so a transcript that moved during the
+/// look is already counted. A child that Claude ended without saying so has no
+/// other way out while its lead runs.
 fn sweep(shared: &Arc<Mutex<State>>, owed: &Owed) {
     let (plan, since) = {
         let state = held(shared);
@@ -421,7 +425,11 @@ fn sweep(shared: &Arc<Mutex<State>>, owed: &Owed) {
     };
     // The look is the slow part, and it holds nothing.
     let found = look(&plan, &Real, &since);
-    if held(shared).observe(found) {
+    let mut state = held(shared);
+    let mut changed = state.observe(found);
+    changed |= state.reap_silent_children(crate::now());
+    drop(state);
+    if changed {
         owed.owe();
     }
 }
