@@ -46,6 +46,20 @@ impl Registry {
                 (&mut agent.meta.name, &known.meta.name),
                 (&mut agent.meta.color, &known.meta.color),
                 (&mut agent.meta.title, &known.meta.title),
+                // The reader looks at the end of a transcript and no further.
+                // An agent that reads large files fills that window with them,
+                // and the last message it wrote scrolls out. A report that
+                // found no message therefore says that the reader saw none,
+                // and not that the agent has nothing to say. Measured on two
+                // agents reading this repository: transcripts of 293 KB and
+                // 317 KB left thirteen and fifteen records in the window, most
+                // of them a file that a tool returned. The row went blank and
+                // filled again on the next look.
+                //
+                // `running_tool` takes no part in this. An empty one says that
+                // no tool is running, which is news, and holding the last one
+                // would leave a tool on the row after it finished.
+                (&mut agent.records.last_message, &known.records.last_message),
             ] {
                 if fresh.is_empty() {
                     *fresh = held.clone();
@@ -167,7 +181,7 @@ impl Registry {
 mod tests {
     use super::*;
     use crate::agent::tests::{agent, at_pane, colored, meta, reporting, session};
-    use crate::agent::{Record, FORMAT};
+    use crate::agent::{Record, TranscriptRecords, FORMAT};
 
     /// The id of one child, for a test that states the chain outright.
     fn agent_id(text: &str) -> AgentId {
@@ -367,6 +381,46 @@ mod tests {
         assert_eq!(registry.get(&session("one")).unwrap().meta.color, "red");
         registry.start(colored("one", "blue"));
         assert_eq!(registry.get(&session("one")).unwrap().meta.color, "blue");
+    }
+
+    /// One agent whose transcript reported this message and this running tool.
+    fn saying(id: &str, last_message: &str, running_tool: &str) -> Agent {
+        agent(id, 1).with_records(TranscriptRecords {
+            last_message: last_message.to_string(),
+            running_tool: running_tool.to_string(),
+        })
+    }
+
+    #[test]
+    fn a_message_found_once_outlives_the_window_it_was_found_in() {
+        // An agent that reads large files fills the window with them, and the
+        // message it last wrote scrolls out of reach. The row must not go
+        // blank and fill again as that happens.
+        let mut registry = Registry::default();
+        registry.start(saying("one", "the message", ""));
+        registry.report(saying("one", "", ""));
+        assert_eq!(
+            registry.get(&session("one")).unwrap().records.last_message,
+            "the message"
+        );
+        registry.report(saying("one", "a later message", ""));
+        assert_eq!(
+            registry.get(&session("one")).unwrap().records.last_message,
+            "a later message"
+        );
+    }
+
+    #[test]
+    fn a_tool_that_finished_leaves_the_row() {
+        // An empty running tool is news, and not a look that found nothing. A
+        // held tool would sit on the row after the tool came back.
+        let mut registry = Registry::default();
+        registry.start(saying("one", "the message", "the tool"));
+        registry.report(saying("one", "", ""));
+        assert_eq!(
+            registry.get(&session("one")).unwrap().records.running_tool,
+            ""
+        );
     }
 
     #[test]
