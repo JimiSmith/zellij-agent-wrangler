@@ -156,9 +156,12 @@ const ICON_AGENT: char = '\u{f167a}';
 
 /// The gap between the kind icon and the name it labels.
 ///
-/// Two spaces, not one: the icons overhang the single column they are declared
-/// as. With one space, the name touches the glyph.
-const ICON_GAP: &str = "  ";
+/// The icons sit in the Private Use Area, and `unicode-width` gives such a code
+/// point one column. The layout therefore budgets one cell, and a terminal font
+/// draws the glyph wider than that cell. The ink goes into the cell after it.
+/// This blank cell takes the overhang. With no gap, the glyph draws over the
+/// first letter of the name. A dashboard row keeps the same one-cell gap.
+const ICON_GAP: &str = " ";
 
 /// The columns that the kind icon and the gap after it take together.
 ///
@@ -411,7 +414,7 @@ fn child_parts(
 /// Everything a child row draws between its gutter and its kind icon: the
 /// branch and the index.
 fn child_head(position: Branch, index: &str) -> String {
-    format!(" {}─ {index}: ", branch(position))
+    format!(" {}─ {index}:", branch(position))
 }
 
 /// The column that a child row starts its name in.
@@ -1122,7 +1125,7 @@ mod tests {
         assert_eq!(padded(&cell("東京", 3)), "東…");
         assert_eq!(padded(&cell("東京", 2)), "… ");
         assert_eq!(padded(&cell("東京", 0)), "");
-        assert_eq!(child_name_column(Branch::Last, "東"), 12);
+        assert_eq!(child_name_column(Branch::Last, "東"), 10);
     }
 
     #[test]
@@ -1299,11 +1302,11 @@ mod tests {
     fn a_child_row_is_indented_under_its_tab() {
         assert_eq!(
             row_text(&pane("0", "nvim", Branch::More, Placement::SameTab)),
-            "  ├─ 0: \u{f489}  nvim"
+            "  ├─ 0:\u{f489} nvim"
         );
         assert_eq!(
             row_text(&pane("1", "bash", Branch::Last, Placement::FocusedPane)),
-            "▌ └─ 1: \u{f489}  bash"
+            "▌ └─ 1:\u{f489} bash"
         );
     }
 
@@ -1338,9 +1341,9 @@ mod tests {
         ] {
             let buf = drawn(&Row::new(content), 20, false);
             let cells: Vec<&str> = (0..20).map(|x| buf[(x, 0)].symbol()).collect();
-            assert_eq!(cells[8], icon.to_string(), "the icon is one cell");
-            assert_eq!(cells[9..11].concat(), "  ", "and does not eat the gap");
-            assert_eq!(cells[11..15].concat(), "nvim");
+            assert_eq!(cells[7], icon.to_string(), "the icon is one cell");
+            assert_eq!(cells[8], " ", "and does not eat the gap");
+            assert_eq!(cells[9..13].concat(), "nvim");
         }
     }
 
@@ -1354,14 +1357,14 @@ mod tests {
             color: Some(NamedColor::Cyan),
         };
         let buf = drawn(&Row::new(content), 20, false);
-        assert_eq!(text(&buf, 0).trim_end(), "  └─ 0: \u{f167a}  a");
-        assert_eq!(buf[(8, 0)].fg, Color::Cyan, "the icon carries the color");
-        assert_eq!(buf[(7, 0)].fg, Color::Reset, "the tree stays default");
-        assert_eq!(buf[(11, 0)].fg, Color::Reset, "the name stays default");
+        assert_eq!(text(&buf, 0).trim_end(), "  └─ 0:\u{f167a} a");
+        assert_eq!(buf[(7, 0)].fg, Color::Cyan, "the icon carries the color");
+        assert_eq!(buf[(6, 0)].fg, Color::Reset, "the tree stays default");
+        assert_eq!(buf[(9, 0)].fg, Color::Reset, "the name stays default");
         // The dimming is the placement channel and the color is the identity
         // channel. An unfocused agent therefore keeps its icon color, and the
         // dimming does not replace it.
-        for x in 0..12 {
+        for x in 0..10 {
             assert!(buf[(x, 0)].modifier.contains(Modifier::DIM), "{x}");
         }
     }
@@ -1393,11 +1396,11 @@ mod tests {
         // runs down to the children after it.
         assert_eq!(
             row_text(&status("1", "main", Branch::More, Placement::SameTab)),
-            "  │        main"
+            "  │      main"
         );
         assert_eq!(
             row_text(&status("1", "main", Branch::Last, Placement::SameTab)),
-            "           main"
+            "         main"
         );
     }
 
@@ -1424,7 +1427,7 @@ mod tests {
             Placement::SameTab,
         ));
         let buf = drawn(&row, 24, false);
-        assert_eq!(text(&buf, 0), "  │        a-very-long… ");
+        assert_eq!(text(&buf, 0), "  │      a-very-long-b… ");
     }
 
     #[test]
@@ -1616,7 +1619,7 @@ mod tests {
             20,
             false,
         );
-        assert_eq!(text(&pane, 0), "  └─ 0: \u{f489}  some ra… ");
+        assert_eq!(text(&pane, 0), "  └─ 0:\u{f489} some rath… ");
     }
 
     #[test]
