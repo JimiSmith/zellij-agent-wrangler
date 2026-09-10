@@ -24,6 +24,8 @@ use ratatui_core::layout::Rect;
 use ratatui_core::style::{Color, Modifier, Style};
 use ratatui_core::text::{Line, Span};
 use ratatui_core::widgets::Widget;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use agent_wrangler_core::agent::Turn;
 
@@ -280,18 +282,49 @@ pub const DASHBOARD_MARKER_INSET: usize = 1;
 /// lose the tail of one cell rather than the columns at its right edge.
 /// [`elide`] cuts a whole line and stays the last resort.
 ///
-/// Columns count as characters, which is the measure the table is composed
-/// with.
+/// Columns are terminal display cells, measured by [`display_width`].
+/// A cut preserves extended graphemes and reserves the marker's cell width.
 pub fn cut_to_columns(text: &str, columns: usize) -> String {
-    if text.chars().count() <= columns {
+    if columns == 0 {
+        return String::new();
+    }
+    if display_width(text) <= columns {
         return text.to_string();
     }
-    let Some(room) = columns.checked_sub(1) else {
+    let marker = ELLIPSIS.to_string();
+    let Some(room) = columns.checked_sub(display_width(&marker)) else {
         return String::new();
     };
-    let mut cut: String = text.chars().take(room).collect();
-    cut.push(ELLIPSIS);
+    let mut cut = prefix_in_columns(text, room).to_string();
+    cut.push_str(&marker);
     cut
+}
+
+/// Terminal cells used by complete extended graphemes, as in ratatui's buffer.
+/// Unicode ambiguous-width characters use the non-CJK width. CJK characters
+/// still use two cells. Emoji width follows unicode-width, not the host font.
+/// Control graphemes and zero-width graphemes spend no cells, as in set_stringn.
+/// Dashboard builders must use this measure for every text-derived column.
+pub fn display_width(text: &str) -> usize {
+    text.graphemes(true)
+        .filter(|grapheme| !grapheme.contains(char::is_control))
+        .map(UnicodeWidthStr::width)
+        .sum()
+}
+
+/// The longest complete-grapheme prefix that fits. Never skip a wide grapheme
+/// to include a later narrow one. Zero-cell graphemes do not spend the budget.
+fn prefix_in_columns(text: &str, mut columns: usize) -> &str {
+    let mut end = 0;
+    for (at, grapheme) in text.grapheme_indices(true) {
+        let width = display_width(grapheme);
+        if width > columns {
+            break;
+        }
+        columns -= width;
+        end = at + grapheme.len();
+    }
+    &text[..end]
 }
 
 /// One piece of a row.
@@ -317,24 +350,24 @@ enum Field {
 }
 
 impl Field {
-    /// The columns this piece takes on the row. Every glyph the module draws is
-    /// one column wide, so characters count as columns.
+    /// The display cells this piece takes on the row.
     fn columns(&self) -> usize {
         match self {
             Field::Gutter(_) | Field::Icon { .. } => 1,
-            Field::Text(text) | Field::Stem(text) => text.chars().count(),
-            Field::Run(run) => run.text.chars().count(),
-            Field::Status { text, .. } => text.chars().count(),
+            Field::Text(text) | Field::Stem(text) => display_width(text),
+            Field::Run(run) => display_width(&run.text),
+            Field::Status { text, .. } => display_width(text),
         }
     }
 }
 
-/// The text of one cell, padded to the columns of that cell.
+/// The text of one cell, clipped and padded to exactly its display-cell width.
 fn padded(cell: &TableCell) -> String {
-    let room = cell.width.saturating_sub(cell.text.chars().count());
+    let text = cut_to_columns(&cell.text, cell.width);
+    let room = cell.width.saturating_sub(display_width(&text));
     match cell.alignment {
-        CellAlignment::Left => format!("{}{:room$}", cell.text, ""),
-        CellAlignment::Right => format!("{:room$}{}", "", cell.text),
+        CellAlignment::Left => format!("{text}{:room$}", ""),
+        CellAlignment::Right => format!("{:room$}{text}", ""),
     }
 }
 
@@ -387,7 +420,7 @@ fn child_head(position: Branch, index: &str) -> String {
 /// it describes. Both rows read the column from here, so the two cannot drift
 /// apart.
 fn child_name_column(position: Branch, index: &str) -> usize {
-    GUTTER_COLUMNS + child_head(position, index).chars().count() + ICON_AND_GAP
+    GUTTER_COLUMNS + display_width(&child_head(position, index)) + ICON_AND_GAP
 }
 
 /// The pieces of the status row under an agent. The row draws the gutter, then
@@ -399,7 +432,7 @@ fn child_name_column(position: Branch, index: &str) -> usize {
 fn status_parts(placement: Placement, position: Branch, index: &str, text: &str) -> Parts {
     let lead = format!(" {}", continuation(position));
     let indent =
-        child_name_column(position, index).saturating_sub(GUTTER_COLUMNS + lead.chars().count());
+        child_name_column(position, index).saturating_sub(GUTTER_COLUMNS + display_width(&lead));
     vec![
         Field::Gutter(Gutter::of(placement)),
         Field::Text(format!("{lead}{:indent$}{text}", "")),
@@ -815,35 +848,51 @@ fn selection() -> Style {
 /// field rather than the column after it. The column kept for the turn-state
 /// marker therefore stays clear, whatever a name does.
 ///
-/// The cut goes span by span, so the styling survives it. The ellipsis draws in
-/// the style of the span the cut fell in, because it stands for the text it
-/// replaced. A field too narrow to hold even the tree in front of a name cuts
-/// into the tree instead. That is the same order the width takes them away in.
-///
-/// Columns count as characters, which is the measure the tree in front of a name
-/// is composed with.
-fn elide(line: Line<'static>, field: usize) -> Line<'static> {
-    let drawn: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-    if drawn <= field {
-        return line;
-    }
-    let Some(mut room) = field.checked_sub(1) else {
-        return Line::default();
+/// Graphemes can cross input span boundaries. Each complete grapheme takes the
+/// style of its first byte, including on exact-fit lines, so the buffer cannot
+/// split a combining or emoji sequence. Other span styles remain unchanged.
+/// The ellipsis takes the style at the cut, including the preceding span when
+/// its last grapheme fills the available text budget (the ASCII policy).
+pub(crate) fn elide(mut line: Line<'_>, field: usize) -> Line<'_> {
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    let marker = ELLIPSIS.to_string();
+    let clipped = display_width(&text) > field;
+    let room = if clipped {
+        field.checked_sub(display_width(&marker))
+    } else {
+        Some(field)
     };
-    let mut kept: Vec<Span<'static>> = Vec::new();
-    for span in line.spans {
-        let head: String = span.content.chars().take(room).collect();
-        room -= head.chars().count();
-        // The room is certain to run out inside a span. The line is longer than
-        // the field, and the field is one column wider than the room its text
-        // was given.
-        if room == 0 {
-            kept.push(Span::styled(format!("{head}{ELLIPSIS}"), span.style));
+    let Some(mut room) = room.filter(|_| field != 0) else {
+        line.spans.clear();
+        return line;
+    };
+    let mut kept = Vec::new();
+    let mut span_index = 0;
+    let mut span_end = line.spans.first().map_or(0, |span| span.content.len());
+    for (at, grapheme) in text.grapheme_indices(true) {
+        while at >= span_end && span_index + 1 < line.spans.len() {
+            span_index += 1;
+            span_end += line.spans[span_index].content.len();
+        }
+        let style = line.spans[span_index].style;
+        let width = display_width(grapheme);
+        if width > room {
+            kept.push(Span::styled(marker.clone(), style));
             break;
         }
-        kept.push(Span::styled(head, span.style));
+        kept.push(Span::styled(grapheme.to_string(), style));
+        room -= width;
+        if clipped && room == 0 {
+            kept.push(Span::styled(marker.clone(), style));
+            break;
+        }
     }
-    Line::from(kept)
+    line.spans = kept;
+    line
 }
 
 /// The columns that a row keeps clear at the right edge of the pane, after its
@@ -887,6 +936,9 @@ impl Sidebar<'_> {
     /// The cells of one row: the text fitted to everything but the last column,
     /// then the marker in the column kept back for it.
     fn draw(&self, row: &Row, area: Rect, buf: &mut Buffer) {
+        if area.is_empty() {
+            return;
+        }
         // The marker takes one column, and the text takes every column before
         // it. One number therefore says both where the marker goes and how much
         // room the text has.
@@ -962,25 +1014,51 @@ impl Widget for Sidebar<'_> {
 
 /// `text` wrapped to `field` columns. The break falls on whitespace where a word
 /// fits, and inside a word that is longer than the field.
+/// Breaks preserve complete graphemes. A grapheme wider than the entire field
+/// becomes an ellipsis on its own line. A zero-cell field returns no lines.
 pub fn wrap(text: &str, field: usize) -> Vec<String> {
+    if field == 0 {
+        return Vec::new();
+    }
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
-    for word in text.split_whitespace() {
+    // A space with a combining mark is one grapheme, not a word separator.
+    let mut words = Vec::new();
+    let mut start = 0;
+    for (at, grapheme) in text.grapheme_indices(true) {
+        if grapheme.chars().all(char::is_whitespace) {
+            if start < at {
+                words.push(&text[start..at]);
+            }
+            start = at + grapheme.len();
+        }
+    }
+    if start < text.len() {
+        words.push(&text[start..]);
+    }
+    for word in words {
         let mut word = word.to_string();
-        while word.chars().count() > field {
+        while display_width(&word) > field {
             if !current.is_empty() {
                 lines.push(std::mem::take(&mut current));
             }
-            let head: String = word.chars().take(field).collect();
-            word = word.chars().skip(field).collect();
-            lines.push(head);
+            let head = prefix_in_columns(&word, field);
+            let consumed = if head.is_empty() {
+                let grapheme = word.graphemes(true).next().unwrap();
+                lines.push(cut_to_columns(grapheme, field));
+                grapheme.len()
+            } else {
+                lines.push(head.to_string());
+                head.len()
+            };
+            word = word[consumed..].to_string();
         }
         let joined = if current.is_empty() {
             word.clone()
         } else {
             format!("{current} {word}")
         };
-        if joined.chars().count() > field {
+        if display_width(&joined) > field {
             lines.push(std::mem::take(&mut current));
             current = word;
         } else {
@@ -1000,6 +1078,123 @@ mod tests {
     use agent_wrangler_core::agent::SessionId;
 
     use crate::model::Indicator;
+
+    #[test]
+    fn cutting_uses_cells_and_keeps_complete_graphemes() {
+        for (input, width, expected) in [
+            ("東京", 2, "…"),
+            ("東京", 3, "東…"),
+            ("東京", 4, "東京"),
+            ("e\u{301}xy", 2, "e\u{301}…"),
+            ("👩‍💻xy", 3, "👩‍💻…"),
+            ("❤️x", 2, "…"),
+            ("🇳🇱x", 2, "…"),
+            ("👍🏽x", 3, "👍🏽x"),
+            ("東", 0, ""),
+            ("東", 1, "…"),
+        ] {
+            assert_eq!(cut_to_columns(input, width), expected, "{input:?}/{width}");
+        }
+    }
+
+    #[test]
+    fn field_measurement_and_padding_use_cells() {
+        for text in ["東京", "e\u{301}", "👩‍💻", "❤️", "ascii"] {
+            let width = display_width(text);
+            assert_eq!(Field::Text(text.into()).columns(), width);
+            assert_eq!(Field::Stem(text.into()).columns(), width);
+            assert_eq!(Field::Run(TextRun::plain(text)).columns(), width);
+            assert_eq!(
+                Field::Status {
+                    text: text.into(),
+                    turn: Turn::Idle
+                }
+                .columns(),
+                width
+            );
+            assert_eq!(padded(&cell(text, width + 1)), format!("{text} "));
+            let right = TableCell {
+                alignment: CellAlignment::Right,
+                ..cell(text, width + 1)
+            };
+            assert_eq!(padded(&right), format!(" {text}"));
+        }
+        assert_eq!(padded(&cell("東京", 3)), "東…");
+        assert_eq!(padded(&cell("東京", 2)), "… ");
+        assert_eq!(padded(&cell("東京", 0)), "");
+        assert_eq!(child_name_column(Branch::Last, "東"), 12);
+    }
+
+    #[test]
+    fn line_elision_preserves_graphemes_even_across_styles() {
+        for (input, width, expected) in [
+            ("東京", 2, "…"),
+            ("東京", 4, "東京"),
+            ("e\u{301}xy", 2, "e\u{301}…"),
+            ("👩‍💻xy", 3, "👩‍💻…"),
+            ("❤️x", 1, "…"),
+            ("東", 0, ""),
+        ] {
+            let fitted = elide(Line::raw(input), width);
+            assert_eq!(fitted.to_string(), expected);
+            assert!(fitted.width() <= width);
+        }
+        let red = Style::new().fg(Color::Red);
+        let blue = Style::new().fg(Color::Blue);
+        for width in [2, 3] {
+            let line = Line::from(vec![Span::styled("👩", red), Span::styled("‍💻x", blue)]);
+            let fitted = elide(line, width);
+            assert!(fitted.width() <= width);
+            if width == 3 {
+                let mut buffer = Buffer::empty(Rect::new(0, 0, 3, 1));
+                buffer.set_line(0, 0, &fitted, 3);
+                assert_eq!(buffer[(0, 0)].symbol(), "👩‍💻");
+                assert_eq!(buffer[(0, 0)].fg, Color::Red);
+                assert_eq!(buffer[(2, 0)].symbol(), "x");
+                assert_eq!(buffer[(2, 0)].fg, Color::Blue);
+            } else {
+                assert_eq!(fitted.to_string(), "…");
+            }
+        }
+    }
+
+    #[test]
+    fn wrapping_uses_cells_without_splitting_graphemes() {
+        assert_eq!(wrap("東京大阪", 4), vec!["東京", "大阪"]);
+        assert_eq!(wrap("e\u{301}xy", 2), vec!["e\u{301}x", "y"]);
+        assert_eq!(wrap("👩‍💻xy", 2), vec!["👩‍💻", "xy"]);
+        assert_eq!(wrap("東a❤️", 1), vec!["…", "a", "…"]);
+        assert!(wrap("東京 ascii", 0).is_empty());
+        assert_eq!(wrap("東 京", 5), vec!["東 京"]);
+        assert_eq!(wrap("a \u{301}b", 2), vec!["a \u{301}", "b"]);
+    }
+
+    #[test]
+    fn control_and_zero_width_graphemes_follow_the_buffer_policy() {
+        for input in ["a\tb", "a\u{7}b", "a\r\nb", "\u{301}", "\u{200b}"] {
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 1));
+            let (end, _) = buffer.set_stringn(0, 0, input, 20, Style::new());
+            assert_eq!(display_width(input), usize::from(end), "{input:?}");
+        }
+        assert_eq!(cut_to_columns("\u{301}", 0), "");
+        assert_eq!(cut_to_columns("\u{301}", 1), "\u{301}");
+        assert_eq!(prefix_in_columns("e\u{301}東", 1), "e\u{301}");
+        assert_eq!(prefix_in_columns("東a", 1), "");
+        assert_eq!(display_width("e\u{301}東👩‍💻"), 5);
+    }
+
+    #[test]
+    fn zero_width_area_does_not_draw_into_neighboring_cells() {
+        let row = Row::new(tab("1", "東", Placement::SameTab)).with_indicator(Indicator::Attention);
+        let mut buffer =
+            Buffer::filled(Rect::new(0, 0, 5, 1), ratatui_core::buffer::Cell::new("x"));
+        Sidebar {
+            lines: &[row],
+            selected: None,
+        }
+        .render(Rect::new(2, 0, 0, 1), &mut buffer);
+        assert_eq!(text(&buffer, 0), "xxxxx");
+    }
 
     fn tab(index: &str, name: &str, placement: Placement) -> RowContent {
         RowContent::Tab {
@@ -1128,9 +1323,8 @@ mod tests {
 
     #[test]
     fn an_icon_takes_the_one_column_it_is_drawn_as() {
-        // The tree is composed with a count of characters and drawn with a
-        // measure of columns. The two agree only while these glyphs measure one
-        // column. A glyph of two columns takes the cell after it and shifts
+        // The fixed icon budget requires these glyphs to measure one column.
+        // A glyph of two columns takes the cell after it and shifts
         // every name in the pane one place right.
         for (content, icon) in [
             (
@@ -1175,7 +1369,7 @@ mod tests {
     /// The column that `needle` starts in, counted the way the drawing counts.
     /// A byte offset is not a column: the kind icons take four bytes each.
     fn column_of(line: &str, needle: &str) -> Option<usize> {
-        line.find(needle).map(|byte| line[..byte].chars().count())
+        line.find(needle).map(|byte| display_width(&line[..byte]))
     }
 
     #[test]
@@ -1508,6 +1702,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn narrow_unicode_dashboard_cells_preserve_neighbor_values() {
+        for (name, width, expected) in [
+            ("AB", 0, vec![]),
+            ("AB", 1, vec!["…"]),
+            ("A\t\u{7}B", 2, vec!["A", "B"]),
+            ("界", 1, vec!["…"]),
+            ("界", 2, vec!["界", " "]),
+            ("界X", 2, vec!["…", " "]),
+            ("e\u{301}", 1, vec!["e\u{301}"]),
+            ("e\u{301}X", 1, vec!["…"]),
+            ("✈️", 2, vec!["✈️", " "]),
+            ("👩‍💻X", 2, vec!["…", " "]),
+            ("👩‍💻X", 3, vec!["👩‍💻", " ", "X"]),
+        ] {
+            let row = Row::new(dashboard_agent(
+                name,
+                width,
+                Turn::Working,
+                Placement::SameTab,
+                None,
+            ));
+            let buffer = drawn(&row, 50, true);
+            for (offset, symbol) in expected.iter().enumerate() {
+                assert_eq!(
+                    buffer[((DASHBOARD_NAME_COLUMN + offset) as u16, 0)].symbol(),
+                    *symbol,
+                    "{name:?} width={width}"
+                );
+            }
+            let next = DASHBOARD_NAME_COLUMN + width + DASHBOARD_CELL_GAP;
+            for (offset, symbol) in "1 wrangler".chars().enumerate() {
+                assert_eq!(
+                    buffer[((next + offset) as u16, 0)].symbol(),
+                    symbol.to_string(),
+                    "neighbor {name:?} width={width}"
+                );
+            }
+        }
+    }
+
     /// One agent row of a group, drawn at the depth that `stem` says.
     fn nested_agent(name: &str, width: usize, stem: Vec<Branch>) -> RowContent {
         match dashboard_agent(name, width, Turn::Idle, Placement::SameTab, None) {
@@ -1589,8 +1824,7 @@ mod tests {
         // The two rows therefore start every column in the same place, and a
         // wider AGENT column moves both together.
         //
-        // Every cell here holds text that fits. The builder guarantees that,
-        // because the drawing pads a cell and never shortens one.
+        // Every cell here holds text that fits, so the drawing only pads it.
         for width in [5usize, 8, 20] {
             let heading = RowContent::DashboardHeading {
                 status: cell("STATUS", STATUS_COLUMNS),
@@ -1620,10 +1854,8 @@ mod tests {
     }
 
     #[test]
-    fn a_dashboard_row_pads_a_short_cell_and_never_shortens_a_long_one() {
-        // The drawing pads and nothing else. A cell arrives already fitted to
-        // its columns. A value that overflows one here pushes every column
-        // after it out of place.
+    fn a_dashboard_row_pads_a_short_cell() {
+        // Padding keeps the next column at its allocated position.
         assert_eq!(
             row_text(&dashboard_agent(
                 "docs",

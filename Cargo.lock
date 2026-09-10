@@ -53,6 +53,8 @@ dependencies = [
  "ratatui-core",
  "tui-markdown",
  "tui-scrollview",
+ "unicode-segmentation",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

@@ -134,13 +134,19 @@ fn buffer_to_ansi(buffer: &Buffer) -> String {
             out.push_str("\r\n");
         }
         let mut standing = PLAIN;
+        let mut covered_columns = 0;
         for x in area.left()..area.right() {
+            // Ratatui resets wide-glyph continuation cells to spaces. Only
+            // coordinates covered by the preceding glyph must be skipped.
+            if covered_columns > 0 {
+                covered_columns -= 1;
+                continue;
+            }
             let cell = &buffer[(x, y)];
-            // The cells after the first of a wide glyph hold nothing. A print
-            // of those cells pushes the rest of the row right.
             if cell.symbol().is_empty() {
                 continue;
             }
+            covered_columns = crate::render::display_width(cell.symbol()).saturating_sub(1);
             let attrs = Attrs::of(cell);
             if attrs != standing {
                 if standing != PLAIN {
@@ -257,6 +263,110 @@ mod tests {
             .iter()
             .map(|row| row.trim().to_string())
             .collect()
+    }
+
+    // Inspect the emitted stream, not Buffer's continuation placeholders.
+    // This models non-CJK grapheme advances without terminal auto-wrap.
+    fn stream_column(row: &str, symbol: &str) -> usize {
+        use unicode_segmentation::UnicodeSegmentation;
+        use unicode_width::UnicodeWidthStr;
+
+        let mut column = 0;
+        for grapheme in row.graphemes(true) {
+            if grapheme == symbol {
+                return column;
+            }
+            column += UnicodeWidthStr::width(grapheme);
+        }
+        panic!("missing {symbol:?} in {row:?}");
+    }
+
+    #[test]
+    fn stream_cjk_keeps_the_ascii_sentinel_at_its_column() {
+        let mut buf = buffer(4, 1);
+        buf.set_string(0, 0, "界X", Style::new());
+        assert_eq!(buf[(1, 0)].symbol(), " ");
+        let rows = drawn_rows(&buffer_to_ansi(&buf));
+        assert_eq!(stream_column(&rows[0], "X"), 2);
+        assert_eq!(rows[0], "界X ");
+    }
+
+    #[test]
+    fn stream_graphemes_preserve_sentinel_and_real_space_columns() {
+        for (text, width) in [
+            ("ab", 2),
+            ("界", 2),
+            ("界語", 4),
+            ("e\u{301}", 1),
+            ("✈\u{fe0f}", 2),
+            ("👩\u{200d}💻", 2),
+            ("👨\u{200d}👩\u{200d}👧\u{200d}👦", 2),
+            ("🇳🇱", 2),
+            ("👍🏽", 2),
+            ("1\u{fe0f}\u{20e3}", 2),
+            ("·", 1),
+        ] {
+            let mut buf = buffer(12, 1);
+            buf.set_string(0, 0, format!(" {text} X Y"), Style::new());
+            let rows = drawn_rows(&buffer_to_ansi(&buf));
+            let row = &rows[0];
+            assert_eq!(stream_column(row, "X"), width + 2, "{text:?}");
+            assert_eq!(stream_column(row, "Y"), width + 4, "{text:?}");
+            assert_eq!(
+                row,
+                &format!(" {text} X Y{}", " ".repeat(12 - width - 5)),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_styles_change_at_visible_coordinates_not_continuations() {
+        let mut buf = buffer(7, 1);
+        buf.set_string(0, 0, "界", Style::new().fg(Color::Red));
+        // The continuation has a different style but is hidden by the glyph.
+        buf[(1, 0)].set_style(Style::new().bg(Color::Blue));
+        buf.set_string(2, 0, " ", Style::new().bg(Color::Green));
+        buf.set_string(3, 0, "X", Style::new().add_modifier(Modifier::BOLD));
+        buf.set_string(4, 0, "👩\u{200d}💻", Style::new().fg(Color::Cyan));
+        buf.set_string(6, 0, "Y", Style::new());
+        let stream = buffer_to_ansi(&buf);
+        assert_eq!(
+            stream,
+            "\u{1b}[31m界\u{1b}[0m\u{1b}[42m \u{1b}[0m\u{1b}[1mX\u{1b}[0m\u{1b}[36m👩\u{200d}💻\u{1b}[0mY"
+        );
+        let rows = drawn_rows(&stream);
+        assert_eq!(stream_column(&rows[0], "X"), 3);
+        assert_eq!(stream_column(&rows[0], "Y"), 6);
+    }
+
+    #[test]
+    fn stream_offset_rows_reset_columns_and_styles_after_exact_fit_wide_glyphs() {
+        let mut buf = Buffer::empty(Rect::new(9, 7, 5, 3));
+        buf.set_string(9, 7, "界X界", Style::new().fg(Color::Red));
+        buf.set_string(9, 8, "Y e\u{301}Z", Style::new());
+        buf.set_string(9, 9, "👩\u{200d}💻 W", Style::new());
+        let stream = buffer_to_ansi(&buf);
+        assert_eq!(
+            stream,
+            "\u{1b}[31m界X界\u{1b}[0m\r\nY e\u{301}Z \r\n👩\u{200d}💻 W "
+        );
+        let rows = drawn_rows(&stream);
+        assert_eq!(rows.len(), 3);
+        for (row, sentinel, column) in [(0, "X", 2), (1, "Y", 0), (1, "Z", 3), (2, "W", 3)] {
+            assert_eq!(stream_column(&rows[row], sentinel), column);
+        }
+    }
+
+    #[test]
+    fn stream_ascii_controls_are_discarded_by_buffer_before_serialization() {
+        let mut buf = buffer(8, 1);
+        buf.set_string(0, 0, "A\tB\u{7}\r\nC\u{1b}\u{7f} X", Style::new());
+        let stream = buffer_to_ansi(&buf);
+        assert_eq!(stream, "ABC X   ");
+        assert_eq!(stream_column(&stream, "B"), 1);
+        assert_eq!(stream_column(&stream, "C"), 2);
+        assert_eq!(stream_column(&stream, "X"), 4);
     }
 
     #[test]

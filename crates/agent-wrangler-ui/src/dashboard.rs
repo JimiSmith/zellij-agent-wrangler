@@ -26,7 +26,8 @@ use crate::model::{
 };
 use crate::options::DrawingOptions;
 use crate::render::{
-    cut_to_columns, DASHBOARD_CELL_GAP, DASHBOARD_NAME_COLUMN, PREVIEW_TEXT_COLUMN, STATUS_COLUMNS,
+    cut_to_columns, display_width, DASHBOARD_CELL_GAP, DASHBOARD_NAME_COLUMN, PREVIEW_TEXT_COLUMN,
+    STATUS_COLUMNS,
 };
 use crate::tree::{pane_placement, Pane, Tab};
 
@@ -273,11 +274,12 @@ fn walk_group<'a>(
 
 /// The columns that one table column takes: the widest of its heading and its
 /// values, held to the cap that the column carries.
+/// Ratatui measures these widths in terminal cells, not Unicode scalar values.
 fn column_width(column: Column, places: &[AgentPlace<'_>]) -> usize {
     places
         .iter()
-        .map(|place| column.spell(place).chars().count())
-        .chain([column.heading().chars().count()])
+        .map(|place| display_width(&column.spell(place)))
+        .chain([display_width(column.heading())])
         .max()
         .unwrap_or(0)
         .min(column.widest())
@@ -628,6 +630,117 @@ mod tests {
         )
     }
 
+    #[test]
+    fn unicode_dashboard_cells_keep_their_buffer_coordinates() {
+        use crate::render::Sidebar;
+        use ratatui_core::{buffer::Buffer, layout::Rect, widgets::Widget};
+
+        // Widths are explicit backend expectations, not the production helper.
+        for width in [NARROWEST, 40, 70, WIDE] {
+            for (glyph, cells) in [("A", 1), ("界", 2), ("e\u{301}", 1), ("✈️", 2), ("👩‍💻", 2)]
+            {
+                let build = |title: &str| {
+                    dashboard(
+                        &[tab(
+                            0,
+                            "workspace",
+                            true,
+                            vec![pane(1, "pane", true, vec![working("one", title)])],
+                        )],
+                        width,
+                    )
+                };
+                let baseline = build("ASCII");
+                let y = baseline
+                    .iter()
+                    .position(|row| matches!(row.content, RowContent::DashboardAgent { .. }))
+                    .unwrap();
+                let RowContent::DashboardAgent { name, .. } = &baseline[y].content else {
+                    unreachable!()
+                };
+                let budget = name.width;
+                for clipped in [false, true] {
+                    let repeats = if clipped { budget + 1 } else { budget / cells };
+                    let title = format!(
+                        "{}{}",
+                        glyph.repeat(repeats),
+                        if !clipped && budget % cells == 1 {
+                            "X"
+                        } else {
+                            ""
+                        }
+                    );
+                    let rows = build(&title);
+                    let area = Rect::new(1, 1, width as u16, rows.len() as u16);
+                    let mut buffer =
+                        Buffer::empty(Rect::new(0, 0, area.width + 2, area.height + 2));
+                    for cell in &mut buffer.content {
+                        cell.set_symbol("#");
+                    }
+                    Sidebar {
+                        lines: &rows,
+                        selected: rows[y].key.as_ref(),
+                    }
+                    .render(area, &mut buffer);
+                    let mut ascii = Buffer::empty(buffer.area);
+                    Sidebar {
+                        lines: &baseline,
+                        selected: baseline[y].key.as_ref(),
+                    }
+                    .render(area, &mut ascii);
+                    let start = 1 + DASHBOARD_NAME_COLUMN as u16;
+                    let row_y = 1 + y as u16;
+                    let kept = if clipped {
+                        (budget - 1) / cells
+                    } else {
+                        repeats
+                    };
+                    let visible = if glyph.starts_with('A') { "A" } else { glyph };
+                    let mut x = start;
+                    for _ in 0..kept {
+                        assert_eq!(
+                            buffer[(x, row_y)].symbol(),
+                            visible,
+                            "width={width} title={title:?}"
+                        );
+                        for continuation in 1..cells {
+                            assert_eq!(buffer[(x + continuation as u16, row_y)].symbol(), " ");
+                        }
+                        x += cells as u16;
+                    }
+                    if clipped {
+                        assert_eq!(buffer[(x, row_y)].symbol(), "…");
+                        x += 1;
+                    } else if budget % cells == 1 {
+                        assert_eq!(buffer[(x, row_y)].symbol(), "X");
+                        x += 1;
+                    }
+                    for column in x..start + budget as u16 {
+                        assert_eq!(buffer[(column, row_y)].symbol(), " ");
+                    }
+                    // STATUS and every following value retain the ASCII row's cells and styles.
+                    for column in 1..area.right() {
+                        if column < start || column >= start + budget as u16 {
+                            assert_eq!(
+                                buffer[(column, row_y)],
+                                ascii[(column, row_y)],
+                                "neighbor x={column} width={width} title={title:?}"
+                            );
+                        }
+                    }
+                    for column in 0..buffer.area.width {
+                        assert_eq!(buffer[(column, 0)].symbol(), "#");
+                        assert_eq!(buffer[(column, area.bottom())].symbol(), "#");
+                    }
+                    for row in 0..buffer.area.height {
+                        assert_eq!(buffer[(0, row)].symbol(), "#");
+                        assert_eq!(buffer[(area.right(), row)].symbol(), "#");
+                    }
+                }
+            }
+        }
+    }
+
     /// The AGENT cell of every agent row, with the padding dropped.
     fn names(rows: &[Row]) -> Vec<String> {
         rows.iter()
@@ -724,6 +837,48 @@ mod tests {
             names(&rows),
             ["migrate the runner", "the zellij port", "docs"]
         );
+    }
+
+    #[test]
+    fn optional_columns_are_allocated_in_terminal_cells() {
+        for (text, expected) in [
+            ("abcdef", 6),
+            ("中文中文", 8),
+            ("e\u{301}".repeat(6).as_str(), 6),
+            ("👩‍💻".repeat(3).as_str(), 6),
+            ("✈️".repeat(3).as_str(), 6),
+            ("中".repeat(20).as_str(), 16),
+        ] {
+            let tabs = [tab(
+                0,
+                "tab",
+                true,
+                vec![pane(1, text, true, vec![agent("one", "name")])],
+            )];
+            let places = groups_of_pane(&tabs[0], &tabs[0].panes[0])
+                .pop()
+                .unwrap()
+                .rows;
+            assert_eq!(column_width(Column::Pane, &places), expected, "{text:?}");
+            let (columns, name) = fit(&places, WIDE).unwrap();
+            assert_eq!(
+                columns
+                    .iter()
+                    .find(|(column, _)| *column == Column::Pane)
+                    .unwrap()
+                    .1,
+                expected
+            );
+            assert_eq!(
+                DASHBOARD_NAME_COLUMN
+                    + name
+                    + columns
+                        .iter()
+                        .map(|(_, width)| width + DASHBOARD_CELL_GAP)
+                        .sum::<usize>(),
+                WIDE
+            );
+        }
     }
 
     #[test]
