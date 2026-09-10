@@ -22,6 +22,8 @@ agent-wrangler-core = { path = "../agent-wrangler-core", default-features = fals
 # clips that buffer to the pane. It takes the same `ratatui-core` 0.1 and it
 # brings `ratatui-widgets`. It brings no backend and no terminal.
 tui-scrollview = "0.6"
+unicode-segmentation = "1.13"
+unicode-width = "0.2.2"
 # The markdown. An agent answers in markdown, so the message under an open row
 # arrives with headings, lists, fences and inline emphasis in it. This parses
 # that and returns the same `ratatui-core` 0.1 text that the rows are drawn
