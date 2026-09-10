@@ -105,7 +105,8 @@ pub enum UserAction {
     /// Open the block under the selected row, or close it when it is open.
     OpenOrClosePreview,
     Quit,
-    Click(usize),
+    /// A zero-based screen row and column.
+    Click(usize, usize),
 }
 
 /// A host-neutral operation that one item in a rendered sidebar offers.

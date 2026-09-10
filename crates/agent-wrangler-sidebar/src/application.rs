@@ -465,15 +465,33 @@ impl Application {
             UserAction::Activate => self.activate(&mut decision),
             UserAction::OpenOrClosePreview => self.open_or_close_preview(&mut decision),
             UserAction::Quit => decision.effects.push(Effect::Broadcast(Broadcast::Off)),
-            UserAction::Click(line) => {
+            UserAction::Click(line, column) => {
                 let item = self
                     .rendered
                     .as_ref()
                     .and_then(|view| view.item_at(line))
                     .cloned();
                 if let Some(item) = item {
-                    self.select(Some(item.key), &mut decision);
-                    self.activate_action(&item.action, &mut decision);
+                    let disclosure = column
+                        == agent_wrangler_ui::render::DASHBOARD_DISCLOSURE_COLUMN
+                        && self
+                            .rendered
+                            .as_ref()
+                            .and_then(|view| view.frame.lines().get(line + view.offset))
+                            .is_some_and(|row| {
+                                matches!(
+                                    row.content,
+                                    agent_wrangler_ui::model::RowContent::DashboardAgent { .. }
+                                )
+                            });
+                    self.select(Some(item.key.clone()), &mut decision);
+                    if disclosure {
+                        if let RowKey::Agent(session) = &item.key {
+                            self.open_previews.open_or_close(session);
+                        }
+                    } else {
+                        self.activate_action(&item.action, &mut decision);
+                    }
                     decision.request_repaint(true);
                 }
             }
@@ -1587,7 +1605,7 @@ mod tests {
         app.reduce(focus("10", FocusTarget::Sidebar));
         app.render(Rect::new(0, 0, 30, 5));
 
-        let decision = app.reduce(Input::User(UserAction::Click(1)));
+        let decision = app.reduce(Input::User(UserAction::Click(1, 20)));
         assert_eq!(
             decision.effects,
             vec![
@@ -1618,7 +1636,7 @@ mod tests {
 
         let session = RowKey::Agent(SessionId::new("one").unwrap());
         for line in [1, 2] {
-            let decision = app.reduce(Input::User(UserAction::Click(line)));
+            let decision = app.reduce(Input::User(UserAction::Click(line, 20)));
             assert_eq!(
                 decision.effects,
                 vec![
@@ -1665,8 +1683,8 @@ mod tests {
             RowContent::DashboardHeading { .. }
         ));
         assert_eq!(
-            rows[1..3]
-                .iter()
+            rows.iter()
+                .filter(|row| matches!(row.content, RowContent::DashboardAgent { .. }))
                 .map(|row| row.key.clone())
                 .collect::<Vec<Option<RowKey>>>(),
             vec![
@@ -1800,6 +1818,58 @@ mod tests {
     }
 
     #[test]
+    fn disclosure_click_toggles_clicked_agent_without_activating_its_pane() {
+        let mut app = dashboard_with_agents(2);
+        app.render(PANE);
+        let decision = app.reduce(Input::User(UserAction::Click(3, 2)));
+        assert!(app.open_previews.holds(&SessionId::new("a1").unwrap()));
+        assert!(!app.open_previews.holds(&SessionId::new("a0").unwrap()));
+        assert!(!decision
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::FocusPane(_) | Effect::SwitchTab(_))));
+        app.render(PANE);
+        app.reduce(Input::User(UserAction::Click(3, 2)));
+        assert!(!app.open_previews.holds(&SessionId::new("a1").unwrap()));
+        app.render(PANE);
+        let decision = app.reduce(Input::User(UserAction::Click(3, 20)));
+        assert!(decision
+            .effects
+            .contains(&Effect::FocusPane(PaneId::new("%7"))));
+    }
+
+    #[test]
+    fn disclosure_hit_testing_uses_the_scrolled_frame_and_ignores_preview_lines() {
+        let mut app = dashboard_with_agents(6);
+        let short = Rect::new(0, 0, 60, 4);
+        app.render(short);
+        for _ in 0..5 {
+            app.reduce(Input::User(UserAction::Next));
+            app.render(short);
+        }
+        let decision = app.reduce(Input::User(UserAction::Click(0, 2)));
+        let session = SessionId::new("a2").unwrap();
+        assert!(app.open_previews.holds(&session));
+        assert!(!decision
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::FocusPane(_))));
+        let view = app.render(PANE);
+        let preview_line = view
+            .frame
+            .lines()
+            .iter()
+            .position(|row| matches!(row.content, RowContent::PreviewMessage { .. }))
+            .unwrap()
+            - view.offset;
+        let decision = app.reduce(Input::User(UserAction::Click(preview_line, 2)));
+        assert!(app.open_previews.holds(&session));
+        assert!(decision
+            .effects
+            .contains(&Effect::FocusPane(PaneId::new("%7"))));
+    }
+
+    #[test]
     fn one_step_moves_over_a_whole_block() {
         let mut app = dashboard_with_agents(2);
         app.render(PANE);
@@ -1837,7 +1907,7 @@ mod tests {
             Some(RowKey::Agent(SessionId::new("a5").unwrap()))
         );
         // Seven rows, a pane of four, and the last row must be the last drawn.
-        assert_eq!(view.offset, 3);
+        assert_eq!(view.offset, 4);
 
         for _ in 0..5 {
             app.reduce(Input::User(UserAction::Previous));
@@ -1858,7 +1928,7 @@ mod tests {
         let view = app.render(short);
         assert_eq!(view.offset, 0);
         assert!(matches!(
-            view.frame.lines()[2].content,
+            view.frame.lines()[3].content,
             RowContent::PreviewMessage { .. }
         ));
     }
@@ -1873,7 +1943,7 @@ mod tests {
             app.render(short);
         }
         let view = app.render(short);
-        assert_eq!(view.offset, 3);
+        assert_eq!(view.offset, 4);
         // The heading and three agent rows sit above the pane, so the first
         // line of the pane is the fourth row of the frame.
         assert_eq!(
@@ -1956,7 +2026,7 @@ mod tests {
         app.reduce(Input::TabsReported(vec![tab("new-tab", 0)]));
         app.reduce(Input::LayoutReported(layout(0, &[(0, &["new-pane"])])));
         app.reduce(focus("new-tab", FocusTarget::Sidebar));
-        let decision = app.reduce(Input::User(UserAction::Click(1)));
+        let decision = app.reduce(Input::User(UserAction::Click(1, 20)));
 
         assert_eq!(
             decision.effects,
@@ -1978,7 +2048,7 @@ mod tests {
             UserAction::Next,
             UserAction::Previous,
             UserAction::Activate,
-            UserAction::Click(0),
+            UserAction::Click(0, 20),
         ] {
             assert_eq!(app.reduce(Input::User(action)), Decision::default());
         }

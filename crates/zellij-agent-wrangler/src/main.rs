@@ -250,9 +250,9 @@ impl Plugin {
                 BareKey::Char('q') => vec![Input::User(UserAction::Quit)],
                 _ => Vec::new(),
             },
-            Event::Mouse(Mouse::LeftClick(line, _)) => usize::try_from(line)
+            Event::Mouse(Mouse::LeftClick(line, column)) => usize::try_from(line)
                 .ok()
-                .map(|line| Input::User(UserAction::Click(line)))
+                .map(|line| Input::User(UserAction::Click(line, column)))
                 .into_iter()
                 .collect(),
             _ => Vec::new(),

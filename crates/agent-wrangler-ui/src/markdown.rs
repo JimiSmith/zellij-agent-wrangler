@@ -118,6 +118,27 @@ pub fn message_lines(message: &str, field: usize) -> Vec<Vec<TextRun>> {
     lines
 }
 
+/// The parsed message lines, clipped to `field` columns without wrapping.
+/// Blank lines draw nothing. Each clipped line retains its inline emphasis.
+pub fn clipped_message_lines(message: &str, field: usize) -> Vec<Vec<TextRun>> {
+    let options = Options::new(PreviewStyles);
+    tui_markdown::from_str_with_options(message, &options)
+        .lines
+        .iter()
+        .map(|line| characters_of(runs_of(line)))
+        .filter(|characters| drawn(characters))
+        .map(|mut characters| {
+            if characters.len() > field {
+                characters.truncate(field);
+                if let Some((character, _)) = characters.last_mut() {
+                    *character = '…';
+                }
+            }
+            joined(&characters)
+        })
+        .collect()
+}
+
 /// The glyphs that the crate draws the frame of a table with: the top, the rule
 /// under the headings, the foot, and the left edge of a row.
 const TABLE_EDGES: [char; 4] = ['┌', '├', '└', '│'];

@@ -173,15 +173,6 @@ fn open_marker(preview: RowPreview) -> char {
     }
 }
 
-/// The glyph that a line of a preview block draws in the tree column. The last
-/// line of the block closes the tree, and nothing is drawn below it.
-fn preview_glyph(branch: Branch) -> char {
-    match branch {
-        Branch::More => '│',
-        Branch::Last => '└',
-    }
-}
-
 /// The columns that carry the tree down to one dashboard row.
 ///
 /// Every level before the last draws a line where that ancestor has a later
@@ -199,21 +190,6 @@ fn row_stem(stem: &RowStem) -> String {
             (true, Branch::Last) => "└ ",
             (false, Branch::More) => "│ ",
             (false, Branch::Last) => "  ",
-        })
-        .collect()
-}
-
-/// The same columns, under a row rather than at it.
-///
-/// Every level draws a continuation, because a line of a block is not a child of
-/// the row above it. The children of that row hang below the block, and the tree
-/// must reach them.
-fn block_stem(stem: &RowStem) -> String {
-    stem.levels()
-        .iter()
-        .map(|branch| match branch {
-            Branch::More => "│ ",
-            Branch::Last => "  ",
         })
         .collect()
 }
@@ -248,6 +224,9 @@ pub fn notification_body_field(width: usize) -> usize {
 /// space, the open marker, and a space after it.
 const ROW_LEAD_COLUMNS: usize = 4;
 
+/// The zero-based column of the dashboard disclosure marker.
+pub const DASHBOARD_DISCLOSURE_COLUMN: usize = 2;
+
 /// The columns that the STATUS column of the dashboard takes.
 ///
 /// The width is fixed, and the values on screen do not decide it. The column
@@ -265,14 +244,12 @@ pub const STATUS_COLUMNS: usize = 9;
 /// the gap after it, the kind icon and the gap after the icon come before that
 /// column. The builder lays the table out from here, and [`parts`] draws it from
 /// here. The two therefore cannot drift apart.
-pub const DASHBOARD_NAME_COLUMN: usize =
-    ROW_LEAD_COLUMNS + STATUS_COLUMNS + DASHBOARD_CELL_GAP + ICON_AND_GAP;
+pub const DASHBOARD_NAME_COLUMN: usize = ROW_LEAD_COLUMNS + STATUS_COLUMNS + 1 + 2;
 
 /// The column that a line of a preview block starts its text in.
 ///
-/// The tree glyph sits in the column of the kind icon of the row above. The
-/// block then reads as one thing with its row. The text starts one column past
-/// the AGENT cell above it.
+/// The preview text follows the panel border and its inset focus gutter.
+/// It starts one column past a top-level agent name.
 pub const PREVIEW_TEXT_COLUMN: usize = DASHBOARD_NAME_COLUMN + 1;
 
 /// The columns between one cell of a dashboard row and the next.
@@ -429,18 +406,14 @@ fn status_parts(placement: Placement, position: Branch, index: &str, text: &str)
     ]
 }
 
-/// The pieces of one line of the block under a dashboard row: the gutter, the
-/// tree glyph that the block hangs from, and the text.
-///
-/// The line draws no kind icon and no open marker. It describes the row
-/// above rather than pointing at a thing of its own, so it takes no color and
-/// needs nothing to carry one. It keeps the gutter. The block belongs to the
-/// same pane as its row, and the mark must not break between the two.
-fn preview_parts(placement: Placement, stem: &RowStem, branch: Branch, text: &str) -> Parts {
+/// The pieces of a preview line: the panel indent, border, focus gutter and text.
+/// The panel uses one indent at every nesting depth.
+fn preview_parts(placement: Placement, _stem: &RowStem, _branch: Branch, text: &str) -> Parts {
     vec![
-        Field::Run(dim_run(block_stem(stem))),
+        Field::Text("    ".to_string()),
+        Field::Run(dim_run("│".to_string())),
         Field::Gutter(Gutter::of(placement)),
-        Field::Text(format!("{}{text}", preview_head(branch))),
+        Field::Text(format!("           {text}")),
     ]
 }
 
@@ -452,11 +425,7 @@ fn preview_message_parts(
     branch: Branch,
     runs: &[TextRun],
 ) -> Parts {
-    let mut fields = vec![
-        Field::Run(dim_run(block_stem(stem))),
-        Field::Gutter(Gutter::of(placement)),
-        Field::Text(preview_head(branch)),
-    ];
+    let mut fields = preview_parts(placement, stem, branch, "");
     fields.extend(runs.iter().cloned().map(Field::Run));
     fields
 }
@@ -472,20 +441,16 @@ fn dim_run(text: String) -> TextRun {
     }
 }
 
-/// Everything a line of the block draws between its gutter and its text: the
-/// indent and the tree glyph.
-fn preview_head(branch: Branch) -> String {
-    let indent = (DASHBOARD_NAME_COLUMN - ICON_AND_GAP).saturating_sub(GUTTER_COLUMNS);
-    let gap = PREVIEW_TEXT_COLUMN - (DASHBOARD_NAME_COLUMN - ICON_AND_GAP) - 1;
-    format!("{:indent$}{}{:gap$}", "", preview_glyph(branch), "")
-}
-
 /// The pieces one row is drawn as.
 fn parts(content: &RowContent) -> Parts {
     match content {
         // The single leading space is necessary. It aligns the underline.
         RowContent::Header { text } => vec![Field::Text(format!(" {}", text.to_uppercase()))],
         RowContent::Blank => vec![Field::Text(String::new())],
+        RowContent::DashboardGroup { title, count } => vec![Field::Text(format!(
+            "    {} · {count}",
+            title.to_uppercase()
+        ))],
         RowContent::Tab {
             index,
             name,
@@ -537,9 +502,11 @@ fn parts(content: &RowContent) -> Parts {
             let mut fields = vec![
                 Field::Text(format!("{:ROW_LEAD_COLUMNS$}", "")),
                 Field::Text(padded(status)),
-                Field::Text(format!("{:DASHBOARD_CELL_GAP$}", "")),
-                Field::Text(format!("{:ICON_AND_GAP$}", "")),
-                Field::Text(padded(name)),
+                Field::Text(" ".to_string()),
+                Field::Text(padded(&TableCell {
+                    width: name.width + 2,
+                    ..name.clone()
+                })),
             ];
             fields.extend(cell_fields(cells));
             fields
@@ -561,13 +528,13 @@ fn parts(content: &RowContent) -> Parts {
                     text: padded(status),
                     turn: *turn,
                 },
-                Field::Text(format!("{:DASHBOARD_CELL_GAP$}", "")),
+                Field::Text(" ".to_string()),
                 Field::Stem(row_stem(stem)),
                 Field::Icon {
                     glyph: ICON_AGENT,
                     color: *color,
                 },
-                Field::Text(ICON_GAP.to_string()),
+                Field::Text(" ".to_string()),
                 Field::Text(padded(name)),
             ];
             fields.extend(cell_fields(cells));
@@ -700,7 +667,7 @@ pub fn base_style(content: &RowContent) -> Style {
         RowContent::Header { .. } => Style::new()
             .add_modifier(Modifier::BOLD)
             .add_modifier(Modifier::UNDERLINED),
-        RowContent::Blank => Style::new().add_modifier(Modifier::DIM),
+        RowContent::Blank | RowContent::DashboardGroup { .. } => Style::new().add_modifier(Modifier::DIM),
         RowContent::Tab {
             placement, color, ..
         } => own_color(intensity(*placement), *color),
@@ -925,8 +892,16 @@ impl Sidebar<'_> {
         // room the text has.
         let marker = area.width.saturating_sub(1 + marker_inset(&row.content));
         let base = base_style(&row.content);
-        let line = elide(row_line(&row.content), marker as usize);
-        buf.set_line(area.x, area.y, &line, marker);
+        let field = match row.content {
+            RowContent::DashboardAgent { .. }
+            | RowContent::DashboardHeading { .. }
+            | RowContent::PreviewMessage { .. }
+            | RowContent::PreviewTime { .. }
+            | RowContent::PreviewTool { .. } => area.width,
+            _ => marker,
+        };
+        let line = elide(row_line(&row.content), field as usize);
+        buf.set_line(area.x, area.y, &line, field);
         if let Some((glyph, color)) = row.indicator.glyph_and_color() {
             if let Some(cell) = buf.cell_mut((area.x + marker, area.y)) {
                 cell.set_char(glyph).set_style(own_color(base, color));
@@ -935,7 +910,13 @@ impl Sidebar<'_> {
         match row_background(&row.content) {
             // A row with a background of its own keeps it. The selection never
             // reaches such a row, so the background does not have to fight it.
-            Some(color) => buf.set_style(area, Style::new().bg(color)),
+            Some(color) => {
+                let indent = area.width.min(4);
+                buf.set_style(
+                    Rect::new(area.x + indent, area.y, area.width - indent, area.height),
+                    Style::new().bg(color),
+                );
+            }
             None => {
                 if self.is_selected(row) {
                     buf.set_style(area, selection());
@@ -1353,7 +1334,7 @@ mod tests {
             }
             // The kind icon keeps no color of its own. A block of color across
             // a selected row is what the selection is there to stop.
-            let icon = (DASHBOARD_NAME_COLUMN - ICON_AND_GAP) as u16;
+            let icon = (DASHBOARD_NAME_COLUMN - 2) as u16;
             assert_eq!(buf[(icon, 0)].fg, SELECTION_FOREGROUND, "{turn:?}");
         }
     }
@@ -1387,7 +1368,7 @@ mod tests {
         .with_key(RowKey::Agent(SessionId::new("one").unwrap()));
         for selected in [false, true] {
             let buf = drawn(&row, 40, selected);
-            for x in 0..40 {
+            for x in 4..40 {
                 assert_eq!(buf[(x, 0)].bg, PREVIEW_BACKGROUND, "{selected} {x}");
             }
         }
@@ -1569,7 +1550,7 @@ mod tests {
             // The head is the gutter, the open marker and the STATUS cell,
             // with the gaps around them. The stem starts after all of that.
             let head = format!(
-                "{} {} {:STATUS_COLUMNS$}{:DASHBOARD_CELL_GAP$}",
+                "{} {} {:STATUS_COLUMNS$}{} ",
                 Gutter::Elsewhere.glyph(),
                 open_marker(RowPreview::Closed),
                 "working",
@@ -1586,10 +1567,8 @@ mod tests {
     }
 
     #[test]
-    fn a_row_and_its_block_start_their_text_in_the_same_column() {
-        // The block hangs under its row, so the stem of the row reaches the
-        // block. Every level of that stem draws a continuation, because a line
-        // of a block is not a child of the row above it.
+    fn nested_rows_keep_the_preview_panel_at_a_fixed_indent() {
+        // A nested agent keeps its stem; its preview uses the common panel indent.
         let stem = vec![Branch::More, Branch::Last];
         let row = row_text(&nested_agent("scout", 8, stem.clone()));
         let block = row_text(&RowContent::PreviewTime {
@@ -1599,8 +1578,9 @@ mod tests {
             text: "30s ago".to_string(),
         });
         let at = |line: &str, glyph: char| line.chars().position(|c| c == glyph);
-        // The tree glyph of the block sits in the column of the kind icon.
-        assert_eq!(at(&block, '\u{2514}'), at(&row, ICON_AGENT));
+        // The panel border does not move with the agent icon.
+        assert_eq!(at(&block, '│'), Some(4));
+        assert!(at(&row, ICON_AGENT).unwrap() > 4);
     }
 
     #[test]
@@ -1627,7 +1607,7 @@ mod tests {
             );
             for (name, value) in [
                 ("STATUS", "working"),
-                ("AGENT", "docs"),
+                ("AGENT", "\u{f167a}"),
                 ("TAB", "1 wrangler"),
             ] {
                 assert_eq!(
@@ -1652,8 +1632,33 @@ mod tests {
                 Placement::SameTab,
                 None
             )),
-            "  \u{25b8} working    \u{f167a}  docs      1 wrangler"
+            "  \u{25b8} working   \u{f167a} docs      1 wrangler"
         );
+    }
+
+    #[test]
+    fn preview_panel_starts_at_column_four_and_keeps_its_focus_gutter_inside() {
+        let row = Row::new(RowContent::PreviewMessage {
+            placement: Placement::FocusedPane,
+            stem: RowStem::new(vec![Branch::Last]),
+            branch: Branch::Last,
+            runs: vec![TextRun::plain("message")],
+        });
+        let buffer = drawn(&row, 40, true);
+        assert_eq!(buffer[(0, 0)].bg, Color::Reset);
+        assert_eq!(buffer[(3, 0)].bg, Color::Reset);
+        assert_eq!(buffer[(4, 0)].bg, PREVIEW_BACKGROUND);
+        assert_eq!(buffer[(4, 0)].symbol(), "│");
+        assert_eq!(buffer[(5, 0)].symbol(), "▌");
+        assert_eq!(buffer[(5, 0)].fg, GUTTER_COLOR);
+        assert_eq!(buffer[(17, 0)].symbol(), "m");
+    }
+
+    #[test]
+    fn dashboard_uses_the_last_column_for_content() {
+        let content = dashboard_agent("abcdefghijkl", 12, Turn::Working, Placement::SameTab, None);
+        let buffer = drawn(&Row::new(content), 40, false);
+        assert_eq!(buffer[(39, 0)].symbol(), "r");
     }
 
     #[test]
@@ -1667,7 +1672,7 @@ mod tests {
                 alignment: CellAlignment::Right,
             }],
         };
-        assert_eq!(row_text(&row), "    STATUS        AGENT    122k");
+        assert_eq!(row_text(&row), "    STATUS    AGENT      122k");
     }
 
     #[test]
@@ -1710,7 +1715,7 @@ mod tests {
             Some(NamedColor::Cyan),
         );
         let buf = drawn(&Row::new(content), 40, false);
-        let icon = (DASHBOARD_NAME_COLUMN - ICON_AND_GAP) as u16;
+        let icon = (DASHBOARD_NAME_COLUMN - 2) as u16;
         assert_eq!(buf[(icon, 0)].symbol(), ICON_AGENT.to_string());
         assert_eq!(buf[(icon, 0)].fg, Color::Cyan, "the icon carries the color");
         assert_eq!(
@@ -1751,29 +1756,6 @@ mod tests {
         ] {
             let row = dashboard_agent("docs", 8, Turn::Attention, placement, None);
             assert!(row_text(&row).starts_with(gutter), "{placement:?}");
-        }
-    }
-
-    #[test]
-    fn a_dashboard_row_keeps_a_space_on_each_side_of_its_marker() {
-        let row = Row::new(dashboard_agent(
-            "docs",
-            8,
-            Turn::Attention,
-            Placement::SameTab,
-            None,
-        ))
-        .with_key(RowKey::Agent(
-            agent_wrangler_core::agent::SessionId::new("one").unwrap(),
-        ))
-        .with_indicator(Indicator::Attention);
-        let inset = DASHBOARD_MARKER_INSET as u16;
-        for width in [4u16, 12, 40] {
-            let buf = drawn(&row, width, false);
-            assert_eq!(text(&buf, 0).chars().count(), width as usize, "{width}");
-            assert_eq!(buf[(width - 1 - inset, 0)].symbol(), "\u{25cf}", "{width}");
-            // The marker sits inside the pane rather than against its edge.
-            assert_eq!(buf[(width - 1, 0)].symbol(), " ", "{width}");
         }
     }
 

@@ -22,7 +22,7 @@ sh: cargo build -p agent-wrangler
 sh: tests/scripts/make-layout.sh tests/out/preview.kdl off tests/dashboard.kdl
 
 # What the agent last said, with the timestamp that every real record carries.
-# The block draws the date and the minute of it, marked as UTC.
+# The footer draws the hour and minute, marked as UTC.
 #
 # The message is markdown, which is what an agent writes. It holds a heading, a
 # line break, a bold word and a table, so the block below proves that the client
@@ -64,12 +64,11 @@ sleep: 2
 wait: SPYGLASS @ 20
 wait: - the port is done @ 20
 
-# The table keeps the columns that the parser lined up. The padding inside the
-# cells is the proof. A wrap that collapsed it would draw `| core | records |`.
-wait: │ core  │ records │ @ 20
+# The preview keeps four message lines and indicates the rest of the table.
+wait: Crate @ 20
+wait: … more @ 20
 
-wait: 2026-09-01 05:11Z @ 20
-wait: now: Bash(cargo test --workspace) @ 20
+wait: 05:11 UTC · Bash: cargo test --workspace @ 20
 
 # No marker is drawn. Both lines are already on the screen, so a needle that is
 # gone at once is a needle that the sidebar never drew.
@@ -82,6 +81,17 @@ keys: \s
 sleep: 2
 waitgone: - the port is done @ 20
 dump: preview_closed
+
+# The disclosure click opens a preview without leaving the sidebar.
+keys: \e[<0;3;4M\e[<0;3;4m
+wait: SPYGLASS @ 20
+keys: \s
+waitgone: SPYGLASS @ 20
+
+# A click on the rest of the row activates the real shell pane.
+keys: \e[<0;20;4M\e[<0;20;4m
+keys: printf '\nROWCLICK_REACHED_PANE\n'\r
+wait: ROWCLICK_REACHED_PANE @ 20
 
 keys: <C-q>
 sleep: 1

@@ -493,6 +493,11 @@ pub enum RowContent {
     },
     /// The dashboard draws no table, because no agent is running.
     DashboardNoAgents,
+    /// An operational queue label and the number of top-level agents in it.
+    DashboardGroup {
+        title: String,
+        count: usize,
+    },
     /// The dashboard draws no table, because the pane is too narrow for the
     /// AGENT column.
     DashboardPaneTooNarrow,

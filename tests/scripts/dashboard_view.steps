@@ -72,18 +72,20 @@ keys: n
 sleep: 2
 
 # The call comes from the host, because the pane that raises it is now in
-# another tab. The sidebar of this tab draws every agent of the session.
-sh: sh -c 'tests/scripts/raise-call.sh dash-one wrangler-test-dashboard "$(cat tests/out/dashboard-pane.txt)" needsAttention'
+# another tab. Invoke the helper through sh so process discovery skips the
+# short-lived script and keeps the harness as the simulated agent process.
+sh: sh -c 'sh tests/scripts/raise-call.sh dash-one wrangler-test-dashboard "$(cat tests/out/dashboard-pane.txt)" needsAttention'
 
-# The STATUS column says in words what the marker says at the right edge.
-wait: wants you @ 20
+# The queue labels the work that needs attention; STATUS describes the agent.
+wait: NEEDS YOU · 1 @ 20
+wait: needs you @ 20
 dump: dashboard_wants_you
 
 # A hook that fires inside a child of that session. It names the lead in
 # session_id, names the child in agent_id, and names the transcript of the lead
 # and never the file of the child. The daemon composes an id for the child and
 # builds the child's own two files from the path that the hook gave it.
-sh: sh -c 'tests/scripts/raise-call.sh dash-one wrangler-test-dashboard "$(cat tests/out/dashboard-pane.txt)" working probe-one'
+sh: sh -c 'sh tests/scripts/raise-call.sh dash-one wrangler-test-dashboard "$(cat tests/out/dashboard-pane.txt)" working probe-one'
 sleep: 2
 
 # The record of the child names the session that started it. This reads the
@@ -102,7 +104,7 @@ dump: dashboard_child
 # every hook reports the top lead in session_id, and no field in it names the
 # agent in between. The meta file of this child names that agent, and the daemon
 # composes an id that holds the whole chain.
-sh: sh -c 'tests/scripts/raise-call.sh dash-one wrangler-test-dashboard "$(cat tests/out/dashboard-pane.txt)" working probe-two'
+sh: sh -c 'sh tests/scripts/raise-call.sh dash-one wrangler-test-dashboard "$(cat tests/out/dashboard-pane.txt)" working probe-two'
 sleep: 2
 
 # The id is the path, so the record sits two levels down and names the agent
@@ -113,6 +115,19 @@ sh: tests/scripts/expect-lead.sh dash-one.probe-one.probe-two dash-one.probe-one
 # each level of depth.
 wait: @Plan @ 20
 dump: dashboard_grandchild
+
+# A child raises the whole queue while the lead keeps its actual status.
+sh: sh -c 'sh tests/scripts/raise-call.sh dash-one wrangler-test-dashboard "$(cat tests/out/dashboard-pane.txt)" working'
+sh: sh -c 'sh tests/scripts/raise-call.sh dash-one wrangler-test-dashboard "$(cat tests/out/dashboard-pane.txt)" needsAttention probe-one'
+sleep: 2
+wait: NEEDS YOU · 1 @ 20
+wait: needs you @ 20
+dump: dashboard_propagated
+keys: \eh
+sleep: 1
+keys: j
+sleep: 1
+dump: dashboard_selected
 
 keys: <C-q>
 sleep: 1

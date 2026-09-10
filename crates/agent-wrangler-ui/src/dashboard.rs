@@ -19,17 +19,16 @@ use agent_wrangler_core::label::label;
 use agent_wrangler_core::preview::{Preview, ToolCall};
 use agent_wrangler_core::status_line::{short_model_name, short_token_count};
 
-use crate::markdown::message_lines;
+use crate::markdown::clipped_message_lines;
 use crate::model::{
-    Branch, CellAlignment, Indicator, NamedColor, OpenPreviews, Placement, Row, RowContent, RowKey,
+    Branch, CellAlignment, NamedColor, OpenPreviews, Placement, Row, RowContent, RowKey,
     RowPreview, RowStem, TableCell, TextRun,
 };
 use crate::options::DrawingOptions;
 use crate::render::{
-    cut_to_columns, DASHBOARD_CELL_GAP, DASHBOARD_MARKER_GAP, DASHBOARD_MARKER_INSET,
-    DASHBOARD_NAME_COLUMN, PREVIEW_TEXT_COLUMN, STATUS_COLUMNS,
+    cut_to_columns, DASHBOARD_CELL_GAP, DASHBOARD_NAME_COLUMN, PREVIEW_TEXT_COLUMN, STATUS_COLUMNS,
 };
-use crate::tree::{indicator_for_turn, pane_placement, Pane, Tab};
+use crate::tree::{pane_placement, Pane, Tab};
 
 /// The word that the STATUS column draws for each turn state. The user reads
 /// these, so they say what the agent does rather than name a variant.
@@ -37,7 +36,7 @@ use crate::tree::{indicator_for_turn, pane_placement, Pane, Tab};
 /// The STATUS column is held at one fixed width, so every word here must fit in
 /// it. `the_status_column_is_as_wide_as_its_longest_word` holds the pair in
 /// step.
-const WANTS_YOU: &str = "wants you";
+const WANTS_YOU: &str = "needs you";
 const WORKING: &str = "working";
 const IDLE: &str = "idle";
 
@@ -50,11 +49,7 @@ const STATUS_HEADING: &str = "STATUS";
 /// whether the agent said nothing or the sidebar failed to read it.
 const NO_MESSAGE: &str = "this agent reports no message";
 
-/// The word that leads the tool line, so the line reads as the present rather
-/// than as one more thing the agent said.
-const RUNNING_NOW: &str = "now: ";
-
-/// The widest that a message is wrapped to, whatever the pane can hold.
+/// The widest that a message line is drawn, whatever the pane can hold.
 ///
 /// A line of prose that spans a whole wide pane is hard to read, because the
 /// eye loses the start of the next line. The table is dense and prose is not,
@@ -174,9 +169,6 @@ struct AgentPlace<'a> {
     /// Whether an agent hangs under this one. The block of such a row carries
     /// the tree past it, so the children below stay attached to the row.
     has_children: bool,
-    /// Whether this agent, or anything under it, wants the user. The marker at
-    /// the right edge says so, and the STATUS column does not.
-    wants_user: bool,
 }
 
 /// One lead and everything under it.
@@ -259,16 +251,12 @@ fn walk_group<'a>(
         Some(under) => under,
         None => &[],
     };
-    // The place of this row is written now and its urgency is known only once
-    // every child of it is walked, so the row is revisited at this position.
-    let at = into.len();
     into.push(AgentPlace {
         tab,
         pane,
         agent,
         stem: RowStem::new(stem.clone()),
         has_children: !under.is_empty(),
-        wants_user: false,
     });
     let mut worst = urgency(agent);
     let last = under.len().saturating_sub(1);
@@ -280,21 +268,7 @@ fn walk_group<'a>(
         });
         worst = worst.min(walk_group(tab, pane, child, children, deeper, into));
     }
-    into[at].wants_user = worst.0 == URGENCY_ATTENTION;
     worst
-}
-
-/// The marker one dashboard row carries at its right edge.
-///
-/// The marker says that this row, or something under it, wants the user. A call
-/// two levels down therefore reaches the top of its group, and one glance down
-/// the leads finds every call on the pane. The STATUS column of each row still
-/// says only what that row does, so the two channels stay apart.
-fn group_indicator(place: &AgentPlace<'_>, options: &DrawingOptions) -> Indicator {
-    match place.wants_user {
-        true => indicator_for_turn(Turn::Attention, options),
-        false => indicator_for_turn(place.agent.turn, options),
-    }
 }
 
 /// The columns that one table column takes: the widest of its heading and its
@@ -315,11 +289,7 @@ fn column_width(column: Column, places: &[AgentPlace<'_>]) -> usize {
 /// `None` says that the pane is too narrow for the AGENT column, whatever else
 /// is dropped.
 fn fit(places: &[AgentPlace<'_>], width: usize) -> Option<(Vec<(Column, usize)>, usize)> {
-    // The turn marker takes one column, and the columns on each side of it stay
-    // clear. A table has an edge of its own, so the marker sits inside the pane
-    // rather than against its edge.
-    let field = width.saturating_sub(DASHBOARD_MARKER_GAP + 1 + DASHBOARD_MARKER_INSET);
-    let room = field.saturating_sub(DASHBOARD_NAME_COLUMN);
+    let room = width.saturating_sub(DASHBOARD_NAME_COLUMN);
     let mut kept: Vec<(Column, usize)> = Column::IN_DRAW_ORDER
         .iter()
         .map(|column| (*column, column_width(*column, places)))
@@ -349,34 +319,21 @@ fn cell(text: &str, width: usize, alignment: CellAlignment) -> TableCell {
 /// The columns that one line of a block has for its text in a pane `width`
 /// columns wide.
 ///
-/// The text starts past the tree glyph, and stops before the turn marker of the
-/// rows around it. The measure then holds the result down, so a wide pane does
-/// not draw one long line of prose.
-fn preview_field(width: usize, stem_columns: usize) -> usize {
+/// The text starts inside the preview panel. The measure limits the line
+/// length so a wide pane does not draw one long line of prose.
+fn preview_field(width: usize) -> usize {
     width
-        .saturating_sub(
-            PREVIEW_TEXT_COLUMN + stem_columns + DASHBOARD_MARKER_GAP + 1 + DASHBOARD_MARKER_INSET,
-        )
+        .saturating_sub(PREVIEW_TEXT_COLUMN)
         .clamp(1, PREVIEW_MEASURE)
 }
 
-/// The tool line, spelled `now: Bash(cargo clippy --workspace --all-t…)`.
-///
-/// A tool that names no argument draws its name alone. The name says that the
-/// agent is busy, which is most of what the line is for.
+/// The tool name and a bounded argument for the preview footer.
 fn tool_line(call: &ToolCall, field: usize) -> String {
-    let name = cut_to_columns(
-        &call.name,
-        field.saturating_sub(RUNNING_NOW.chars().count()),
-    );
     if call.argument.is_empty() {
-        return format!("{RUNNING_NOW}{name}");
+        return cut_to_columns(&call.name, field);
     }
-    let room = field
-        .saturating_sub(RUNNING_NOW.chars().count() + name.chars().count() + 2)
-        .min(TOOL_ARGUMENT_COLUMNS);
-    let argument = cut_to_columns(&call.argument, room);
-    format!("{RUNNING_NOW}{name}({argument})")
+    let argument = cut_to_columns(&call.argument, TOOL_ARGUMENT_COLUMNS);
+    cut_to_columns(&format!("{}: {argument}", call.name), field)
 }
 
 /// One line of a block, before the tree glyph of that line is decided. The
@@ -387,7 +344,6 @@ enum PreviewLine {
     /// the line into.
     Message(Vec<TextRun>),
     Time(String),
-    Tool(String),
 }
 
 impl PreviewLine {
@@ -407,12 +363,6 @@ impl PreviewLine {
                 branch,
                 text,
             },
-            PreviewLine::Tool(text) => RowContent::PreviewTool {
-                placement,
-                stem,
-                branch,
-                text,
-            },
         }
     }
 }
@@ -424,21 +374,36 @@ impl PreviewLine {
 /// entry does. A click anywhere in the block therefore reaches the same pane,
 /// and the keys step over the block as one thing.
 fn preview_rows(place: &AgentPlace<'_>, stem: &RowStem, width: usize) -> Vec<Row> {
-    let field = preview_field(width, stem.columns());
+    let field = preview_field(width);
     let preview = Preview::from_records(&place.agent.records);
     let placement = pane_placement(place.tab.active, place.pane.focused);
     let key = RowKey::Agent(place.agent.session.clone());
 
-    let mut message = message_lines(&preview.message, field);
+    let mut message = clipped_message_lines(&preview.message, field);
     if message.is_empty() {
         message = vec![vec![TextRun::plain(NO_MESSAGE)]];
     }
-    let mut lines: Vec<PreviewLine> = message.into_iter().map(PreviewLine::Message).collect();
-    if !preview.timestamp.is_empty() {
-        lines.push(PreviewLine::Time(preview.timestamp));
+    let truncated = message.len() > 4;
+    let mut lines: Vec<PreviewLine> = message
+        .into_iter()
+        .take(4)
+        .map(PreviewLine::Message)
+        .collect();
+    if truncated {
+        lines.push(PreviewLine::Time("… more".to_string()));
+    }
+    let mut footer = Vec::new();
+    if let Some(clock) = preview.timestamp.get(11..16) {
+        footer.push(format!("{clock} UTC"));
     }
     if let Some(call) = &preview.running_tool {
-        lines.push(PreviewLine::Tool(tool_line(call, field)));
+        footer.push(tool_line(call, field));
+    }
+    if !footer.is_empty() {
+        lines.push(PreviewLine::Time(cut_to_columns(
+            &footer.join(" · "),
+            field,
+        )));
     }
 
     // The last line closes the tree, and nothing is drawn below it. A row with
@@ -486,6 +451,18 @@ pub fn build_dashboard(
     // A stable sort. Two groups that report the same facts therefore keep the
     // order that the tree gives them, and no row moves under the cursor.
     groups.sort_by_key(|group| group.urgency);
+    let mut queue_starts = BTreeMap::new();
+    let mut offset = 0;
+    for urgency in 0..=2 {
+        let matching: Vec<_> = groups
+            .iter()
+            .filter(|group| group.urgency.0 == urgency)
+            .collect();
+        if !matching.is_empty() {
+            queue_starts.insert(offset, (urgency, matching.len()));
+            offset += matching.iter().map(|group| group.rows.len()).sum::<usize>();
+        }
+    }
     let places: Vec<AgentPlace> = groups.into_iter().flat_map(|group| group.rows).collect();
     if places.is_empty() {
         return vec![Row::new(RowContent::DashboardNoAgents)];
@@ -502,7 +479,13 @@ pub fn build_dashboard(
             .map(|(column, width)| cell(column.heading(), *width, column.alignment()))
             .collect(),
     })];
-    for place in &places {
+    for (position, place) in places.iter().enumerate() {
+        if let Some((urgency, count)) = queue_starts.get(&position) {
+            rows.push(Row::new(RowContent::DashboardGroup {
+                title: ["Needs you", "Working", "Idle"][*urgency as usize].to_string(),
+                count: *count,
+            }));
+        }
         let showing = match open.holds(&place.agent.session) {
             true => RowPreview::Open,
             false => RowPreview::Closed,
@@ -533,7 +516,6 @@ pub fn build_dashboard(
                     .map(|(column, width)| cell(&column.spell(place), *width, column.alignment()))
                     .collect(),
             })
-            .with_indicator(group_indicator(place, options))
             .with_key(RowKey::Agent(place.agent.session.clone())),
         );
         if showing == RowPreview::Open {
@@ -559,15 +541,9 @@ mod tests {
     /// fits there.
     const WIDE: usize = 118;
 
-    /// The narrowest pane that draws a table: the columns before the AGENT
-    /// cell, the smallest AGENT column, the gap before the marker, the marker
-    /// itself and the gap after it. Every column after AGENT is already gone by
-    /// then.
-    const NARROWEST: usize = DASHBOARD_NAME_COLUMN
-        + MINIMUM_NAME_COLUMNS
-        + DASHBOARD_MARKER_GAP
-        + 1
-        + DASHBOARD_MARKER_INSET;
+    /// The narrowest pane that draws the fixed lead and a readable AGENT cell.
+    /// Every optional column has been dropped at this width.
+    const NARROWEST: usize = DASHBOARD_NAME_COLUMN + MINIMUM_NAME_COLUMNS;
 
     fn agent(id: &str, title: &str) -> Agent {
         Agent::new(
@@ -697,11 +673,53 @@ mod tests {
     }
 
     #[test]
+    fn queue_headings_count_leads_and_keep_child_attention_below_its_working_parent() {
+        let mut tabs = one_group();
+        tabs[0].panes[0].agents[0].turn = Turn::Working;
+        tabs[0].panes[0].agents[2].turn = Turn::Attention;
+        let rows = build_dashboard(
+            &tabs,
+            WIDE,
+            &OpenPreviews::default(),
+            &DrawingOptions::default(),
+        );
+        assert_eq!(row_text(&rows[1].content), "    NEEDS YOU · 1");
+        assert_eq!(names(&rows), ["the lead", "the teammate", "the subagent"]);
+        assert_eq!(status_text(&rows, 2), WORKING);
+        assert_eq!(status_text(&rows, 4), "needs you");
+        assert!(rows.iter().all(|row| row.indicator == Indicator::None));
+    }
+
+    #[test]
+    fn queue_counts_exclude_children_and_queue_labels_are_not_selectable() {
+        let mut tabs = session();
+        tabs[1].panes[0]
+            .agents
+            .push(working("four", "another lead"));
+        let mut child = under_lead("four.child", "four", "child");
+        child.turn = Turn::Attention;
+        tabs[1].panes[0].agents.push(child);
+        let rows = dashboard(&tabs, WIDE);
+        let headings: Vec<_> = rows
+            .iter()
+            .filter(|row| matches!(row.content, RowContent::DashboardGroup { .. }))
+            .collect();
+        assert_eq!(
+            headings
+                .iter()
+                .map(|row| row_text(&row.content))
+                .collect::<Vec<_>>(),
+            ["    NEEDS YOU · 2", "    WORKING · 1", "    IDLE · 1"]
+        );
+        assert!(headings.iter().all(|row| row.key.is_none()));
+    }
+
+    #[test]
     fn one_agent_draws_one_row_and_a_tab_or_a_pane_draws_none() {
         // The session holds three agents, four panes and three tabs. Only the
         // agents reach the table, under one heading row.
         let rows = dashboard(&session(), WIDE);
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 7);
         assert_eq!(
             names(&rows),
             ["migrate the runner", "the zellij port", "docs"]
@@ -719,7 +737,7 @@ mod tests {
     #[test]
     fn the_status_column_holds_the_word_for_the_group_the_row_sits_in() {
         let rows = dashboard(&session(), WIDE);
-        for (row, word) in [(1, WANTS_YOU), (2, WORKING), (3, IDLE)] {
+        for (row, word) in [(2, WANTS_YOU), (4, WORKING), (6, IDLE)] {
             assert_eq!(status_text(&rows, row), word);
         }
     }
@@ -859,25 +877,15 @@ mod tests {
     }
 
     #[test]
-    fn a_child_that_wants_the_user_marks_every_row_above_it() {
+    fn child_attention_changes_the_queue_but_not_ancestor_status() {
         let mut tabs = one_group();
         tabs[0].panes[0].agents[2].turn = Turn::Attention;
         let rows = dashboard(&tabs, WIDE);
-        // The marker climbs every level, so a call two levels down reaches the
-        // top of its group.
-        let markers: Vec<Indicator> = rows[1..].iter().map(|row| row.indicator).collect();
-        assert_eq!(
-            markers,
-            [
-                Indicator::Attention,
-                Indicator::Attention,
-                Indicator::Attention
-            ]
-        );
-        // The STATUS column of each row still says only what that row does.
-        assert_eq!(status_text(&rows, 1), IDLE);
+        assert_eq!(row_text(&rows[1].content), "    NEEDS YOU · 1");
+        assert!(rows.iter().all(|row| row.indicator == Indicator::None));
         assert_eq!(status_text(&rows, 2), IDLE);
-        assert_eq!(status_text(&rows, 3), WANTS_YOU);
+        assert_eq!(status_text(&rows, 3), IDLE);
+        assert_eq!(status_text(&rows, 4), WANTS_YOU);
     }
 
     #[test]
@@ -1037,7 +1045,7 @@ mod tests {
         // branch, no model and no count.
         let rows = dashboard(&session(), WIDE);
         for column in [2, 3, 4] {
-            assert_eq!(cell_text(&rows, 1, column), "", "column {column}");
+            assert_eq!(cell_text(&rows, 2, column), "", "column {column}");
         }
     }
 
@@ -1056,11 +1064,11 @@ mod tests {
             vec![pane(4, "ssh prod-1", false, vec![record])],
         )];
         let rows = dashboard(&tabs, WIDE);
-        assert_eq!(cell_text(&rows, 1, 0), "3 infra");
-        assert_eq!(cell_text(&rows, 1, 1), "ssh prod-1");
-        assert_eq!(cell_text(&rows, 1, 2), "infra/ci");
-        assert_eq!(cell_text(&rows, 1, 3), "opus-5");
-        assert_eq!(cell_text(&rows, 1, 4), "122k");
+        assert_eq!(cell_text(&rows, 2, 0), "3 infra");
+        assert_eq!(cell_text(&rows, 2, 1), "ssh prod-1");
+        assert_eq!(cell_text(&rows, 2, 2), "infra/ci");
+        assert_eq!(cell_text(&rows, 2, 3), "opus-5");
+        assert_eq!(cell_text(&rows, 2, 4), "122k");
     }
 
     #[test]
@@ -1144,34 +1152,29 @@ mod tests {
         let rows = dashboard(&session(), WIDE);
         assert_eq!(rows[0].key, None);
         assert_eq!(
-            rows[1].key,
+            rows[2].key,
             Some(RowKey::Agent(SessionId::new("one").unwrap()))
         );
     }
 
     #[test]
-    fn the_marker_says_whose_turn_it_is_and_the_status_column_stays_without_it() {
-        let rows = dashboard(&session(), WIDE);
-        let markers: Vec<Indicator> = rows[1..].iter().map(|row| row.indicator).collect();
-        assert_eq!(
-            markers,
-            [Indicator::Attention, Indicator::Working, Indicator::None]
-        );
-        // Turning the marker off leaves the column of words behind.
-        let quiet = DrawingOptions {
-            turn_state: false,
-            ..DrawingOptions::default()
-        };
-        let rows = build_dashboard(&session(), WIDE, &OpenPreviews::default(), &quiet);
-        assert!(rows[1..].iter().all(|row| row.indicator == Indicator::None));
-        assert_eq!(status_text(&rows, 1), WANTS_YOU);
+    fn dashboard_status_has_no_duplicate_turn_marker() {
+        for turn_state in [false, true] {
+            let options = DrawingOptions {
+                turn_state,
+                ..DrawingOptions::default()
+            };
+            let rows = build_dashboard(&session(), WIDE, &OpenPreviews::default(), &options);
+            assert!(rows.iter().all(|row| row.indicator == Indicator::None));
+            assert_eq!(status_text(&rows, 2), WANTS_YOU);
+        }
     }
 
     #[test]
     fn the_gutter_marks_the_agent_in_the_pane_you_are_in() {
         let rows = dashboard(&session(), WIDE);
         // The zellij port runs in the focused pane of the active tab.
-        assert!(row_text(&rows[2].content).starts_with('▌'));
+        assert!(row_text(&rows[4].content).starts_with('▌'));
         assert!(row_text(&rows[1].content).starts_with(' '));
     }
 
@@ -1180,9 +1183,9 @@ mod tests {
         let rows = dashboard(&session(), WIDE);
         let placements: Vec<Placement> = rows[1..]
             .iter()
-            .map(|row| match &row.content {
-                RowContent::DashboardAgent { placement, .. } => *placement,
-                other => panic!("unexpected row: {other:?}"),
+            .filter_map(|row| match &row.content {
+                RowContent::DashboardAgent { placement, .. } => Some(*placement),
+                _ => None,
             })
             .collect();
         assert_eq!(
@@ -1277,6 +1280,77 @@ mod tests {
     }
 
     #[test]
+    fn narrow_preview_clips_a_long_paragraph_without_hiding_the_next_result() {
+        let message = format!(
+            "Result: **{}**\\n\\nnext result",
+            "important ".repeat(20).trim()
+        );
+        let tabs = session_with_one_agent(agent_reporting_records("two", &message, "cargo test"));
+        let rows = build_dashboard(
+            &tabs,
+            40,
+            &open_previews(&["two"]),
+            &DrawingOptions::default(),
+        );
+        let lines = block_lines(&rows);
+        assert_eq!(
+            lines.len(),
+            3,
+            "two message lines and one compact footer: {lines:?}"
+        );
+        assert_eq!(lines[0], "    │▌           Result: important impo…");
+        assert!(lines[1].ends_with("next result"));
+        assert!(lines[2].ends_with("05:11 UTC · Bash: carg…"));
+        let runs = rows
+            .iter()
+            .find_map(|row| match &row.content {
+                RowContent::PreviewMessage { runs, .. } => Some(runs),
+                _ => None,
+            })
+            .unwrap();
+        assert!(!runs[0].emphasis.bold);
+        assert!(runs[1].emphasis.bold);
+    }
+
+    #[test]
+    fn preview_caps_message_at_four_lines_and_combines_utc_clock_with_tool() {
+        let tabs = session_with_one_agent(agent_reporting_records(
+            "two",
+            "one\\n\\ntwo\\n\\nthree\\n\\nfour\\n\\nfive",
+            "cargo test",
+        ));
+        let rows = build_dashboard(
+            &tabs,
+            WIDE,
+            &open_previews(&["two"]),
+            &DrawingOptions::default(),
+        );
+        let lines = block_lines(&rows);
+        assert_eq!(lines.len(), 6);
+        assert!(lines[3].ends_with("four"));
+        assert!(lines[4].ends_with("… more"));
+        assert!(lines[5].ends_with("05:11 UTC · Bash: cargo test"));
+        assert!(!lines.iter().any(|line| line.contains("five")));
+    }
+
+    #[test]
+    fn minimum_dashboard_keeps_status_and_identity_tightly_paired() {
+        let rows = dashboard(&session(), 28);
+        assert!(matches!(
+            rows[0].content,
+            RowContent::DashboardHeading { .. }
+        ));
+        let line = row_text(&rows[2].content);
+        assert_eq!(
+            line.chars().skip(4).take(9).collect::<String>(),
+            "needs you"
+        );
+        assert_eq!(line.chars().nth(14), Some('\u{f167a}'));
+        assert_eq!(line.chars().count(), 28);
+        assert_eq!(row_text(&rows[0].content).find("AGENT"), Some(14));
+    }
+
+    #[test]
     fn a_closed_row_draws_no_block() {
         let tabs = session_with_one_agent(agent_reporting_records(
             "two",
@@ -1287,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    fn an_open_row_draws_the_message_then_the_time_then_the_tool() {
+    fn an_open_row_draws_the_message_then_a_compact_footer() {
         let tabs = session_with_one_agent(agent_reporting_records(
             "two",
             "the port is done",
@@ -1304,17 +1378,15 @@ mod tests {
             [
                 // The gutter carries down the block, because the block belongs
                 // to the same pane as the row above it.
-                "\u{258c}              \u{2502}   the port is done",
-                "\u{258c}              \u{2502}   2026-09-01 05:11Z",
-                "\u{258c}              \u{2514}   now: Bash(cargo test)",
+                "    │▌           the port is done",
+                "    │▌           05:11 UTC · Bash: cargo test",
             ]
         );
     }
 
     #[test]
-    fn the_tree_glyph_of_a_block_sits_under_the_kind_icon_of_its_row() {
-        // The block hangs off the row above it. A glyph in any other column
-        // reads as a row of its own rather than as detail of that row.
+    fn the_preview_border_starts_at_the_panel_indent() {
+        // Each preview uses the same panel indent, independent of row depth.
         let tabs = session_with_one_agent(agent_reporting_records("two", "the port is done", ""));
         let rows = build_dashboard(
             &tabs,
@@ -1322,7 +1394,7 @@ mod tests {
             &open_previews(&["two"]),
             &DrawingOptions::default(),
         );
-        let icon = DASHBOARD_NAME_COLUMN - 3;
+        let icon = 4;
         for line in block_lines(&rows) {
             let glyph = line.chars().nth(icon);
             assert!(
@@ -1348,7 +1420,7 @@ mod tests {
             &DrawingOptions::default(),
         );
         let key = Some(RowKey::Agent(SessionId::new("two").unwrap()));
-        assert_eq!(rows.iter().filter(|row| row.key == key).count(), 4);
+        assert_eq!(rows.iter().filter(|row| row.key == key).count(), 3);
     }
 
     #[test]
@@ -1364,7 +1436,7 @@ mod tests {
         );
         assert_eq!(
             block_lines(&rows),
-            [format!("\u{258c}              \u{2514}   {NO_MESSAGE}")]
+            [format!("    │▌           {NO_MESSAGE}")]
         );
     }
 
@@ -1385,7 +1457,7 @@ mod tests {
     }
 
     #[test]
-    fn a_message_wraps_to_the_measure_and_the_measure_does_not_grow_with_the_pane() {
+    fn a_message_is_clipped_to_the_measure_and_the_measure_does_not_grow_with_the_pane() {
         let long = "word ".repeat(80);
         let tabs = session_with_one_agent(agent_reporting_records("two", long.trim(), ""));
         let widest = |width: usize| {
@@ -1401,11 +1473,9 @@ mod tests {
                 .max()
                 .unwrap_or(0)
         };
-        // A pane narrower than the measure wraps to what the pane holds.
+        // A narrow pane clips the line to the available columns.
         assert!(widest(WIDE) <= WIDE, "{} drew {}", WIDE, widest(WIDE));
-        // Two panes wider than the measure wrap the same way, so the wrapping
-        // does not move when the pane grows. The measure holds the text, and
-        // the last word of a line can leave a few columns unused.
+        // The measure keeps the clip point fixed in wider panes.
         assert_eq!(widest(400), widest(800));
         assert!(widest(400) <= PREVIEW_TEXT_COLUMN + PREVIEW_MEASURE);
         assert!(widest(400) > PREVIEW_TEXT_COLUMN + PREVIEW_MEASURE - "word ".len());
@@ -1437,7 +1507,7 @@ mod tests {
             (OpenPreviews::default(), '\u{25b8}'),
         ] {
             let rows = build_dashboard(&tabs, WIDE, &open, &DrawingOptions::default());
-            let row = row_text(&rows[1].content);
+            let row = row_text(&rows[2].content);
             // The gutter, then a blank column, then the marker, then a
             // blank column. The marker has room to breathe on each side.
             let marks: Vec<char> = row.chars().take(4).collect();
@@ -1455,7 +1525,7 @@ mod tests {
         };
         assert_eq!(
             build_dashboard(&session(), WIDE, &OpenPreviews::default(), &lined).len(),
-            4
+            7
         );
     }
 }
