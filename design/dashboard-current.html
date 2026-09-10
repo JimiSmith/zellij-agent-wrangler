@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Wrangler — Current Dashboard Reference</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #121212;
+      --panel: #1a1a1a;
+      --panel-2: #222;
+      --line: #343434;
+      --text: #e6e6e6;
+      --muted: #909090;
+      --soft: #bdbdbd;
+      --selected-fg: rgb(214, 224, 232);
+      --selected-bg: rgb(30, 43, 46);
+      --focus: rgb(92, 200, 216);
+      --attention: rgb(226, 164, 78);
+      --preview: rgb(19, 19, 19);
+      --red: #ff6b6b;
+      --green: #7bd88f;
+      --yellow: #f5d76e;
+      --blue: #6cb6ff;
+      --magenta: #d29bff;
+      --cyan: #63d8e5;
+      --cell: 8.42px;
+      font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--page); color: var(--text); }
+    button, input, select { font: inherit; }
+
+    .shell { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 40px 0 56px; }
+    .masthead { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
+    .eyebrow { margin: 0 0 7px; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: clamp(26px, 4vw, 42px); line-height: 1; letter-spacing: -.035em; }
+    .subtitle { max-width: 550px; margin: 10px 0 0; color: var(--soft); font-size: 14px; line-height: 1.55; }
+    .badge { flex: 0 0 auto; border: 1px solid var(--line); border-radius: 999px; padding: 7px 10px; color: var(--soft); font: 600 11px/1 ui-monospace, monospace; }
+
+    .controls { display: grid; grid-template-columns: minmax(220px, 1fr) 190px; gap: 18px; align-items: end; padding: 18px; border: 1px solid var(--line); border-radius: 10px 10px 0 0; background: var(--panel); }
+    .control { display: grid; gap: 8px; }
+    .control-label { display: flex; justify-content: space-between; color: var(--soft); font-size: 12px; font-weight: 650; }
+    output { color: var(--text); font-family: ui-monospace, monospace; }
+    input[type="range"] { width: 100%; accent-color: #d8d8d8; }
+    select { width: 100%; height: 34px; border: 1px solid #444; border-radius: 5px; padding: 0 10px; background: #171717; color: var(--text); }
+    .segmented { display: flex; border: 1px solid #444; border-radius: 5px; overflow: hidden; }
+    .segmented button { flex: 1; height: 32px; border: 0; border-right: 1px solid #444; background: #171717; color: var(--soft); cursor: pointer; }
+    .segmented button:last-child { border-right: 0; }
+    .segmented button.active { background: #e2e2e2; color: #151515; }
+
+    .stage { min-height: 460px; display: grid; place-items: start center; padding: 44px 20px 52px; border: 1px solid var(--line); border-top: 0; border-radius: 0 0 10px 10px; background-color: #161616; background-image: linear-gradient(#1c1c1c 1px, transparent 1px), linear-gradient(90deg, #1c1c1c 1px, transparent 1px); background-size: 24px 24px; overflow: auto; }
+    .terminal-frame { max-width: 100%; border: 1px solid #484848; border-radius: 7px; background: #0b0b0b; box-shadow: 0 18px 45px rgba(0,0,0,.38); overflow: hidden; }
+    .terminal-titlebar { height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-bottom: 1px solid #2d2d2d; background: #202020; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #555; }
+    .terminal-title { margin-left: 5px; color: #969696; font: 11px/1 ui-monospace, monospace; }
+    .terminal { width: calc(var(--columns) * var(--cell)); min-height: 330px; padding: 11px 0; background: #090909; color: var(--text); font: 14px/1.55 "Symbols Nerd Font Mono", "JetBrainsMono Nerd Font", "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-variant-ligatures: none; letter-spacing: 0; overflow: hidden; }
+    .terminal-row { display: grid; align-items: baseline; min-height: 1.55em; white-space: nowrap; cursor: default; }
+    .heading { font-weight: 700; text-decoration: underline; text-underline-offset: 2px; cursor: default; }
+    .heading .lead { grid-column: 1; }
+    .heading .agent-cell { padding-left: 1ch; }
+    .lead { display: grid; grid-template-columns: 1ch 1ch 1ch 1ch; }
+    .gutter { color: var(--focus); font-weight: 800; }
+    .open { cursor: pointer; color: var(--soft); }
+    .stem { color: var(--muted); }
+    .icon { display: inline-block; width: 1ch; margin-right: 2ch; }
+    .status-cell { overflow: hidden; }
+    .status-cell.attention { color: var(--attention); }
+    .status-cell.working { color: var(--focus); }
+    .agent-cell { padding-left: 1ch; overflow: hidden; text-overflow: ellipsis; }
+    .agent-cell .stem { margin-left: -1ch; }
+    .icon { margin-right: 1ch; }
+    .cell { margin-left: 2ch; overflow: hidden; text-overflow: ellipsis; }
+    .cell.ctx { text-align: right; }
+    .agent-row[data-turn="attention"] { font-weight: 700; }
+    .agent-row[data-turn="idle"] { color: var(--muted); }
+    .agent-row.selected { color: var(--selected-fg); background: var(--selected-bg); }
+    .agent-row.selected .stem, .agent-row.selected .open { color: inherit; }
+    .agent-row.selected .icon { color: inherit !important; }
+    .agent-row.selected .status-cell.attention { color: var(--attention); }
+    .agent-row.selected .status-cell.working { color: var(--focus); }
+    .group-heading { height: 2.25em; padding: .7em 0 0 4ch; color: #747474; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    .group-heading:first-of-type { margin-top: .2em; }
+    .group-heading .group-count { color: #555; }
+    .preview-panel { margin: .15em 0 .35em 4ch; border-left: 1px solid #3b4b4f; background: var(--preview); }
+    .preview-row { display: grid; grid-template-columns: 12ch minmax(0, 1fr); min-height: 1.55em; padding-left: 1ch; white-space: pre; }
+    .preview-row .preview-lead { grid-column: 1; color: #566367; text-align: right; padding-right: 1ch; }
+    .preview-row .preview-lead .preview-gutter { float: left; color: var(--focus); }
+    .preview-row .preview-text { overflow: hidden; text-overflow: ellipsis; }
+    .preview-row.detail { color: var(--muted); }
+    .preview-row .md-heading, .preview-row strong { color: var(--text); font-weight: 700; }
+    .preview-row code { color: var(--muted); }
+    .preview-row a { color: inherit; text-decoration: underline; }
+    .empty-state { display: block; padding-left: 2ch; }
+    .c-red { color: var(--red); } .c-green { color: var(--green); } .c-yellow { color: var(--yellow); }
+    .c-blue { color: var(--blue); } .c-magenta { color: var(--magenta); } .c-cyan { color: var(--cyan); }
+
+    .notes { margin-top: 26px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+    .note { border-top: 1px solid var(--line); padding-top: 14px; }
+    .note h2 { margin: 0 0 6px; font-size: 13px; }
+    .note p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    kbd { border: 1px solid #444; border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px; background: #1b1b1b; color: var(--soft); font: 11px ui-monospace, monospace; }
+
+    @media (max-width: 760px) {
+      .shell { width: min(100% - 20px, 1180px); padding-top: 24px; }
+      .masthead { align-items: start; }
+      .badge { display: none; }
+      .controls { grid-template-columns: 1fr; }
+      .stage { padding: 24px 10px 36px; justify-content: start; }
+      .notes { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">Design proposal · Dashboard</p>
+        <h1>Operational queue</h1>
+        <p class="subtitle">A clearer dashboard for finding agents that need you, seeing active work, and reading the latest result without losing context.</p>
+      </div>
+      <span class="badge">PROPOSED DIRECTION</span>
+    </header>
+
+    <section aria-label="Prototype controls">
+      <div class="controls">
+        <label class="control">
+          <span class="control-label"><span>Pane width</span><output id="width-output">96 columns</output></span>
+          <input id="width" type="range" min="18" max="118" value="96">
+        </label>
+        <label class="control">
+          <span class="control-label">Fixture</span>
+          <select id="fixture">
+            <option value="populated">Multiple agents</option>
+            <option value="empty">No agents</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="stage">
+        <div class="terminal-frame">
+          <div class="terminal-titlebar" aria-hidden="true">
+            <i class="dot"></i><i class="dot"></i><i class="dot"></i>
+            <span class="terminal-title">agent-wrangler · dashboard</span>
+          </div>
+          <div id="terminal" class="terminal" tabindex="0" aria-label="Agent Wrangler dashboard prototype"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="notes" aria-label="Reference notes">
+      <article class="note"><h2>Interaction</h2><p>Use <kbd>↑</kbd>/<kbd>↓</kbd> or <kbd>j</kbd>/<kbd>k</kbd> to select. Press <kbd>Space</kbd> to toggle a preview. Click rows and disclosure markers too.</p></article>
+      <article class="note"><h2>Responsive behavior</h2><p>CTX, MODEL, BRANCH, PANE, then TAB drop as space contracts. STATUS and AGENT remain tightly paired at every width.</p></article>
+      <article class="note"><h2>Visual channels</h2><p>Group labels explain sorting, status color shows state, and the cyan gutter shows location. No duplicate state marker is needed.</p></article>
+    </section>
+  </main>
+
+  <script>
+    const agents = [
+      { id:'migrate', name:'migrate the runner', turn:'attention', queue:'attention', tab:'3 infra', pane:'ssh prod-1', branch:'infra/ci', model:'opus-5', ctx:'122k', color:'red', focused:false, depth:0,
+        message:['Runner migration is blocked on a deployment decision.'], time:'2026-09-05 09:42Z', tool:'' },
+      { id:'port', name:'the zellij port', turn:'working', queue:'attention', propagated:true, tab:'1 wrangler', pane:'claude', branch:'main', model:'opus-5', ctx:'196k', color:'cyan', focused:true, depth:0,
+        message:['DASHBOARD PREVIEW','- **the port** is in progress','┌─────────┬─────────┐','│ Crate   │ Role    │','├─────────┼─────────┤','│ ui      │ drawing │','└─────────┴─────────┘'], time:'2026-09-05 09:48Z', tool:'Bash(cargo test --workspace)' },
+      { id:'explore', name:'@Explore · find event path', turn:'attention', queue:'attention', tab:'1 wrangler', pane:'claude', branch:'main', model:'haiku-5', ctx:'31k', color:'magenta', focused:true, depth:1,
+        message:['Tracing the event path from Zellij into the portable UI crate.'], time:'2026-09-05 09:47Z', tool:'Read(application.rs)' },
+      { id:'docs', name:'docs', turn:'idle', queue:'idle', tab:'2 notes', pane:'copilot', branch:'docs', model:'', ctx:'', color:'yellow', focused:false, depth:0,
+        message:['Documentation pass completed.'], time:'2026-09-05 09:31Z', tool:'' }
+    ];
+
+    const columnDefs = [
+      { key:'tab', label:'TAB', cap:16 }, { key:'pane', label:'PANE', cap:16 },
+      { key:'branch', label:'BRANCH', cap:18 }, { key:'model', label:'MODEL', cap:12 }, { key:'ctx', label:'CTX', cap:6 }
+    ];
+    const turnLabel = { attention:'needs you', working:'working', idle:'idle' };
+    const terminal = document.querySelector('#terminal');
+    const widthInput = document.querySelector('#width');
+    const widthOutput = document.querySelector('#width-output');
+    const fixture = document.querySelector('#fixture');
+    const params = new URLSearchParams(location.search);
+    if (params.has('width')) widthInput.value = Math.max(18, Math.min(118, Number(params.get('width')) || 96));
+    if (params.get('fixture') === 'empty') fixture.value = 'empty';
+    let selected = 1;
+    let open = new Set(['port']);
+
+    function textWidth(s) { return [...String(s)].length; }
+    function cut(s, width) { s=String(s); return textWidth(s)<=width ? s : width<=0 ? '' : [...s].slice(0,width-1).join('')+'…'; }
+    function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+    function md(s) {
+      if (s === 'DASHBOARD PREVIEW') return '<span class="md-heading">DASHBOARD PREVIEW</span>';
+      return esc(s).replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/`(.+?)`/g,'<code>$1</code>');
+    }
+
+    function layout(columns) {
+      const widths = columnDefs.map(d => Math.min(d.cap, Math.max(textWidth(d.label), ...agents.map(a => textWidth(d.key==='turn' ? turnLabel[a.turn] : a[d.key])))));
+      let kept = columnDefs.map((d,i)=>({...d,width:widths[i]}));
+      const fixed = 16; // lead, fixed STATUS, and tightened identity gap
+      while (kept.length) {
+        const spent = kept.reduce((n,c)=>n+c.width+2,0);
+        if (columns-fixed-spent >= 12) break;
+        kept.pop();
+      }
+      const spent = kept.reduce((n,c)=>n+c.width+2,0);
+      return { kept, nameWidth: columns-fixed-spent, narrow: columns-fixed-spent < 12 };
+    }
+
+    function gridStyle(l) {
+      const extra = l.kept.map(c=>`${c.width}ch`).join(' ');
+      return `grid-template-columns:4ch 9ch minmax(0,${l.nameWidth + 3}ch) ${extra}`;
+    }
+
+    function previewRows(a) {
+      let lines = [...a.message];
+      if (lines.length > 4) lines = [...lines.slice(0,4), '… more'];
+      const clock = a.time ? a.time.slice(11,16) + ' UTC' : '';
+      const tool = a.tool ? a.tool.replace(/^([^\(]+)\((.*)\)$/, '$1: $2') : '';
+      const footer = [clock, tool].filter(Boolean).join(' · ');
+      if (footer) lines.push(footer);
+      return lines.map((line,i) => {
+        const detail = line===footer || line==='… more';
+        return `<div class="preview-row${detail?' detail':''}" data-owner="${a.id}"><span class="preview-lead"><span class="preview-gutter">${a.focused?'▌':''}</span></span><span class="preview-text">${md(line)}</span></div>`;
+      }).join('');
+    }
+
+    function render() {
+      const columns = Number(widthInput.value);
+      widthOutput.value = `${columns} columns`;
+      terminal.style.setProperty('--columns', columns);
+      const l = layout(columns);
+      if (fixture.value === 'empty') { terminal.innerHTML='<div class="empty-state">no agents</div>'; return; }
+      if (l.narrow) { terminal.innerHTML='<div class="empty-state">widen the pane</div>'; return; }
+      const style = gridStyle(l);
+      let html = `<div class="terminal-row heading" style="${style}"><span class="lead"></span><span class="status-cell">STATUS</span><span class="agent-cell">AGENT</span>`;
+      html += l.kept.map(c=>`<span class="cell ${c.key}">${c.label}</span>`).join('')+'</div>';
+      const groupNames = {attention:'Needs you', working:'Working', idle:'Idle'};
+      let lastGroup = '';
+      agents.forEach((a,i) => {
+        if (a.queue !== lastGroup) {
+          const count = agents.filter(candidate => candidate.queue===a.queue && candidate.depth===0).length;
+          html += `<div class="group-heading">${groupNames[a.queue]} <span class="group-count">· ${count}</span></div>`;
+          lastGroup = a.queue;
+        }
+        const stem = a.depth ? '└ ' : '';
+        html += `<div class="terminal-row agent-row${i===selected?' selected':''}" data-index="${i}" data-turn="${a.turn}" style="${style}">
+          <span class="lead"><span class="gutter">${a.focused?'▌':''}</span><span></span><span class="open" data-open="${a.id}">${open.has(a.id)?'▾':'▸'}</span><span></span></span>
+          <span class="status-cell ${a.turn}">${turnLabel[a.turn]}</span>
+          <span class="agent-cell"><span class="stem">${stem}</span><span class="icon c-${a.color}">󱙺</span>${esc(cut(a.name,Math.max(1,l.nameWidth-a.depth*2)))}</span>
+          ${l.kept.map(c=>`<span class="cell ${c.key}">${esc(cut(a[c.key],c.width))}</span>`).join('')}</div>`;
+        if (open.has(a.id)) html += `<div class="preview-panel">${previewRows(a)}</div>`;
+      });
+      terminal.innerHTML=html;
+    }
+
+    widthInput.addEventListener('input', render);
+    fixture.addEventListener('change', render);
+    terminal.addEventListener('click', e=>{
+      const row=e.target.closest('.agent-row'); if (row) selected=Number(row.dataset.index);
+      const toggle=e.target.closest('[data-open]'); if(toggle){ const id=toggle.dataset.open; open.has(id)?open.delete(id):open.add(id); }
+      render(); terminal.focus();
+    });
+    terminal.addEventListener('keydown', e=>{
+      if(['ArrowDown','j'].includes(e.key)){ selected=Math.min(agents.length-1,selected+1); e.preventDefault(); }
+      else if(['ArrowUp','k'].includes(e.key)){ selected=Math.max(0,selected-1); e.preventDefault(); }
+      else if(e.key===' '){ const id=agents[selected].id; open.has(id)?open.delete(id):open.add(id); e.preventDefault(); }
+      else return; render();
+    });
+    render();
+  </script>
+</body>
+</html>

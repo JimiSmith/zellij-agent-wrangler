@@ -64,9 +64,9 @@ sleep: 2
 wait: SPYGLASS @ 20
 wait: - the port is done @ 20
 
-# The preview keeps four message lines and indicates the rest of the table.
+# The preview keeps eight message lines, so this table fits in full.
 wait: Crate @ 20
-wait: … more @ 20
+wait: records @ 20
 
 wait: 05:11 UTC · Bash: cargo test --workspace @ 20
 

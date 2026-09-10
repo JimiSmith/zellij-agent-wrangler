@@ -383,10 +383,10 @@ fn preview_rows(place: &AgentPlace<'_>, stem: &RowStem, width: usize) -> Vec<Row
     if message.is_empty() {
         message = vec![vec![TextRun::plain(NO_MESSAGE)]];
     }
-    let truncated = message.len() > 4;
+    let truncated = message.len() > 8;
     let mut lines: Vec<PreviewLine> = message
         .into_iter()
-        .take(4)
+        .take(8)
         .map(PreviewLine::Message)
         .collect();
     if truncated {
@@ -1313,10 +1313,10 @@ mod tests {
     }
 
     #[test]
-    fn preview_caps_message_at_four_lines_and_combines_utc_clock_with_tool() {
+    fn preview_caps_message_at_eight_lines_and_combines_utc_clock_with_tool() {
         let tabs = session_with_one_agent(agent_reporting_records(
             "two",
-            "one\\n\\ntwo\\n\\nthree\\n\\nfour\\n\\nfive",
+            "one\\n\\ntwo\\n\\nthree\\n\\nfour\\n\\nfive\\n\\nsix\\n\\nseven\\n\\neight\\n\\nnine",
             "cargo test",
         ));
         let rows = build_dashboard(
@@ -1326,11 +1326,11 @@ mod tests {
             &DrawingOptions::default(),
         );
         let lines = block_lines(&rows);
-        assert_eq!(lines.len(), 6);
-        assert!(lines[3].ends_with("four"));
-        assert!(lines[4].ends_with("… more"));
-        assert!(lines[5].ends_with("05:11 UTC · Bash: cargo test"));
-        assert!(!lines.iter().any(|line| line.contains("five")));
+        assert_eq!(lines.len(), 10);
+        assert!(lines[7].ends_with("eight"));
+        assert!(lines[8].ends_with("… more"));
+        assert!(lines[9].ends_with("05:11 UTC · Bash: cargo test"));
+        assert!(!lines.iter().any(|line| line.contains("nine")));
     }
 
     #[test]

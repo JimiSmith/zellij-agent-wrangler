@@ -86,7 +86,7 @@ once with no agent reporting itself again.
 - [x] Fixed STATUS before AGENT; optional CTX, MODEL, BRANCH, PANE and TAB
       columns drop in that order; a pane narrower than 28 columns says to widen it
 - [x] The last message of an agent, under the row that the space key expands,
-      with at most four message lines, an `… more` indicator, and one compact
+      with at most eight message lines, an `… more` indicator, and one compact
       `HH:MM UTC · Tool: argument` footer on an indented shaded panel
 - [x] That message drawn as the markdown it was written in: a heading and a bold
       word are bold, a quote and a code span are dim, a link is underlined, and
