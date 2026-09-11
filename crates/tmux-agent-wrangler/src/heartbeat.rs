@@ -1,12 +1,15 @@
-//! The heartbeat that one connection writes for as long as it lasts.
+//! One connection's sole writer for heartbeats and client messages.
 //!
 //! A sidebar that only reads says nothing to the daemon. The heartbeat story
 //! makes the daemon give up on a client that it has not heard from, so the
 //! sidebar must say this instead.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
+
+use agent_wrangler_core::client_message::ClientMessage;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -29,22 +32,25 @@ pub struct HeartbeatSettings {
 pub struct RunningHeartbeat {
     /// The end that wakes the thread.
     ///
-    /// The thread waits on the other end, so a drop of this wakes it at once. A
-    /// thread that slept the whole interval instead would outlive its connection
-    /// by up to that interval, and would hold the stream open for that long.
-    stop_sender: Sender<()>,
+    /// A stop message wakes an idle writer without waiting for its interval.
+    stop_sender: Sender<Option<ClientMessage>>,
+    stopped: Arc<AtomicBool>,
     thread: JoinHandle<()>,
 }
 
 impl RunningHeartbeat {
     /// Stops the heartbeat, and waits for its thread to end.
     ///
-    /// The thread wakes as soon as the sender is dropped. This function
-    /// therefore returns in the time of one wake and not in the time of one
-    /// interval.
+    /// The flag discards queued messages before the next write. A stop message
+    /// wakes an idle writer. An in-progress socket write must still finish.
     pub fn stop(self) {
-        drop(self.stop_sender);
+        self.stopped.store(true, Ordering::Release);
+        let _ = self.stop_sender.send(None);
         let _ = self.thread.join();
+    }
+
+    pub(crate) fn message_sender(&self) -> Sender<Option<ClientMessage>> {
+        self.stop_sender.clone()
     }
 }
 
@@ -57,9 +63,14 @@ pub fn start_heartbeat(stream: &Arc<Stream>, heartbeat: &HeartbeatSettings) -> R
     let (stop, wake) = channel();
     let stream = Arc::clone(stream);
     let heartbeat = heartbeat.clone();
-    let thread = thread::spawn(move || write_heartbeats_until_stopped(&stream, &heartbeat, &wake));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let thread_stopped = Arc::clone(&stopped);
+    let thread = thread::spawn(move || {
+        write_heartbeats_until_stopped(&stream, &heartbeat, &wake, &thread_stopped)
+    });
     RunningHeartbeat {
         stop_sender: stop,
+        stopped,
         thread,
     }
 }
@@ -67,7 +78,7 @@ pub fn start_heartbeat(stream: &Arc<Stream>, heartbeat: &HeartbeatSettings) -> R
 /// Writes the heartbeat line until the heartbeat stops, or until the daemon stops taking
 /// it.
 ///
-/// The first heartbeat goes out at once, and the next one after the interval. The
+/// The first heartbeat goes out at once. Each message restarts the interval. The
 /// immediate first heartbeat does two jobs, and anybody who wants to remove that line
 /// must answer both.
 ///
@@ -86,22 +97,27 @@ pub fn start_heartbeat(stream: &Arc<Stream>, heartbeat: &HeartbeatSettings) -> R
 fn write_heartbeats_until_stopped(
     stream: &Stream,
     heartbeat: &HeartbeatSettings,
-    wake: &Receiver<()>,
+    wake: &Receiver<Option<ClientMessage>>,
+    stopped: &AtomicBool,
 ) {
     let mut writer: &Stream = stream;
+    let mut line = heartbeat.line.clone();
     loop {
-        if writeln!(writer, "{}", heartbeat.line)
+        if stopped.load(Ordering::Acquire) {
+            return;
+        }
+        if writeln!(writer, "{line}")
             .and_then(|()| writer.flush())
             .is_err()
         {
             return;
         }
-        match wake.recv_timeout(heartbeat.interval) {
-            // The wait ran out, so the next heartbeat is due.
-            Err(RecvTimeoutError::Timeout) => {}
-            // Anything else is the handle going away, which ends the heartbeat.
-            _ => return,
-        }
+        // Every message proves liveness, so only an idle connection needs a beat.
+        line = match wake.recv_timeout(heartbeat.interval) {
+            Ok(Some(message)) => message.encode(),
+            Err(RecvTimeoutError::Timeout) => heartbeat.line.clone(),
+            Ok(None) | Err(RecvTimeoutError::Disconnected) => return,
+        };
     }
 }
 

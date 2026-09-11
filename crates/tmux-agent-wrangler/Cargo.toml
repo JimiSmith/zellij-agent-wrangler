@@ -2,7 +2,7 @@
 name = "tmux-agent-wrangler"
 version.workspace = true
 edition.workspace = true
-description = "A tmux client that registers a socket sink and reads the agent state on it"
+description = "An interactive tmux sidebar and dashboard for coding agents"
 
 # Built on every system, and not on unix alone. Tmux does not run on Windows,
 # but psmux does, and psmux ships a program called `tmux`. A crate that a

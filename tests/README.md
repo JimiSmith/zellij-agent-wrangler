@@ -25,6 +25,17 @@ From the repository root:
     python3 -m unittest tests.test_screen -v      # emulator only, no pty
     python3 tests/drive.py tests/scripts/bash_smoke.steps
     python3 tests/drive.py tests/scripts/zellij_smoke.steps
+    python3 tests/drive.py tests/scripts/tmux_interaction.steps
+    python3 tests/drive.py tests/scripts/tmux_dashboard.steps
+    python3 tests/drive.py tests/scripts/tmux_control_recovery.steps
+
+Run tmux scripts sequentially: they share the isolated server and daemon user.
+The interaction script checks real pane activation. The dashboard script checks
+CLI configuration, keyboard and mouse previews, scrolling, and daemon-state
+acknowledgement while another pane's call remains pending. Its hook helper runs
+through `sh` so process discovery reaches the long-lived harness.
+The control recovery script detaches only the control client and checks that
+polling still updates the tree and acknowledges focused calls.
 
 The zellij cases skip themselves when `zellij` is not on `PATH`, and the tmux
 cases skip themselves when `tmux` is not on `PATH`.

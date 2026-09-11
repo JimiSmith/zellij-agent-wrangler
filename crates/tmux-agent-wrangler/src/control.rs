@@ -37,7 +37,7 @@ use std::thread;
 
 use crate::sidebar::ClientEvent;
 use crate::tmux_location::TMUX_PROGRAM;
-use crate::tmux_query::ANSWER_BREAK;
+use crate::tmux_query::{ANSWER_BREAK, CLIENTS_BREAK, CLIENT_FORMAT};
 use crate::topology::{PANE_FORMAT, WINDOW_FORMAT};
 
 /// The flags that this client asks the server to set on it.
@@ -125,13 +125,15 @@ pub fn handshake_commands() -> String {
 /// The command line that asks for the shape of one session.
 ///
 /// Each command separated by a semicolon gets a reply block of its own, so the
-/// output arrives in three pieces. Joined, those pieces are exactly what the
+/// output arrives in separate pieces. Joined, those pieces are exactly what the
 /// same commands write when they run as a child process, marker and all.
 pub fn query_command_line(session: &str) -> String {
     format!(
         "list-windows -t {session} -F '{WINDOW_FORMAT}' ; \
          display-message -p '{ANSWER_BREAK}' ; \
          list-panes -s -t {session} -F '{PANE_FORMAT}' ; \
+         display-message -p '{CLIENTS_BREAK}' ; \
+         list-clients -t {session} -F '{CLIENT_FORMAT}' ; \
          display-message -p '{ANSWER_DONE}'\n"
     )
 }
@@ -290,7 +292,7 @@ pub fn start_control_client(session: &str, events: Sender<ClientEvent>) -> Optio
                 ControlOutcome::AskAgain => events.send(ClientEvent::TopologyChanged),
                 ControlOutcome::Answered(text) => events.send(ClientEvent::TopologyAnswered(text)),
                 ControlOutcome::ServerGone => {
-                    let _ = events.send(ClientEvent::QuitRequested);
+                    let _ = events.send(ClientEvent::ControlStopped);
                     return;
                 }
             };
@@ -298,9 +300,8 @@ pub fn start_control_client(session: &str, events: Sender<ClientEvent>) -> Optio
                 return;
             }
         }
-        // The child ended. Nothing will say that anything moved again, so the
-        // sidebar must stop rather than hold a frame that never changes.
-        let _ = events.send(ClientEvent::QuitRequested);
+        // The timer can poll after a control disconnect or a failed read.
+        let _ = events.send(ClientEvent::ControlStopped);
     });
     Some(ControlClient { child, to_tmux })
 }
@@ -435,7 +436,7 @@ mod tests {
 
     #[test]
     fn a_whole_answer_arrives_as_the_text_that_a_child_process_would_write() {
-        // Three reply blocks, joined. The result must equal what the same
+        // Reply blocks, joined. The result must equal what the same
         // commands write on their own, because one reader parses both.
         let outcomes = take_all(&[
             "%begin 1787 298 1",
@@ -449,8 +450,15 @@ mod tests {
             "@0\t%0\t1\tbash",
             "%end 1787 300 1",
             "%begin 1787 301 1",
-            ANSWER_DONE,
+            CLIENTS_BREAK,
             "%end 1787 301 1",
+            "%begin 1787 302 1",
+            "1",
+            "0",
+            "%end 1787 302 1",
+            "%begin 1787 303 1",
+            ANSWER_DONE,
+            "%end 1787 303 1",
         ]);
         let answered: Vec<&ControlOutcome> = outcomes
             .iter()
@@ -459,9 +467,15 @@ mod tests {
         assert_eq!(
             answered,
             [&ControlOutcome::Answered(format!(
-                "@0\t0\t0\teditor\n@1\t1\t1\tlogs\n{ANSWER_BREAK}\n@0\t%0\t1\tbash\n"
+                "@0\t0\t0\teditor\n@1\t1\t1\tlogs\n{ANSWER_BREAK}\n@0\t%0\t1\tbash\n{CLIENTS_BREAK}\n1\n0\n"
             ))]
         );
+        let ControlOutcome::Answered(text) = answered[0] else {
+            panic!("an answer")
+        };
+        let parsed = crate::tmux_query::split_answer(text).unwrap();
+        assert_eq!(parsed.clients, "1\n0\n");
+        assert!(crate::topology::has_interactive_client(&parsed.clients));
     }
 
     #[test]
@@ -488,10 +502,12 @@ mod tests {
     }
 
     #[test]
-    fn the_query_asks_both_questions_and_marks_where_each_answer_stops() {
+    fn the_query_asks_all_questions_and_marks_where_each_answer_stops() {
         let line = query_command_line("$3");
         assert!(line.contains("list-windows -t $3"));
         assert!(line.contains("list-panes -s -t $3"));
+        assert!(line.contains("list-clients -t $3"));
+        assert!(line.contains(CLIENTS_BREAK));
         assert!(line.contains(ANSWER_BREAK));
         assert!(line.contains(ANSWER_DONE));
         assert!(line.ends_with('\n'), "tmux reads one command per line");

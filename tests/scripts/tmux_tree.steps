@@ -89,6 +89,8 @@ wait: 1: resize-me-a-long-name @ 20
 # case passes on a sidebar that redraws for a new pane name and not for a
 # resize.
 sleep: 3
+sh: tmux -L wrangler-test select-pane -t wrangler-test-tree:0.0 -T pane-title-for-resize
+wait: pane-title-for-resize @ 20
 dump: tmux_tree_wide
 
 sh: tmux -L wrangler-test resize-pane -t wrangler-test-tree:0.1 -x 20

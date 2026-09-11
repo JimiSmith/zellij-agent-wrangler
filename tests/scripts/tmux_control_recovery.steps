@@ -1,0 +1,25 @@
+# A lost control client must leave the polling sidebar running.
+env: TERM=xterm-256color
+sh?: tests/scripts/reset-tmux.sh
+sh: cargo build -p tmux-agent-wrangler -p agent-wrangler --locked
+spawn: tmux -L wrangler-test -f /dev/null new-session -s wrangler-test-recovery -n editor
+sleep: 1
+sh: tmux -L wrangler-test split-window -h -l 50 -t wrangler-test-recovery "USER=wrangler-test XDG_STATE_HOME=$PWD/tests/out/state PATH=$PWD/target/debug:\$PATH $PWD/target/debug/tmux-agent-wrangler; echo SIDEBAR-EXIT; sleep 30"
+wait: 0: editor @ 25
+# Detach only control clients. The interactive terminal stays attached.
+sh: test "$(tmux -L wrangler-test list-clients -t wrangler-test-recovery -F '#{client_control_mode}' | sort | tr '\n' ',')" = 0,1,
+sh: for client in $(tmux -L wrangler-test list-clients -t wrangler-test-recovery -F '#{?client_control_mode,#{client_name},}'); do tmux -L wrangler-test detach-client -t "$client"; done
+sleep: 1
+sh: tmux -L wrangler-test rename-window -t wrangler-test-recovery:0 POLLING-RECOVERED
+wait: 0: POLLING-RECOVERED @ 10
+sh: sh tests/scripts/raise-tmux-call.sh tmux-recovery %0 needsAttention
+wait: TMUX-AGENT @ 20
+sh: sh tests/scripts/expect-turn.sh tmux-recovery attention
+sh: tmux -L wrangler-test select-pane -t %0
+sleep: 2
+sh: sh tests/scripts/expect-turn.sh tmux-recovery idle
+sh: tmux -L wrangler-test select-pane -t %1
+sleep: 1
+dump: tmux_control_recovered
+keys: q
+wait: SIDEBAR-EXIT

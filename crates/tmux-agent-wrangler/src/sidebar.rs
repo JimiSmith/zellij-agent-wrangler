@@ -6,7 +6,7 @@
 //! ```text
 //! socket reader  ->  StateArrived, ClientStopped
 //! change ticker  ->  TopologyChanged
-//! input reader   ->  QuitRequested
+//! input reader   ->  UserAction
 //! child runner   ->  CommandFinished
 //!                        |
 //!                        v
@@ -27,6 +27,7 @@ use agent_wrangler_core::agent::{self, Agent, Record, SessionId};
 use agent_wrangler_core::registry::Registry;
 use agent_wrangler_sidebar::{
     AgentSnapshot, Application, Effect, Input, Options, PaneId, Permission, ProgramToRun,
+    UserAction,
 };
 use agent_wrangler_ui::render::Sidebar as SidebarWidget;
 use ratatui::DefaultTerminal;
@@ -61,13 +62,16 @@ pub const ASK_AGAIN_AFTER: Duration = Duration::from_millis(500);
 #[derive(Debug)]
 pub enum ClientEvent {
     /// One state payload, exactly as it came off the socket.
-    StateArrived(String),
+    StateArrived(String, client::ClientConnection),
+    User(UserAction),
     /// The socket reader gave up. This carries what it said.
     ClientStopped(Option<String>),
     /// Something in tmux moved, so the shape of the session must be read again.
     TopologyChanged,
     /// One whole answer to the topology question, from the control client.
     TopologyAnswered(String),
+    /// The control connection ended. The timer must continue to poll.
+    ControlStopped,
     /// The user asked this program to stop.
     QuitRequested,
     /// A program that an effect started has finished.
@@ -76,16 +80,6 @@ pub enum ClientEvent {
         exit: Option<i32>,
         stderr: Vec<u8>,
     },
-}
-
-/// Whether a key press stops this program.
-///
-/// Raw mode stops Ctrl-C raising an interrupt, so this program must read the
-/// key and act on it. Without this the pane holds a sidebar that the user
-/// cannot leave.
-fn is_quit(byte: u8) -> bool {
-    // `q`, `Q`, Ctrl-C and Ctrl-Q.
-    matches!(byte, b'q' | b'Q' | 0x03 | 0x11)
 }
 
 /// Reads the state of the agents that this session shows.
@@ -136,14 +130,17 @@ fn start_socket_reader(
     notifier: Vec<String>,
 ) {
     thread::spawn(move || {
-        let stopped = client::run_client(
+        let writer = client::ClientWriter::default();
+        let stopped = client::run_client_with_writer(
             |payload| {
+                let connection = writer.connection().expect("the payload has a connection");
                 events
-                    .send(ClientEvent::StateArrived(payload.to_string()))
+                    .send(ClientEvent::StateArrived(payload.to_string(), connection))
                     .map_err(|_| std::io::Error::other("the sidebar stopped"))
             },
             &heartbeat,
             &notifier,
+            &writer,
         );
         let said = stopped.err().map(|why| why.to_string());
         let _ = events.send(ClientEvent::ClientStopped(said));
@@ -170,18 +167,21 @@ fn start_change_ticker(events: Sender<ClientEvent>, every: Duration) {
 /// Starts the thread that reads the keyboard.
 ///
 /// Side effect: this reads the standard input for as long as this program runs.
-/// Every byte except a request to quit is dropped. This sidebar draws, and it
-/// takes no other key.
+/// The decoder retains incomplete escape sequences between reads.
 fn start_input_reader(events: Sender<ClientEvent>) {
     thread::spawn(move || {
         use std::io::Read;
         let mut input = std::io::stdin();
         let mut byte = [0u8; 1];
+        let mut decoder = crate::input::InputDecoder::default();
         while let Ok(1) = input.read(&mut byte) {
-            if is_quit(byte[0]) && events.send(ClientEvent::QuitRequested).is_err() {
-                return;
+            if let Some(action) = decoder.push(byte[0]) {
+                if events.send(ClientEvent::User(action)).is_err() {
+                    return;
+                }
             }
         }
+        let _ = events.send(ClientEvent::QuitRequested);
     });
 }
 
@@ -210,9 +210,50 @@ fn start_child(events: Sender<ClientEvent>, program: ProgramToRun) {
     });
 }
 
+/// Control replies arrive in request order. A new snapshot invalidates every
+/// outstanding request, including replies already queued on the event channel.
+#[derive(Default)]
+struct TopologyQueries {
+    pending: usize,
+    obsolete: usize,
+}
+
+impl TopologyQueries {
+    fn requested(&mut self) {
+        self.pending += 1;
+    }
+
+    fn answered(&mut self) -> bool {
+        if self.pending == 0 {
+            return false;
+        }
+        self.pending -= 1;
+        if self.obsolete > 0 {
+            self.obsolete -= 1;
+            return false;
+        }
+        true
+    }
+}
+
+fn adopt_snapshot(
+    application: &mut Application,
+    queries: &mut TopologyQueries,
+    snapshot: AgentSnapshot,
+) -> Vec<Effect> {
+    queries.obsolete = queries.pending;
+    [Input::VisibilityChanged(false), Input::Agents(snapshot)]
+        .into_iter()
+        .flat_map(|input| application.reduce(input).effects)
+        .collect()
+}
+
 /// The state that the drawing thread holds beside the application.
 struct Sidebar {
     application: Application,
+    connection: Option<client::ClientConnection>,
+    queries: TopologyQueries,
+    panes: Vec<topology::ReportedPane>,
     /// The pane that this program runs in. It is drawn as the sidebar of its
     /// window rather than as a pane that the user can go to.
     own_pane: String,
@@ -265,19 +306,24 @@ impl Sidebar {
                 // on its own.
             }
             Effect::Run(program) => start_child(self.events.clone(), program),
-            Effect::Tell(_) => {
-                // Do nothing. This client opens its socket for reading alone.
-                // The thread that reads the socket writes the heartbeat, which
-                // is the only message that this client sends.
+            Effect::Tell(message) => {
+                if let Some(connection) = &self.connection {
+                    connection.send(message);
+                }
             }
-            Effect::Broadcast(_) => {
-                // Do nothing. One sidebar draws one session here, so this
-                // client has no other sidebar to send a message to.
+            Effect::Broadcast(message) => {
+                // This manually started instance is its only subscriber.
+                self.reduce(Input::Message(message));
             }
             Effect::FocusPane(_) | Effect::SwitchTab(_) => {
-                // Do nothing. This sidebar draws the session and changes
-                // nothing in it. It reads one key, and that key stops the
-                // program.
+                if let Some(mut command) =
+                    tmux_query::build_activation_command(&self.session, &effect, &self.panes)
+                {
+                    // A target can close after the last report. Its stable id
+                    // then fails without selecting a replacement.
+                    let _ = command.output();
+                    let _ = self.events.send(ClientEvent::TopologyChanged);
+                }
             }
             Effect::StopSessionDiscovery => {
                 // Do nothing. This client reads its session once, from its
@@ -296,42 +342,35 @@ impl Sidebar {
     /// answer arrives later as an event. Without one it runs `tmux` and reads
     /// the answer now.
     ///
-    /// If tmux refuses the question, this function keeps the reports that it
-    /// already holds. A session that is closing answers nothing, and tmux ends
-    /// this program together with the session.
+    /// If tmux refuses the question, this function keeps the rows but disables
+    /// focus effects. A session that is closing can answer nothing.
     fn ask_about_the_session(&mut self) {
         if let Some(control) = self.control.as_mut() {
             if control.ask_about_the_session(&self.session).is_ok() {
+                self.queries.requested();
                 return;
             }
             // The control client went. The timer is still running, so the next
             // tick asks again through a child process.
             self.control = None;
+            self.queries.obsolete = self.queries.pending;
         }
         if let Ok(answer) = tmux_query::read_topology(&self.session) {
-            self.read_the_session(&answer.windows, &answer.panes);
+            self.read_the_session(&answer);
+        } else {
+            self.reduce(Input::VisibilityChanged(false));
         }
     }
 
     /// Feeds one answer about the session to the application.
     ///
-    /// The two halves are the same bytes whichever transport carried them, so
+    /// The reports contain the same bytes whichever transport carried them, so
     /// one reader serves both.
-    fn read_the_session(&mut self, reported_windows: &str, reported_panes: &str) {
-        let windows = topology::read_windows(reported_windows);
-        let panes = topology::read_panes(reported_panes);
-        self.reduce(Input::TabsReported(topology::tab_reports(&windows)));
-        self.reduce(Input::LayoutReported(topology::session_layout(
-            &windows,
-            &panes,
-            &self.own_pane,
-        )));
-        self.reduce(Input::FocusObserved(topology::focus(
-            &windows,
-            &panes,
-            &self.own_pane,
-        )));
-        self.reduce(Input::EventSettled);
+    fn read_the_session(&mut self, answer: &tmux_query::TopologyAnswer) {
+        self.panes = topology::read_panes(&answer.panes);
+        for effect in apply_topology(&mut self.application, answer, &self.own_pane) {
+            self.run(effect);
+        }
     }
 
     /// Puts the state of the application on the pane.
@@ -350,7 +389,7 @@ impl Sidebar {
                 let area = pane.area();
                 let view = application.render(area);
                 let widget = SidebarWidget {
-                    lines: view.frame.lines(),
+                    lines: &view.frame.lines()[view.offset.min(view.frame.lines().len())..],
                     selected: view.selection.as_ref(),
                 };
                 pane.render_widget(widget, area);
@@ -369,6 +408,7 @@ impl Drop for Sidebar {
     /// holds drops after this function runs, and it shows the cursor as it
     /// drops.
     fn drop(&mut self) {
+        restore_input_modes();
         ratatui::restore();
     }
 }
@@ -396,6 +436,11 @@ pub fn run_sidebar(options: Options, heartbeat: HeartbeatSettings) -> Result<(),
     // blank lines. Leaving the alternate screen also puts the pane back as this
     // program found it, rather than leaving the last frame behind.
     let terminal = ratatui::try_init().map_err(FatalError::TerminalRefused)?;
+    let panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_input_modes();
+        panic_hook(info);
+    }));
 
     let (events, arriving) = mpsc::channel();
     let notifier = options
@@ -414,6 +459,9 @@ pub fn run_sidebar(options: Options, heartbeat: HeartbeatSettings) -> Result<(),
     let target = session.as_target();
     let mut sidebar = Sidebar {
         application: Application::new(options),
+        connection: None,
+        queries: TopologyQueries::default(),
+        panes: Vec::new(),
         own_pane,
         server_socket: location.server_socket().to_string(),
         control: control::start_control_client(&target, events.clone()),
@@ -421,11 +469,16 @@ pub fn run_sidebar(options: Options, heartbeat: HeartbeatSettings) -> Result<(),
         terminal,
         events,
     };
+    use std::io::Write;
+    std::io::stdout()
+        .write_all(b"\x1b[?1000h\x1b[?1006h\x1b[?2004h")
+        .and_then(|()| std::io::stdout().flush())
+        .map_err(FatalError::TerminalRefused)?;
     // The application runs no effect until it holds a permission. Tmux has no
     // permission to grant or to refuse, so this reports a granted permission
     // once and reports no other.
     sidebar.reduce(Input::PermissionReported(Permission::Granted));
-    sidebar.reduce(Input::VisibilityChanged(true));
+
     serve(&mut sidebar, arriving)
 }
 
@@ -451,14 +504,40 @@ fn serve(sidebar: &mut Sidebar, arriving: Receiver<ClientEvent>) -> Result<(), F
         };
         match event {
             ClientEvent::TopologyChanged => sidebar.ask_about_the_session(),
+            ClientEvent::ControlStopped => {
+                sidebar.control = None;
+                sidebar.queries.obsolete = sidebar.queries.pending;
+                sidebar.reduce(Input::VisibilityChanged(false));
+                sidebar.ask_about_the_session();
+            }
             ClientEvent::TopologyAnswered(text) => {
+                if !sidebar.queries.answered() {
+                    continue;
+                }
                 if let Some(answer) = tmux_query::split_answer(&text) {
-                    sidebar.read_the_session(&answer.windows, &answer.panes);
+                    sidebar.read_the_session(&answer);
+                } else {
+                    sidebar.reduce(Input::VisibilityChanged(false));
                 }
             }
-            ClientEvent::StateArrived(payload) => {
+            ClientEvent::User(action) => sidebar.reduce(Input::User(action)),
+            ClientEvent::StateArrived(payload, connection) => {
                 if let Some(snapshot) = read_agents(&payload, &sidebar.server_socket) {
-                    sidebar.reduce(Input::Agents(snapshot));
+                    if sidebar.connection.as_ref() != Some(&connection) {
+                        // Forget local suppression before the new connection's
+                        // authoritative state. Old answers must not be retried.
+                        sidebar.reduce(Input::Agents(AgentSnapshot::Compatible {
+                            registry: Registry::default(),
+                            panes: BTreeMap::new(),
+                        }));
+                        sidebar.connection = Some(connection);
+                    }
+                    for effect in
+                        adopt_snapshot(&mut sidebar.application, &mut sidebar.queries, snapshot)
+                    {
+                        sidebar.run(effect);
+                    }
+                    sidebar.ask_about_the_session();
                 }
             }
             ClientEvent::CommandFinished { call, exit, stderr } => {
@@ -474,6 +553,34 @@ fn serve(sidebar: &mut Sidebar, arriving: Receiver<ClientEvent>) -> Result<(), F
         }
         sidebar.draw()?;
     }
+}
+
+// Keep focus effects disabled until all reports from this answer are installed.
+fn apply_topology(
+    application: &mut Application,
+    answer: &tmux_query::TopologyAnswer,
+    own_pane: &str,
+) -> Vec<Effect> {
+    let windows = topology::read_windows(&answer.windows);
+    let panes = topology::read_panes(&answer.panes);
+    let inputs = [
+        Input::VisibilityChanged(false),
+        Input::TabsReported(topology::tab_reports(&windows)),
+        Input::LayoutReported(topology::session_layout(&windows, &panes, own_pane)),
+        Input::VisibilityChanged(topology::has_interactive_client(&answer.clients)),
+        Input::FocusObserved(topology::focus(&windows, &panes, own_pane)),
+        Input::EventSettled,
+    ];
+    inputs
+        .into_iter()
+        .flat_map(|input| application.reduce(input).effects)
+        .collect()
+}
+
+fn restore_input_modes() {
+    use std::io::Write;
+    let _ = std::io::stdout().write_all(b"\x1b[?1000l\x1b[?1006l\x1b[?2004l");
+    let _ = std::io::stdout().flush();
 }
 
 #[cfg(test)]
@@ -510,6 +617,72 @@ mod tests {
 
     fn snapshot(payload: &str) -> AgentSnapshot {
         read_agents(payload, SERVER).expect("a snapshot")
+    }
+
+    fn calling_snapshot() -> AgentSnapshot {
+        let mut agent = Agent::new(
+            SessionId::new("caller").unwrap(),
+            "claude",
+            LabelFacts::default(),
+            Origin::default(),
+        );
+        agent.turn = agent::Turn::Attention;
+        agent.raised = 1;
+        let panes = BTreeMap::from([(agent.session.clone(), PaneId::new("%2"))]);
+        let mut registry = Registry::default();
+        registry.report(agent);
+        AgentSnapshot::Compatible { registry, panes }
+    }
+
+    fn answer(clients: &str) -> tmux_query::TopologyAnswer {
+        tmux_query::TopologyAnswer {
+            windows: "@0\t0\t0\tsidebar\n@1\t1\t1\tagent\n".into(),
+            panes: "@0\t%0\t1\tsidebar\n@1\t%2\t1\tagent\n".into(),
+            clients: clients.into(),
+        }
+    }
+
+    fn tells(effects: &[Effect]) -> usize {
+        effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::Tell(agent_wrangler_sidebar::ClientMessage::Seen(session)) if session.as_str() == "caller"))
+            .count()
+    }
+
+    #[test]
+    fn new_snapshot_waits_for_observation_after_its_arrival() {
+        let mut app = Application::new(Options::default());
+        app.reduce(Input::PermissionReported(Permission::Granted));
+        apply_topology(&mut app, &answer("0\n1\n"), "%0");
+        let mut queries = TopologyQueries::default();
+        queries.requested();
+        queries.requested();
+        assert_eq!(
+            tells(&adopt_snapshot(&mut app, &mut queries, calling_snapshot())),
+            0
+        );
+        assert!(!queries.answered());
+        queries.requested();
+        assert!(!queries.answered());
+        assert!(queries.answered());
+        assert_eq!(tells(&apply_topology(&mut app, &answer("1\n"), "%0")), 0);
+        assert_eq!(tells(&apply_topology(&mut app, &answer("0\n1\n"), "%0")), 1);
+    }
+
+    #[test]
+    fn detached_topology_cannot_acknowledge_initial_or_fresh_snapshots() {
+        for clients in ["", "1\n", "0\ninvalid\n"] {
+            let mut app = Application::new(Options::default());
+            app.reduce(Input::PermissionReported(Permission::Granted));
+            app.reduce(Input::VisibilityChanged(true));
+            app.reduce(Input::Agents(calling_snapshot()));
+            assert_eq!(tells(&apply_topology(&mut app, &answer(clients), "%0")), 0);
+            assert_eq!(
+                tells(&app.reduce(Input::Agents(calling_snapshot())).effects),
+                0
+            );
+            assert_eq!(tells(&apply_topology(&mut app, &answer("0\n1\n"), "%0")), 1);
+        }
     }
 
     #[test]
@@ -585,18 +758,5 @@ mod tests {
     fn a_payload_that_is_not_a_state_message_says_nothing() {
         assert_eq!(read_agents("", SERVER), None);
         assert_eq!(read_agents("not a state\n", SERVER), None);
-    }
-
-    #[test]
-    fn the_keys_that_stop_this_program_are_the_ones_a_user_would_try() {
-        // Raw mode stops Ctrl-C raising an interrupt, so this program must read
-        // the key. A sidebar that answered none of these would be a pane that
-        // the user cannot leave.
-        assert!(is_quit(b'q'));
-        assert!(is_quit(b'Q'));
-        assert!(is_quit(0x03), "Ctrl-C");
-        assert!(is_quit(0x11), "Ctrl-Q");
-        assert!(!is_quit(b'j'));
-        assert!(!is_quit(b'\r'));
     }
 }

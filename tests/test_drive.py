@@ -375,9 +375,9 @@ class TestTmuxTree(unittest.TestCase):
         self.assertNotIn("1: resize-me-a-long-name", narrow)
         # Every other row is composed again as well. A pane title cut for
         # thirty-four columns is longer than twenty columns hold.
-        self.assertIn("bash in zellij-agent-…", wide)
-        self.assertNotIn("bash in zellij-agent-…", narrow)
-        self.assertIn("bash in…", narrow)
+        self.assertIn("pane-title-for-resize", wide)
+        self.assertNotIn("pane-title-for-resize", narrow)
+        self.assertIn("pane-ti…", narrow)
 
     def test_the_sidebar_reached_the_client_of_this_build(self):
         # The client is found by name on PATH. A developer with the released
@@ -387,6 +387,24 @@ class TestTmuxTree(unittest.TestCase):
         # `sh:` step takes the environment of the host.
         text, _ = self.dump("tmux_tree_three")
         self.assertNotIn("OUT OF STEP", text)
+
+
+@unittest.skipUnless(HAVE_TMUX, "tmux is not installed")
+class TestTmuxControlRecovery(unittest.TestCase):
+    def test_control_disconnect_keeps_polling_and_acknowledging(self):
+        path = os.path.join(SCRIPTS, "tmux_control_recovery.steps")
+        result = subprocess.run(
+            [sys.executable, os.path.join(HERE, "drive.py"), path, "--quiet"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        text, sgr = read_dump("tmux_control_recovered", os.path.join(HERE, "out"))
+        self.assertIn("0: POLLING-RECOVERED", text)
+        self.assertIn("TMUX-AGENT", text)
+        self.assertNotIn("SIDEBAR-EXIT", text)
+        self.assertEqual(sgr["unhandled"], 0)
 
 
 if __name__ == "__main__":

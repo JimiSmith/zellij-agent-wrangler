@@ -92,6 +92,12 @@ pub struct ReportedPane {
     pub title: String,
 }
 
+/// A valid client report must name at least one non-control client.
+/// Unknown fields fail closed, including hosts that do not know the format.
+pub fn has_interactive_client(answer: &str) -> bool {
+    answer.lines().all(|line| matches!(line, "0" | "1")) && answer.lines().any(|line| line == "0")
+}
+
 /// The windows that one `list-windows` answer describes.
 ///
 /// A line with the wrong number of fields is dropped. Tmux writes one line per
@@ -235,6 +241,16 @@ mod tests {
 
     fn panes() -> Vec<ReportedPane> {
         read_panes(PANES)
+    }
+
+    #[test]
+    fn only_a_valid_non_control_client_proves_visibility() {
+        for answer in ["", "1\n", "1\n1\n", "unknown\n", "0\nunknown\n", "\n"] {
+            assert!(!has_interactive_client(answer), "{answer:?}");
+        }
+        for answer in ["0\n", "1\n0\n", "0\n1\n"] {
+            assert!(has_interactive_client(answer), "{answer:?}");
+        }
     }
 
     #[test]

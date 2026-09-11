@@ -1,8 +1,6 @@
-//! The tmux client. It registers a socket sink, reads the state that the daemon
-//! publishes to it, and writes out every record.
-//!
-//! This program draws no sidebar and reads no tmux topology. It writes out what
-//! arrives, so that the transport is proven before anything draws with it.
+//! The interactive native tmux sidebar. It reads the session topology and the
+//! agent records from the daemon, draws the sidebar, and handles user input.
+//! Command-line options configure one sidebar in a manually created pane.
 //!
 //! One socket serves one session. The name comes from the tmux server and from
 //! the session that holds this pane, so every sidebar of that session derives
@@ -49,13 +47,14 @@
 use std::process::{ExitCode, ExitStatus};
 
 use agent_wrangler_core::client_message::{ClientMessage, HEARTBEAT_INTERVAL};
-use agent_wrangler_sidebar::Options;
 
 use crate::heartbeat::HeartbeatSettings;
 
+pub mod arguments;
 pub mod client;
 pub mod control;
 pub mod heartbeat;
+pub mod input;
 pub mod sidebar;
 pub mod socket_name;
 pub mod tmux_location;
@@ -151,6 +150,17 @@ impl std::fmt::Display for FatalError {
 /// stops with the process. The daemon then gives up on the client for saying
 /// nothing.
 pub fn run() -> ExitCode {
+    let options = match arguments::parse(std::env::args().skip(1)) {
+        Ok(arguments::Arguments::Help) => {
+            println!("{}", arguments::USAGE);
+            return ExitCode::SUCCESS;
+        }
+        Ok(arguments::Arguments::Sidebar(options)) => options,
+        Err(why) => {
+            eprintln!("tmux-agent-wrangler: {why}\nUse --help for usage.");
+            return ExitCode::FAILURE;
+        }
+    };
     // The daemon gives up on a client that says nothing, and a client that only
     // reads says nothing at all. Both ends take the interval and the line from
     // the crate that they share.
@@ -158,7 +168,7 @@ pub fn run() -> ExitCode {
         interval: HEARTBEAT_INTERVAL,
         line: ClientMessage::Beat.encode(),
     };
-    match sidebar::run_sidebar(Options::default(), heartbeat) {
+    match sidebar::run_sidebar(options, heartbeat) {
         Ok(()) => ExitCode::SUCCESS,
         Err(stopped) => {
             eprintln!("tmux-agent-wrangler: {stopped}");

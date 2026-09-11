@@ -73,11 +73,10 @@ size. The renderer translates those lines into terminal output.
   installer and the platform integration. It is named for what it wrangles
   rather than for what draws it, because nothing it does is particular to
   Zellij.
-- `tmux-agent-wrangler` — the tmux client. It registers a socket sink, reads
-  the state that the daemon publishes on it, and writes out every record. It
-  draws no sidebar and reads no tmux topology. It takes
-  `agent-wrangler-core` for the record format alone, and it never sees
-  `agent-wrangler-ui`.
+- `tmux-agent-wrangler` — the native tmux client. It reads topology, registers a
+  socket sink, and draws the shared sidebar or dashboard in a manually started
+  pane. It uses core, UI and sidebar, translates terminal input, and executes
+  stable-ID activation and daemon acknowledgements.
 
 ## Application state
 
@@ -464,7 +463,7 @@ of event and touches no state:
 socket reader   ->  a state payload, or the reader gave up
 control client  ->  something moved, an answer, or the server went
 change ticker   ->  something moved                (the fallback feed)
-input reader    ->  the user asked to stop
+input reader    ->  a portable user action
 child runner    ->  a program that an effect started has finished
                         |
                         v
@@ -475,6 +474,21 @@ child runner    ->  a program that an effect started has finished
 ```
 
 Nothing there needs a runtime, an async crate or a signal handler.
+
+The native argument parser validates CLI option names and values, then uses the
+shared configuration parser. The byte decoder retains fragmented escape
+sequences, preserves the row and column of SGR mouse clicks, and ignores
+bracketed paste. The drawing adapter clips the shared frame at its scroll
+offset. Activation names stable window and pane IDs, not displayed indexes.
+The sole manually started instance consumes its own broadcasts; it does not
+place panes or synchronize with other instances.
+
+Each socket connection has one writer queue for heartbeats and `Seen`. A payload
+carries a handle to that connection into the drawing thread. An effect from an
+old payload cannot use a replacement connection. Reconnection discards queued
+messages and resets local agent suppression and previews before the fresh
+snapshot is applied. Registration still precedes connection and retains the
+desktop notifier arguments.
 
 The drawing goes through ratatui. The `Sidebar` widget fills a buffer for both
 clients. The zellij plugin turns that buffer into bytes with `frame_to_ansi`,
@@ -544,10 +558,20 @@ starts with a letter.
 
 ### What tmux is asked, and what is done with the answer
 
-Two questions and not one. A window name and a pane title are both free text and
-either can hold a tab, so one query carrying both would need a repair when a
-split came out with the wrong number of fields. Two queries each put their one
-free text field last, and a split into four parts is then exact.
+Separate questions report windows and panes. A window name and a pane title
+are both free text and either can hold a tab. Each query puts its free text
+field last, so a split into four parts is exact. A third question runs
+`list-clients -t <session> -F '#{client_control_mode}'`. Visibility requires at
+least one non-control client; the sidebar's own control client does not count.
+Missing or malformed client reports cannot confirm visibility. Both transports
+return the same marker-separated reports to one parser.
+
+The adapter disables focus effects while it installs a topology answer. A new
+agent snapshot also disables them and invalidates outstanding topology queries.
+Only a query issued after that snapshot can confirm focus again. Content focus
+requires matching reports and an observation, but no sidebar in the focused
+window. Sidebar focus still requires a sidebar there. Hidden instances cannot
+acknowledge calls.
 
 A window is identified by `#{window_id}` and a pane by `#{pane_id}`, which are
 stable. The order in the list becomes `TabPosition`, because the shared code

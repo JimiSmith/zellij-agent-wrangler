@@ -215,7 +215,65 @@ agent is the point of the view. The dashboard lists no calls at the foot,
 because the agents that want you already lead the table. Answering a call works
 as it always does.
 
-The tmux client draws the tree. That client reads no options yet.
+The tmux client supports the same tree, sections and dashboard views. Start one
+instance manually in a pane. It does not create or place panes:
+
+```sh
+cargo build -p agent-wrangler -p tmux-agent-wrangler --locked
+export PATH="$PWD/target/debug:$PATH"
+tmux split-window -h -l 34 'tmux-agent-wrangler'
+```
+
+For a dashboard, use a wider pane and run `tmux-agent-wrangler --dashboard true`.
+Keep `agent-wrangler` from the same build on `PATH`. Release assets do not yet
+include the tmux binary.
+
+### Tmux configuration and controls
+
+The binary accepts `--name VALUE` or `--name=VALUE`. Option names retain the
+underscores used by the shared configuration. All options require a value;
+unknown options, duplicate options, missing values, invalid labels and invalid
+boolean values fail before the terminal is taken over. `--help` or `-h` prints
+usage without contacting tmux.
+
+| Option | Default | Values |
+| --- | --- | --- |
+| `--label` | `name` | `name`, `dir` |
+| `--sections` | `false` | Boolean |
+| `--dashboard` | `false` | Boolean |
+| `--turn_state` | `true` | Boolean |
+| `--notifications` | `true` | Boolean |
+| `--status_line` | empty | Template described below; empty disables it |
+| `--desktop_notification` | `false` | Boolean or a quoted command with arguments |
+| `--install_hooks` | `false` | Boolean or a helper program name |
+
+Boolean values accept `true/on/yes/1` and `false/off/no/0`, without case
+sensitivity. A true desktop notification option uses `notify-send`; a true hook
+installation option uses `agent-wrangler`. Quote commands and templates that
+contain spaces. Programs run directly, not through a shell. Template fields,
+command quoting and hook settings have the same meaning as the Zellij options.
+
+Focus the sidebar with your normal tmux pane binding. `j`/Down and `k`/Up move
+the selection; Enter activates it. Space opens or closes the selected agent's
+preview. The dashboard scrolls to keep the selected row visible. A click on its
+disclosure triangle toggles the preview without leaving the sidebar; other row
+clicks activate their target. The mouse wheel moves the selection. Enable tmux
+mouse forwarding with `set -g mouse on` in your tmux configuration if needed.
+
+`q`, `Q`, Ctrl-C and Ctrl-Q stop this instance and restore the terminal. Start
+the binary again to re-enable it. Use one manually started instance per session;
+there is no automatic per-window placement, cross-instance selection or
+session-wide off binding. Move or recreate the pane yourself, and restart the
+binary if you move it to another session. These are layout/lifecycle operations,
+not features of the native renderer.
+
+Focusing an agent acknowledges its call on the daemon socket. Heartbeats and
+acknowledgements share one writer. Reconnection registers again, including the
+notifier command. Old acknowledgements are discarded rather than retried against
+a newer call. A fresh connection reloads agent state and clears local previews
+and acknowledgement suppression; a call still pending can therefore reappear.
+Native Windows/psmux and macOS runtime behavior needs platform testing; a
+cross-target build alone does not verify it.
 
 ### The status line
 

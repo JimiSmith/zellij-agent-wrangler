@@ -1,0 +1,59 @@
+# Dashboard CLI, preview disclosure, focus and daemon acknowledgement.
+env: TERM=xterm-256color
+sh?: tests/scripts/reset-tmux.sh
+sh: cargo build -p tmux-agent-wrangler -p agent-wrangler --locked
+resize: 18x160
+spawn: tmux -L wrangler-test -f /dev/null new-session -s wrangler-test-dashboard -n editor
+sleep: 1
+sh: tmux -L wrangler-test set-option -g mouse on
+sh: tmux -L wrangler-test split-window -h -l 110 -t wrangler-test-dashboard "USER=wrangler-test XDG_STATE_HOME=$PWD/tests/out/state PATH=$PWD/target/debug:\$PATH $PWD/target/debug/tmux-agent-wrangler --dashboard true; echo SIDEBAR-EXIT; sleep 30"
+wait: no agents @ 25
+sh: tmux -L wrangler-test new-window -d -t wrangler-test-dashboard -n other
+sh: sh tests/scripts/raise-tmux-call.sh tmux-one %0 needsAttention
+sh: sh tests/scripts/raise-tmux-call.sh tmux-other %2 needsAttention
+wait: TMUX-AGENT @ 20
+wait: NEEDS YOU
+wait: opus-5
+wait: 4k
+dump: tmux_dashboard_call
+keys: \s
+wait: TMUX-PREVIEW
+dump: tmux_dashboard_preview
+keys: \s
+waitgone: TMUX-PREVIEW
+# The disclosure is column 2 within the sidebar, not the whole terminal.
+keys: \e[<0;53;3M\e[<0;53;3m
+wait: TMUX-PREVIEW
+sh: test "$(tmux -L wrangler-test display-message -p -t wrangler-test-dashboard '#{pane_id}')" = %1
+keys: \s
+waitgone: TMUX-PREVIEW
+keys: \r
+sleep: 1
+sh: test "$(tmux -L wrangler-test display-message -p -t wrangler-test-dashboard '#{pane_id}')" = %0
+sh: sh tests/scripts/expect-turn.sh tmux-one idle
+sh: sh tests/scripts/expect-turn.sh tmux-other attention
+sh: tmux -L wrangler-test select-pane -t %1
+sleep: 1
+sh: sh tests/scripts/raise-tmux-call.sh tmux-one %0 working
+sh: sh tests/scripts/raise-tmux-call.sh tmux-one %0 needsAttention
+wait: NEEDS YOU · 2 @ 20
+dump: tmux_dashboard_later_call
+# An ordinary click activates the row rather than opening a preview.
+keys: \e[<0;75;4M\e[<0;75;4m
+sleep: 1
+sh: test "$(tmux -L wrangler-test display-message -p -t wrangler-test-dashboard '#{pane_id}')" = %0
+sh: sh tests/scripts/expect-turn.sh tmux-one idle
+sh: sh tests/scripts/expect-turn.sh tmux-other attention
+sh: tmux -L wrangler-test select-pane -t %1
+sleep: 1
+# Both previews remain open; the selected lower row must scroll into view.
+keys: k\s
+sleep: 1
+keys: j\s
+resize: 10x160
+waitgone: STATUS
+wait: TMUX-PREVIEW
+wait: 0 editor
+dump: tmux_dashboard_scrolled
+keys: q
+wait: SIDEBAR-EXIT
