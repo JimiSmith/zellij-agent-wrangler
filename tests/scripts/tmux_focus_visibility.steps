@@ -1,0 +1,46 @@
+# One sidebar acknowledges another window only with an interactive client.
+env: TERM=xterm-256color
+env: USER=wrangler-test
+sh?: tests/scripts/reset-tmux.sh
+sh: cargo build -p tmux-agent-wrangler -p agent-wrangler --locked
+spawn: sleep 120
+sh: USER=wrangler-test XDG_STATE_HOME=$PWD/tests/out/state PATH=$PWD/target/debug:$PATH tmux -L wrangler-test -f /dev/null new-session -d -s wrangler-test-focus -n sidebar
+sh: tmux -L wrangler-test new-window -d -t wrangler-test-focus -n caller
+sh: sh tests/scripts/raise-tmux-call.sh tmux-local %0 needsAttention
+sh: sh tests/scripts/raise-tmux-call.sh tmux-focus %1 needsAttention
+# The first agent snapshot arrives with only the sidebar's control client.
+sh: tmux -L wrangler-test split-window -d -h -l 45 -t wrangler-test-focus:0 "USER=wrangler-test XDG_STATE_HOME=$PWD/tests/out/state PATH=$PWD/target/debug:\$PATH $PWD/target/debug/tmux-agent-wrangler; echo SIDEBAR-EXIT; sleep 30"
+sleep: 3
+sh: test "$(tmux -L wrangler-test list-clients -t wrangler-test-focus -F '#{client_control_mode}')" = 1
+sh: sh tests/scripts/expect-turn.sh tmux-focus attention
+sh: sh tests/scripts/expect-turn.sh tmux-local attention
+sh: tmux -L wrangler-test select-pane -t %2
+sh: tmux -L wrangler-test select-window -t wrangler-test-focus:1
+sleep: 2
+sh: sh tests/scripts/expect-turn.sh tmux-focus attention
+spawn: tmux -L wrangler-test attach -t wrangler-test-focus
+sleep: 2
+sh: sh tests/scripts/expect-turn.sh tmux-focus idle
+# The only native sidebar remains in window 0, not the focused window 1.
+sh: test "$(tmux -L wrangler-test display-message -p -t wrangler-test-focus '#{window_index}')" = 1
+sh: for client in $(tmux -L wrangler-test list-clients -t wrangler-test-focus -F '#{?client_control_mode,,#{client_name}}'); do tmux -L wrangler-test detach-client -t "$client"; done
+spawn: sleep 120
+sh: sh tests/scripts/raise-tmux-call.sh tmux-focus %1 working
+sh: sh tests/scripts/raise-tmux-call.sh tmux-focus %1 needsAttention
+sleep: 3
+sh: test "$(tmux -L wrangler-test list-clients -t wrangler-test-focus -F '#{client_control_mode}')" = 1
+sh: sh tests/scripts/expect-turn.sh tmux-focus attention
+# A new interactive client must not acknowledge the still-unfocused caller.
+sh: tmux -L wrangler-test select-window -t wrangler-test-focus:0
+spawn: tmux -L wrangler-test attach -t wrangler-test-focus
+sleep: 2
+sh: sh tests/scripts/expect-turn.sh tmux-focus attention
+dump: tmux_focus_pending
+sh: tmux -L wrangler-test select-window -t wrangler-test-focus:1
+sleep: 2
+sh: sh tests/scripts/expect-turn.sh tmux-focus idle
+sh: tmux -L wrangler-test select-window -t wrangler-test-focus:0
+sleep: 1
+dump: tmux_focus_seen
+keys: q
+wait: SIDEBAR-EXIT

@@ -3,7 +3,8 @@
 
 use std::io::{BufRead, BufReader, Read};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -14,6 +15,56 @@ use crate::heartbeat::{self, HeartbeatSettings};
 use crate::socket_name::SocketName;
 use crate::tmux_location::TmuxLocation;
 use crate::FatalError;
+
+use agent_wrangler_core::client_message::ClientMessage;
+
+/// A non-blocking queue for the current connection's outbound messages.
+///
+/// Clones share the connection. A send while disconnected is dropped. A true
+/// result means queued, not delivered. The reader owns connection replacement.
+#[derive(Clone, Default)]
+pub struct ClientWriter {
+    sender: Arc<Mutex<Option<ClientConnection>>>,
+}
+
+/// An outbound queue bound to the connection that supplied a payload.
+///
+/// Attach this handle to that payload's drawing event. Send its effects through
+/// this handle, not a later connection. Equality identifies one connection, so
+/// the drawing thread can reset local acknowledgements on a fresh connection.
+#[derive(Clone, Debug)]
+pub struct ClientConnection {
+    sender: Arc<Sender<Option<ClientMessage>>>,
+}
+
+impl PartialEq for ClientConnection {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.sender, &other.sender)
+    }
+}
+
+impl Eq for ClientConnection {}
+
+impl ClientConnection {
+    /// Queues a message only for this connection. True does not mean delivered.
+    pub fn send(&self, message: ClientMessage) -> bool {
+        self.sender.send(Some(message)).is_ok()
+    }
+}
+
+impl ClientWriter {
+    /// Captures the current connection without following future reconnects.
+    pub fn connection(&self) -> Option<ClientConnection> {
+        self.sender.lock().unwrap().clone()
+    }
+
+    /// Queues a message without waiting for a socket write.
+    /// Use `connection` for effects derived from a received payload.
+    pub fn send(&self, message: ClientMessage) -> bool {
+        self.connection()
+            .is_some_and(|connection| connection.send(message))
+    }
+}
 
 /// The program that registers this client with the daemon.
 ///
@@ -170,11 +221,24 @@ pub fn read_one_connection<T: FnMut(&str) -> std::io::Result<()>>(
     take: T,
     heartbeat: &HeartbeatSettings,
 ) -> ConnectionEnd {
+    read_one_connection_with_writer(stream, take, heartbeat, &ClientWriter::default())
+}
+
+/// Reads and writes one connection. No queued message survives its end.
+/// The caller must use only one reader at a time for each `ClientWriter`.
+pub fn read_one_connection_with_writer<T: FnMut(&str) -> std::io::Result<()>>(
+    stream: Stream,
+    take: T,
+    heartbeat: &HeartbeatSettings,
+    writer: &ClientWriter,
+) -> ConnectionEnd {
     let stream = Arc::new(stream);
     let beating = heartbeat::start_heartbeat(&stream, heartbeat);
-    // The deref is explicit because the reader is now generic, and a generic
-    // parameter takes no deref coercion. `&Stream` is what reads.
+    *writer.sender.lock().unwrap() = Some(ClientConnection {
+        sender: Arc::new(beating.message_sender()),
+    });
     let ended = read_until_connection_ends(&*stream, take);
+    *writer.sender.lock().unwrap() = None;
     beating.stop();
     ended
 }
@@ -193,6 +257,7 @@ pub fn read_one_connection<T: FnMut(&str) -> std::io::Result<()>>(
 fn reconnect_loop<T, N, R, C>(
     mut take: T,
     heartbeat: &HeartbeatSettings,
+    writer: &ClientWriter,
     mut name: N,
     mut register: R,
     mut connect: C,
@@ -207,7 +272,7 @@ where
         let name = name()?;
         register(&name)?;
         let stream = connect(&name)?;
-        match read_one_connection(stream, &mut take, heartbeat) {
+        match read_one_connection_with_writer(stream, &mut take, heartbeat, writer) {
             ConnectionEnd::DaemonDisconnected => {}
             ConnectionEnd::OutputClosed => return Ok(()),
         }
@@ -229,10 +294,24 @@ pub fn run_client<T: FnMut(&str) -> std::io::Result<()>>(
     heartbeat: &HeartbeatSettings,
     notifier: &[String],
 ) -> Result<(), FatalError> {
+    run_client_with_writer(take, heartbeat, notifier, &ClientWriter::default())
+}
+
+/// Runs the registered client with an outbound queue shared with the drawing thread.
+/// Capture `writer.connection()` inside `take` and carry it with the payload.
+/// A new connection requires the drawing thread to clear local acknowledgements
+/// before it applies the fresh snapshot. Never retry an old `Seen` on a new socket.
+pub fn run_client_with_writer<T: FnMut(&str) -> std::io::Result<()>>(
+    take: T,
+    heartbeat: &HeartbeatSettings,
+    notifier: &[String],
+    writer: &ClientWriter,
+) -> Result<(), FatalError> {
     let location = TmuxLocation::from_environment()?;
     reconnect_loop(
         take,
         heartbeat,
+        writer,
         // The session is read again on every round. A window that moved to
         // another session therefore names the right socket as soon as the daemon
         // blinks. It costs one process for each round.
@@ -300,6 +379,151 @@ mod tests {
             kept.push(payload.to_string());
             Ok(())
         }
+    }
+
+    #[test]
+    fn outbound_queue_does_not_wait_for_a_daemon_that_is_not_reading() {
+        let pair = test_daemon::connected_pair("blocked-outbound");
+        pair.send_line("snapshot");
+        let writer = ClientWriter::default();
+        let sending = writer.clone();
+        let (ready, started) = std::sync::mpsc::channel();
+        let reading = thread::spawn(move || {
+            read_one_connection_with_writer(
+                pair.client_end,
+                |_| {
+                    ready.send(()).unwrap();
+                    Ok(())
+                },
+                &test_heartbeat(),
+                &sending,
+            )
+        });
+        started.recv_timeout(test_daemon::TEST_TIMEOUT).unwrap();
+        let (finished, completion) = std::sync::mpsc::channel();
+        let producing = thread::spawn(move || {
+            let message =
+                ClientMessage::Seen(agent::SessionId::new(&"a".repeat(1_000_000)).unwrap());
+            for _ in 0..16 {
+                assert!(writer.send(message.clone()));
+            }
+            finished.send(()).unwrap();
+        });
+        let result = completion.recv_timeout(test_daemon::TEST_TIMEOUT);
+        // Close the peer before asserting, so a regression releases its writer.
+        drop(pair.daemon_end);
+        assert_eq!(result, Ok(()));
+        producing.join().unwrap();
+        assert_eq!(reading.join().unwrap(), ConnectionEnd::DaemonDisconnected);
+    }
+
+    #[test]
+    fn a_previous_connection_cannot_acknowledge_a_new_call() {
+        let writer = ClientWriter::default();
+        assert!(!writer.send(ClientMessage::Beat));
+        let first = test_daemon::connected_pair("old-seen-connection");
+        first.send_line("old snapshot");
+        let mut old_connection = None;
+        read_one_connection_with_writer(
+            first.close_daemon_end(),
+            |_| {
+                old_connection = writer.connection();
+                Ok(())
+            },
+            &test_heartbeat(),
+            &writer,
+        );
+        let old_connection = old_connection.expect("a scoped writer");
+        assert!(!old_connection.send(ClientMessage::Seen(
+            agent::SessionId::new("same-session").unwrap()
+        )));
+        assert!(writer.connection().is_none());
+
+        let second = test_daemon::connected_pair("new-seen-connection");
+        second.send_line("new snapshot");
+        let heard = test_daemon::read_lines_on_thread(second.daemon_end);
+        read_one_connection_with_writer(
+            second.client_end,
+            |_| {
+                let current = writer.connection().unwrap();
+                assert_ne!(old_connection, current);
+                assert!(!old_connection.send(ClientMessage::Seen(
+                    agent::SessionId::new("same-session").unwrap()
+                )));
+                assert!(current.send(ClientMessage::Seen(
+                    agent::SessionId::new("fresh-session").unwrap()
+                )));
+                assert_eq!(
+                    heard.recv_timeout(test_daemon::TEST_TIMEOUT).unwrap(),
+                    ClientMessage::Beat.encode()
+                );
+                assert_eq!(
+                    heard.recv_timeout(test_daemon::TEST_TIMEOUT).unwrap(),
+                    ClientMessage::Seen(agent::SessionId::new("fresh-session").unwrap()).encode()
+                );
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            },
+            &test_heartbeat(),
+            &writer,
+        );
+    }
+
+    #[test]
+    fn seen_messages_share_the_connection_with_heartbeats() {
+        use agent_wrangler_core::client_message::ClientMessage;
+        let pair = test_daemon::connected_pair("seen-and-beats");
+        pair.send_line("snapshot");
+        let heard = test_daemon::read_lines_on_thread(pair.daemon_end);
+        let writer = ClientWriter::default();
+        let sending = writer.clone();
+        let (ready, started) = std::sync::mpsc::channel();
+        let serving = thread::spawn(move || {
+            read_one_connection_with_writer(
+                pair.client_end,
+                |_| {
+                    ready.send(()).unwrap();
+                    Ok(())
+                },
+                &HeartbeatSettings {
+                    interval: Duration::from_millis(1),
+                    line: ClientMessage::Beat.encode(),
+                },
+                &sending,
+            )
+        });
+        started.recv_timeout(test_daemon::TEST_TIMEOUT).unwrap();
+        let messages: Vec<_> = (0..100)
+            .map(|n| ClientMessage::Seen(agent::SessionId::new(&format!("session-{n}")).unwrap()))
+            .collect();
+        let producers: Vec<_> = messages
+            .chunks(25)
+            .map(|batch| {
+                let writer = writer.clone();
+                let batch = batch.to_vec();
+                thread::spawn(move || {
+                    for message in batch {
+                        assert!(writer.send(message));
+                    }
+                })
+            })
+            .collect();
+        for producer in producers {
+            producer.join().unwrap();
+        }
+        let mut expected: std::collections::HashSet<_> =
+            messages.iter().map(ClientMessage::encode).collect();
+        let mut beats = 0;
+        while !expected.is_empty() || beats < 2 {
+            let line = heard.recv_timeout(test_daemon::TEST_TIMEOUT).unwrap();
+            if line == ClientMessage::Beat.encode() {
+                beats += 1;
+            } else {
+                assert!(expected.remove(&line), "unexpected or spliced line: {line}");
+            }
+        }
+        drop(heard);
+        assert_eq!(serving.join().unwrap(), ConnectionEnd::DaemonDisconnected);
+        assert!(!writer.send(ClientMessage::Beat));
     }
 
     #[test]
@@ -455,6 +679,7 @@ mod tests {
         assert!(reconnect_loop(
             keep_payloads(&mut kept),
             &test_heartbeat(),
+            &ClientWriter::default(),
             name,
             register,
             connect

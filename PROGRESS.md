@@ -34,12 +34,15 @@ original has for a session whose pane it cannot take at face value (pid
 ancestry, title matching), and the selection falling back to a nearby row rather
 than to the first one when the row it was on goes.
 
-Work on a tmux client began. The daemon now delivers to a socket as well as to
-a zellij pipe, and `tmux-agent-wrangler` is the first program to read one. It
-registers a socket named for its server and its session, connects, and writes
-out every record. It draws nothing and it reads no tmux topology. The sidebar,
-the drawing and the tmux topology are later work. The release attaches no such
-binary yet, by decision.
+The native tmux client draws the shared tree, sections or dashboard in one
+manually started pane. CLI arguments select the shared options. Keyboard and
+mouse input navigate, activate rows and toggle previews. The dashboard scrolls,
+and focusing an agent acknowledges its call through the same socket writer as
+the heartbeat. Reconnection registers again and discards stale acknowledgements.
+The user owns pane placement and restart; there is no per-window lifecycle or
+cross-instance synchronization. The release attaches no tmux binary yet, by
+decision. These native capabilities are separate from the Zellij checkpoints
+described above.
 
 The daemon now reads two more things out of a transcript, in the pass it already
 runs. The first is the most recent record that says something. The second is the
@@ -51,7 +54,7 @@ The block holds what the agent last said, the time it said so, and the tool it
 runs now. The message draws as the markdown it was written in. Several rows are open at once, and a row stays open across a state
 message. The block is as tall as the message needs, so the pane scrolls, and a
 row past the foot is drawn and reachable. Each sidebar keeps its own open rows.
-The tmux client reads no key events, so it draws no block.
+The tmux client uses the same previews and supports keyboard and mouse toggles.
 
 Delivery no longer decides which clients the daemon keeps. A client of either
 kind is kept for as long as it speaks, and given up on after ninety seconds of

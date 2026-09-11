@@ -222,10 +222,11 @@ fn reconcile_focus(
     let Some(focused_tab) = position_of(reports, &observed.tab) else {
         return ReconciledFocus::Pending;
     };
-    if !layout
-        .tabs
-        .iter()
-        .any(|tab| tab.position == focused_tab && tab.sidebar_pane.is_some())
+    if !matches!(observed.target, FocusTarget::Content(_))
+        && !layout
+            .tabs
+            .iter()
+            .any(|tab| tab.position == focused_tab && tab.sidebar_pane.is_some())
     {
         return ReconciledFocus::Pending;
     }
@@ -289,6 +290,27 @@ mod tests {
 
     fn observed(reports: &[TabReport], layout: &SessionLayout, focus: &Focus) -> ReconciledSession {
         reconcile(reports, layout, true, Some(focus), &BTreeSet::new())
+    }
+
+    #[test]
+    fn content_focus_without_a_sidebar_requires_visible_matching_reports() {
+        let reports = vec![tab("mine", 0), tab("other", 1)];
+        let focus = Focus {
+            tab: TabId::new("other"),
+            target: FocusTarget::Content(PaneId::new("%2")),
+        };
+        assert_eq!(
+            observed(&reports, &layout(), &focus).focus,
+            ReconciledFocus::Confirmed(focus.clone())
+        );
+        assert_eq!(
+            reconcile(&reports, &layout(), false, Some(&focus), &BTreeSet::new()).focus,
+            ReconciledFocus::Unknown
+        );
+        assert_eq!(
+            observed(&reports[..1], &layout(), &focus).focus,
+            ReconciledFocus::Pending
+        );
     }
 
     #[test]

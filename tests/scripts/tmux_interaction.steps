@@ -1,0 +1,16 @@
+# Keyboard activation uses the real terminal and stable pane ids.
+env: TERM=xterm-256color
+sh?: tests/scripts/reset-tmux.sh
+sh: cargo build -p tmux-agent-wrangler -p agent-wrangler --locked
+spawn: tmux -L wrangler-test -f /dev/null new-session -s wrangler-test-interaction -n editor
+sleep: 1
+sh: tmux -L wrangler-test split-window -h -l 34 -t wrangler-test-interaction "USER=wrangler-test XDG_STATE_HOME=$PWD/tests/out/state PATH=$PWD/target/debug:\$PATH $PWD/target/debug/tmux-agent-wrangler; echo SIDEBAR-EXIT; sleep 30"
+wait: 0: editor @ 25
+keys: j\r
+sleep: 1
+sh: test "$(tmux -L wrangler-test display-message -p -t wrangler-test-interaction '#{pane_id}')" = %0
+keys: printf 'ACTIVATED-CONTENT\\n'\r
+wait: ACTIVATED-CONTENT
+sh: tmux -L wrangler-test select-pane -t wrangler-test-interaction:0.1
+keys: q
+wait: SIDEBAR-EXIT
