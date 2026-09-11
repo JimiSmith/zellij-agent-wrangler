@@ -118,7 +118,7 @@ mod tests {
             .iter()
             .copied()
             .chain(std::iter::repeat_n(b'1', 4096))
-            .chain([b'q'])
+            .chain(*b"q")
         {
             assert_eq!(decoder.push(byte), None);
             assert!(decoder.sequence.len() <= 64);
