@@ -38,6 +38,7 @@ pub fn layout(manifest: PaneManifest, plugin_id: u32) -> SessionLayout {
         .into_iter()
         .map(|(position, panes)| TabLayout {
             position: TabPosition::at(position),
+            has_other_panes: false,
             other_focused: panes
                 .iter()
                 .any(|pane| pane.is_plugin && pane.id != plugin_id && pane.is_focused),

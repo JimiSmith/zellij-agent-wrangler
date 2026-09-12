@@ -124,7 +124,9 @@ pub fn build_activation_command(
     let mut command = Command::new(TMUX_PROGRAM);
     match effect {
         Effect::FocusPane(id) => {
-            let pane = panes.iter().find(|pane| pane.id == id.as_str())?;
+            let pane = panes
+                .iter()
+                .find(|pane| pane.id == id.as_str() && !pane.is_sidebar)?;
             let window = format!("{session}:{}", pane.window_id);
             let target = format!("{window}.{}", pane.id);
             command.args([
@@ -150,10 +152,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn polling_answer_preserves_sidebar_flags_and_all_physical_panes() {
+        let output = format!("@1\t1\t1\teditor\n{ANSWER_BREAK}\n@1\t%0\t1\t1\tsidebar\n@1\t%1\t0\t\ttmux-agent-wrangler\n{CLIENTS_BREAK}\n0\n");
+        let answer = split_answer(&output).unwrap();
+        let panes = crate::topology::read_panes(&answer.panes);
+        assert_eq!(panes.len(), 2);
+        assert!(panes[0].is_sidebar);
+        assert!(!panes[1].is_sidebar);
+        assert_eq!(panes[1].title, "tmux-agent-wrangler");
+        assert!(args(&build_topology_command("$3"))
+            .iter()
+            .any(|arg| arg.contains("#{@agent-wrangler-sidebar}")));
+    }
+
+    #[test]
     fn missing_client_report_fails_closed() {
         assert_eq!(
             split_answer(&format!(
-                "@1\t1\t1\teditor\n{ANSWER_BREAK}\n@1\t%0\t1\tbash\n"
+                "@1\t1\t1\teditor\n{ANSWER_BREAK}\n@1\t%0\t1\t\tbash\n"
             )),
             None
         );
@@ -163,8 +179,20 @@ mod tests {
     }
 
     #[test]
+    fn activation_refuses_marked_panes_but_not_sidebar_like_titles() {
+        use agent_wrangler_sidebar::{Effect, PaneId};
+        let focus = Effect::FocusPane(PaneId::new("%12"));
+        for title in ["bash", "tmux-agent-wrangler"] {
+            let panes = crate::topology::read_panes(&format!("@7\t%12\t1\t1\t{title}\n"));
+            assert!(build_activation_command("$3", &focus, &panes).is_none());
+            let panes = crate::topology::read_panes(&format!("@7\t%12\t1\t\t{title}\n"));
+            assert!(build_activation_command("$3", &focus, &panes).is_some());
+        }
+    }
+
+    #[test]
     fn activation_uses_stable_ids_not_window_indexes() {
-        let panes = crate::topology::read_panes("@7\t%12\t1\teditor\n");
+        let panes = crate::topology::read_panes("@7\t%12\t1\t\teditor\n");
         let focus =
             agent_wrangler_sidebar::Effect::FocusPane(agent_wrangler_sidebar::PaneId::new("%12"));
         let pane = build_activation_command("$3", &focus, &panes).unwrap();
@@ -231,12 +259,12 @@ mod tests {
     #[test]
     fn the_answer_splits_on_the_marks_between_reports() {
         let output =
-            format!("@1\t1\t1\teditor\n{ANSWER_BREAK}\n@1\t%0\t1\tbash\n{CLIENTS_BREAK}\n0\n1\n");
+            format!("@1\t1\t1\teditor\n{ANSWER_BREAK}\n@1\t%0\t1\t\tbash\n{CLIENTS_BREAK}\n0\n1\n");
         assert_eq!(
             split_answer(&output),
             Some(TopologyAnswer {
                 windows: "@1\t1\t1\teditor\n".to_string(),
-                panes: "@1\t%0\t1\tbash\n".to_string(),
+                panes: "@1\t%0\t1\t\tbash\n".to_string(),
                 clients: "0\n1\n".to_string(),
             })
         );

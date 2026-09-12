@@ -34,7 +34,7 @@ use ratatui::DefaultTerminal;
 
 use crate::control::{self, ControlClient};
 use crate::heartbeat::HeartbeatSettings;
-use crate::tmux_location::TmuxLocation;
+use crate::tmux_location::{SidebarRegistration, TmuxLocation};
 use crate::topology;
 use crate::{client, tmux_query, FatalError};
 
@@ -421,6 +421,7 @@ impl Drop for Sidebar {
 /// panic ends the program.
 pub fn run_sidebar(options: Options, heartbeat: HeartbeatSettings) -> Result<(), FatalError> {
     let location = TmuxLocation::from_environment()?;
+    let _registration = SidebarRegistration::register(&location)?;
     let own_pane = std::env::var(PANE_VAR).unwrap_or_default();
     let session = location.read_session()?;
     // Raw mode on, the alternate screen entered, and a panic hook installed.
@@ -565,6 +566,13 @@ fn apply_topology(
     let panes = topology::read_panes(&answer.panes);
     let inputs = [
         Input::VisibilityChanged(false),
+        Input::ExcludedPanesChanged(
+            panes
+                .iter()
+                .filter(|pane| pane.is_sidebar || pane.id == own_pane)
+                .map(|pane| PaneId::new(pane.id.clone()))
+                .collect(),
+        ),
         Input::TabsReported(topology::tab_reports(&windows)),
         Input::LayoutReported(topology::session_layout(&windows, &panes, own_pane)),
         Input::VisibilityChanged(topology::has_interactive_client(&answer.clients)),
@@ -637,7 +645,7 @@ mod tests {
     fn answer(clients: &str) -> tmux_query::TopologyAnswer {
         tmux_query::TopologyAnswer {
             windows: "@0\t0\t0\tsidebar\n@1\t1\t1\tagent\n".into(),
-            panes: "@0\t%0\t1\tsidebar\n@1\t%2\t1\tagent\n".into(),
+            panes: "@0\t%0\t1\t1\tsidebar\n@1\t%2\t1\t\tagent\n".into(),
             clients: clients.into(),
         }
     }
@@ -647,6 +655,236 @@ mod tests {
             .iter()
             .filter(|effect| matches!(effect, Effect::Tell(agent_wrangler_sidebar::ClientMessage::Seen(session)) if session.as_str() == "caller"))
             .count()
+    }
+
+    #[test]
+    fn marked_panes_are_not_content_in_any_view() {
+        use agent_wrangler_ui::model::RowKey;
+        for mode in ["tree", "sections", "dashboard"] {
+            let options =
+                Options::from_configuration(&BTreeMap::from([(mode.into(), "true".into())]));
+            let mut app = Application::new(options);
+            app.reduce(Input::PermissionReported(Permission::Granted));
+            let report = tmux_query::TopologyAnswer {
+                windows: "@0\t0\t1\twork\n@1\t1\t0\tother\n".into(),
+                panes: "@0\t%0\t1\t1\town\n@0\t%1\t0\t1\tpeer-tree\n@0\t%2\t0\t1\tpeer-sections\n@1\t%3\t1\t1\tpeer-dashboard\n@0\t%4\t0\t\ttmux-agent-wrangler\n@1\t%5\t0\t\teditor\n".into(),
+                clients: "0\n".into(),
+            };
+            apply_topology(&mut app, &report, "%0");
+            let view = app.render(agent_wrangler_ui::Rect::new(0, 0, 100, 40));
+            let keys: Vec<_> = view
+                .interactions
+                .iter()
+                .flatten()
+                .map(|item| &item.key)
+                .collect();
+            for id in ["%0", "%1", "%2", "%3"] {
+                assert!(
+                    !keys.contains(&&RowKey::Pane(PaneId::new(id))),
+                    "{mode}: {id}"
+                );
+            }
+            if mode != "dashboard" {
+                for id in ["%4", "%5"] {
+                    assert!(
+                        keys.contains(&&RowKey::Pane(PaneId::new(id))),
+                        "{mode}: {id}"
+                    );
+                }
+            }
+            let layout = topology::session_layout(
+                &topology::read_windows(&report.windows),
+                &topology::read_panes(&report.panes),
+                "%0",
+            );
+            assert_eq!(layout.tabs[0].content_panes[0].title, "tmux-agent-wrangler");
+            assert_eq!(layout.tabs[1].content_panes[0].id, PaneId::new("%5"));
+        }
+    }
+
+    #[test]
+    fn marked_agents_leave_groups_previews_and_notifications_but_can_return() {
+        use agent_wrangler_sidebar::Broadcast;
+        use agent_wrangler_ui::model::RowKey;
+        let peer = SessionId::new("caller").unwrap();
+        let ordinary = SessionId::new("ordinary").unwrap();
+        for mode in ["tree", "sections", "dashboard"] {
+            let options =
+                Options::from_configuration(&BTreeMap::from([(mode.into(), "true".into())]));
+            let mut app = Application::new(options);
+            app.reduce(Input::PermissionReported(Permission::Granted));
+            let mut report = tmux_query::TopologyAnswer {
+                windows: "@0\t0\t1\twork\n".into(),
+                panes: "@0\t%0\t1\t1\town\n@0\t%2\t0\t\tpeer\n@0\t%4\t0\t\tordinary\n".into(),
+                clients: "0\n".into(),
+            };
+            apply_topology(&mut app, &report, "%0");
+            let AgentSnapshot::Compatible {
+                mut registry,
+                mut panes,
+            } = calling_snapshot()
+            else {
+                unreachable!()
+            };
+            let mut positive = Agent::new(
+                ordinary.clone(),
+                "claude",
+                LabelFacts::default(),
+                Origin::default(),
+            );
+            positive.turn = agent::Turn::Attention;
+            positive.raised = 2;
+            registry.report(positive);
+            panes.insert(ordinary.clone(), PaneId::new("%4"));
+            let snapshot = AgentSnapshot::Compatible { registry, panes };
+            app.reduce(Input::Agents(snapshot.clone()));
+            app.reduce(Input::Message(Broadcast::Selection(RowKey::Agent(
+                peer.clone(),
+            ))));
+            let area = agent_wrangler_ui::Rect::new(0, 0, 100, 40);
+            let before = app.render(area);
+            assert!(
+                before
+                    .interactions
+                    .iter()
+                    .flatten()
+                    .any(|item| item.key == RowKey::Agent(peer.clone())),
+                "{mode}"
+            );
+            app.reduce(Input::User(UserAction::OpenOrClosePreview));
+            let opened = app.render(area);
+            if mode == "dashboard" {
+                assert!(opened.frame.lines().iter().any(|row| matches!(
+                    row.content,
+                    agent_wrangler_ui::model::RowContent::PreviewMessage { .. }
+                )));
+            }
+            let selected_line = opened
+                .interactions
+                .iter()
+                .position(|item| {
+                    item.as_ref()
+                        .is_some_and(|item| item.key == RowKey::Agent(peer.clone()))
+                })
+                .unwrap();
+            report.panes = report.panes.replace("%2\t0\t\t", "%2\t0\t1\t");
+            let effects = apply_topology(&mut app, &report, "%0");
+            for action in [UserAction::Activate, UserAction::Click(selected_line, 8)] {
+                assert!(!app.reduce(Input::User(action)).effects.iter().any(
+                    |effect| matches!(effect, Effect::FocusPane(pane) if pane == &PaneId::new("%2"))
+                ));
+            }
+            assert!(!effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Tell(_))));
+            for refresh_agents in [false, true] {
+                if refresh_agents {
+                    let effects = app.reduce(Input::Agents(snapshot.clone())).effects;
+                    assert!(!effects
+                        .iter()
+                        .any(|effect| matches!(effect, Effect::Tell(_))));
+                }
+                let view = app.render(area);
+                assert!(!view.frame.lines().iter().any(|row| matches!(
+                    row.content,
+                    agent_wrangler_ui::model::RowContent::PreviewMessage { .. }
+                )));
+                assert_ne!(view.selection, Some(RowKey::Agent(peer.clone())));
+                for item in view.interactions.iter().flatten() {
+                    assert!(
+                        !matches!(&item.key, RowKey::Agent(id) | RowKey::Section(id) | RowKey::Notification(id) if id == &peer),
+                        "{mode}: {:?}",
+                        item.key
+                    );
+                }
+                assert!(
+                    view.interactions
+                        .iter()
+                        .flatten()
+                        .any(|item| item.key == RowKey::Agent(ordinary.clone())),
+                    "{mode}"
+                );
+                if mode != "dashboard" {
+                    assert!(
+                        view.interactions
+                            .iter()
+                            .flatten()
+                            .any(|item| item.key == RowKey::Notification(ordinary.clone())),
+                        "{mode}"
+                    );
+                }
+            }
+            report.panes = report.panes.replace("%2\t0\t1\t", "%2\t0\t\t");
+            apply_topology(&mut app, &report, "%0");
+            let restored = app.render(area);
+            assert!(
+                restored
+                    .interactions
+                    .iter()
+                    .flatten()
+                    .any(|item| item.key == RowKey::Agent(peer.clone())),
+                "records survive filtering: {mode}"
+            );
+            if mode != "dashboard" {
+                assert!(
+                    restored
+                        .interactions
+                        .iter()
+                        .flatten()
+                        .any(|item| item.key == RowKey::Notification(peer.clone())),
+                    "call state survives filtering: {mode}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_quit_is_not_blocked_by_peer_company() {
+        let mut app = Application::new(Options::default());
+        app.reduce(Input::PermissionReported(Permission::Granted));
+        let topology = tmux_query::TopologyAnswer {
+            windows: "@0\t0\t1\tshared\n".into(),
+            panes: "@0\t%0\t1\t1\town\n@0\t%2\t0\t1\tpeer\n".into(),
+            clients: "0\n".into(),
+        };
+        assert!(!apply_topology(&mut app, &topology, "%0").contains(&Effect::CloseSidebar));
+        let quit = app.reduce(Input::User(UserAction::Quit));
+        assert!(quit
+            .effects
+            .contains(&Effect::Broadcast(agent_wrangler_sidebar::Broadcast::Off)));
+        // The tmux effect runner delivers broadcasts only to this application.
+        let closed = app.reduce(Input::Message(agent_wrangler_sidebar::Broadcast::Off));
+        assert_eq!(closed.effects, [Effect::CloseSidebar]);
+    }
+
+    #[test]
+    fn peer_focus_never_acknowledges_a_call() {
+        for peer_window in ["@0", "@1"] {
+            let mut app = Application::new(Options::default());
+            app.reduce(Input::PermissionReported(Permission::Granted));
+            let mut queries = TopologyQueries::default();
+            adopt_snapshot(&mut app, &mut queries, calling_snapshot());
+            let topology = tmux_query::TopologyAnswer {
+                windows: if peer_window == "@0" {
+                    "@0\t0\t1\tsidebar\n@1\t1\t0\tother\n".into()
+                } else {
+                    "@0\t0\t0\tsidebar\n@1\t1\t1\tother\n".into()
+                },
+                panes: format!("@0\t%0\t0\t1\town\n{peer_window}\t%2\t1\t1\tpeer\n"),
+                clients: "0\n".into(),
+            };
+            assert_eq!(tells(&apply_topology(&mut app, &topology, "%0")), 0);
+            assert_eq!(tells(&app.reduce(Input::EventSettled).effects), 0);
+            assert_eq!(
+                tells(&app.reduce(Input::Agents(calling_snapshot())).effects),
+                0
+            );
+            let content = tmux_query::TopologyAnswer {
+                panes: topology.panes.replace("%2\t1\t1\t", "%2\t1\t\t"),
+                ..topology
+            };
+            assert_eq!(tells(&apply_topology(&mut app, &content, "%0")), 1);
+        }
     }
 
     #[test]
