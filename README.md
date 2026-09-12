@@ -261,8 +261,9 @@ clicks activate their target. The mouse wheel moves the selection. Enable tmux
 mouse forwarding with `set -g mouse on` in your tmux configuration if needed.
 
 `q`, `Q`, Ctrl-C and Ctrl-Q stop this instance and restore the terminal. Start
-the binary again to re-enable it. Use one manually started instance per session;
-there is no automatic per-window placement, cross-instance selection or
+the binary again to re-enable it. Each instance hides itself and every other
+live sidebar pane, in tree, sections and dashboard modes. There is no automatic
+per-window placement, cross-instance selection or
 session-wide off binding. Move or recreate the pane yourself, and restart the
 binary if you move it to another session. These are layout/lifecycle operations,
 not features of the native renderer.
@@ -272,8 +273,24 @@ acknowledgements share one writer. Reconnection registers again, including the
 notifier command. Old acknowledgements are discarded rather than retried against
 a newer call. A fresh connection reloads agent state and clears local previews
 and acknowledgement suppression; a call still pending can therefore reappear.
-Native Windows/psmux and macOS runtime behavior needs platform testing; a
-cross-target build alone does not verify it.
+Sidebar exclusion requires pane-local user options (upstream tmux 3.0 or later)
+and a readable local process identity. Startup checks the actual option behavior
+before taking the terminal. Hosts without that capability, including current
+psmux, fail with a diagnostic rather than using a global flag. Linux tmux is
+runtime-tested; macOS and Windows runtime behavior is not proven by cross-builds.
+
+Every sidebar reserves `@agent-wrangler-sidebar` on its own pane. Its value holds
+the pane ID, process ID, OS start time and startup token. Peers check the process
+before hiding the pane, so a crashed sidebar cannot permanently hide the shell
+or a respawned ordinary pane. A stopped sidebar remains hidden. Normal exit
+removes only the exiting instance's value. Do not edit this reserved option while
+the sidebar runs: ownership loss stops that instance. Restart all participating
+sidebars with the updated binary; older builds cannot identify their peers.
+
+The process check assumes a shared local PID namespace and process-query access.
+The portable start time has second resolution, so same-second PID reuse is a
+remaining identity limitation. Peers converge on the next topology observation
+(normally within the 500 ms refresh interval), not synchronously with startup.
 
 ### The status line
 

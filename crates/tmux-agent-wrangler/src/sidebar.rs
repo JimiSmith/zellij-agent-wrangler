@@ -34,6 +34,8 @@ use ratatui::DefaultTerminal;
 
 use crate::control::{self, ControlClient};
 use crate::heartbeat::HeartbeatSettings;
+use crate::sidebar_agents::SidebarAgents;
+use crate::sidebar_pane::SidebarPaneRegistration;
 use crate::tmux_location::TmuxLocation;
 use crate::topology;
 use crate::{client, tmux_query, FatalError};
@@ -254,6 +256,8 @@ struct Sidebar {
     connection: Option<client::ClientConnection>,
     queries: TopologyQueries,
     panes: Vec<topology::ReportedPane>,
+    registration: SidebarPaneRegistration,
+    agents: SidebarAgents,
     /// The pane that this program runs in. It is drawn as the sidebar of its
     /// window rather than as a pane that the user can go to.
     own_pane: String,
@@ -331,7 +335,11 @@ impl Sidebar {
                 // no search to stop.
             }
             Effect::CloseSidebar => {
-                let _ = self.events.send(ClientEvent::QuitRequested);
+                // Display membership does not determine physical company. This
+                // gate covers implicit closure from every reducer input.
+                if !topology::has_peer_sidebar(&self.panes, &self.own_pane) {
+                    let _ = self.events.send(ClientEvent::QuitRequested);
+                }
             }
         }
     }
@@ -344,11 +352,11 @@ impl Sidebar {
     ///
     /// If tmux refuses the question, this function keeps the rows but disables
     /// focus effects. A session that is closing can answer nothing.
-    fn ask_about_the_session(&mut self) {
+    fn ask_about_the_session(&mut self) -> Result<(), FatalError> {
         if let Some(control) = self.control.as_mut() {
             if control.ask_about_the_session(&self.session).is_ok() {
                 self.queries.requested();
-                return;
+                return Ok(());
             }
             // The control client went. The timer is still running, so the next
             // tick asks again through a child process.
@@ -356,21 +364,34 @@ impl Sidebar {
             self.queries.obsolete = self.queries.pending;
         }
         if let Ok(answer) = tmux_query::read_topology(&self.session) {
-            self.read_the_session(&answer);
+            self.read_the_session(&answer)?;
         } else {
             self.reduce(Input::VisibilityChanged(false));
         }
+        Ok(())
     }
 
     /// Feeds one answer about the session to the application.
     ///
     /// The reports contain the same bytes whichever transport carried them, so
     /// one reader serves both.
-    fn read_the_session(&mut self, answer: &tmux_query::TopologyAnswer) {
+    fn read_the_session(&mut self, answer: &tmux_query::TopologyAnswer) -> Result<(), FatalError> {
         self.panes = topology::read_panes(&answer.panes);
-        for effect in apply_topology(&mut self.application, answer, &self.own_pane) {
+        if !self.panes.iter().any(|pane| {
+            pane.id == self.own_pane && pane.sidebar_marker == self.registration.value()
+        }) {
+            return Err(FatalError::SidebarPane("own pane marker was removed or replaced; restart the sidebar in its current session".into()));
+        }
+        topology::classify_sidebar_panes(&mut self.panes, &self.own_pane);
+        for effect in apply_agent_projection(&mut self.application, &mut self.agents, &self.panes) {
             self.run(effect);
         }
+        for effect in
+            apply_classified_topology(&mut self.application, answer, &self.panes, &self.own_pane)
+        {
+            self.run(effect);
+        }
+        Ok(())
     }
 
     /// Puts the state of the application on the pane.
@@ -421,8 +442,9 @@ impl Drop for Sidebar {
 /// panic ends the program.
 pub fn run_sidebar(options: Options, heartbeat: HeartbeatSettings) -> Result<(), FatalError> {
     let location = TmuxLocation::from_environment()?;
-    let own_pane = std::env::var(PANE_VAR).unwrap_or_default();
+    let own_pane = location.pane_id().as_str().to_string();
     let session = location.read_session()?;
+    let registration = SidebarPaneRegistration::acquire(&location)?;
     // Raw mode on, the alternate screen entered, and a panic hook installed.
     //
     // Raw mode stops the pane echoing a keystroke over the drawing. It also
@@ -462,6 +484,8 @@ pub fn run_sidebar(options: Options, heartbeat: HeartbeatSettings) -> Result<(),
         connection: None,
         queries: TopologyQueries::default(),
         panes: Vec::new(),
+        registration,
+        agents: SidebarAgents::new(&own_pane),
         own_pane,
         server_socket: location.server_socket().to_string(),
         control: control::start_control_client(&target, events.clone()),
@@ -503,26 +527,28 @@ fn serve(sidebar: &mut Sidebar, arriving: Receiver<ClientEvent>) -> Result<(), F
             }
         };
         match event {
-            ClientEvent::TopologyChanged => sidebar.ask_about_the_session(),
+            ClientEvent::TopologyChanged => sidebar.ask_about_the_session()?,
             ClientEvent::ControlStopped => {
                 sidebar.control = None;
                 sidebar.queries.obsolete = sidebar.queries.pending;
                 sidebar.reduce(Input::VisibilityChanged(false));
-                sidebar.ask_about_the_session();
+                sidebar.ask_about_the_session()?;
             }
             ClientEvent::TopologyAnswered(text) => {
                 if !sidebar.queries.answered() {
                     continue;
                 }
                 if let Some(answer) = tmux_query::split_answer(&text) {
-                    sidebar.read_the_session(&answer);
+                    sidebar.read_the_session(&answer)?;
                 } else {
                     sidebar.reduce(Input::VisibilityChanged(false));
                 }
             }
+            ClientEvent::User(UserAction::Quit) => return Ok(()),
             ClientEvent::User(action) => sidebar.reduce(Input::User(action)),
             ClientEvent::StateArrived(payload, connection) => {
                 if let Some(snapshot) = read_agents(&payload, &sidebar.server_socket) {
+                    let snapshot = sidebar.agents.receive(snapshot);
                     if sidebar.connection.as_ref() != Some(&connection) {
                         // Forget local suppression before the new connection's
                         // authoritative state. Old answers must not be retried.
@@ -537,7 +563,7 @@ fn serve(sidebar: &mut Sidebar, arriving: Receiver<ClientEvent>) -> Result<(), F
                     {
                         sidebar.run(effect);
                     }
-                    sidebar.ask_about_the_session();
+                    sidebar.ask_about_the_session()?;
                 }
             }
             ClientEvent::CommandFinished { call, exit, stderr } => {
@@ -556,19 +582,34 @@ fn serve(sidebar: &mut Sidebar, arriving: Receiver<ClientEvent>) -> Result<(), F
 }
 
 // Keep focus effects disabled until all reports from this answer are installed.
-fn apply_topology(
+fn apply_agent_projection(
+    application: &mut Application,
+    agents: &mut SidebarAgents,
+    panes: &[topology::ReportedPane],
+) -> Vec<Effect> {
+    let Some(snapshot) = agents.update_panes(panes) else {
+        return Vec::new();
+    };
+    [Input::VisibilityChanged(false), Input::Agents(snapshot)]
+        .into_iter()
+        .flat_map(|input| application.reduce(input).effects)
+        .collect()
+}
+
+// Keep focus effects disabled until all reports from this answer are installed.
+fn apply_classified_topology(
     application: &mut Application,
     answer: &tmux_query::TopologyAnswer,
+    panes: &[topology::ReportedPane],
     own_pane: &str,
 ) -> Vec<Effect> {
     let windows = topology::read_windows(&answer.windows);
-    let panes = topology::read_panes(&answer.panes);
     let inputs = [
         Input::VisibilityChanged(false),
         Input::TabsReported(topology::tab_reports(&windows)),
-        Input::LayoutReported(topology::session_layout(&windows, &panes, own_pane)),
+        Input::LayoutReported(topology::session_layout(&windows, panes, own_pane)),
         Input::VisibilityChanged(topology::has_interactive_client(&answer.clients)),
-        Input::FocusObserved(topology::focus(&windows, &panes, own_pane)),
+        Input::FocusObserved(topology::focus(&windows, panes, own_pane)),
         Input::EventSettled,
     ];
     inputs
@@ -590,6 +631,16 @@ mod tests {
     use agent_wrangler_core::origin::Origin;
 
     const SERVER: &str = "/tmp/tmux-1000/default";
+
+    fn apply_topology(
+        application: &mut Application,
+        answer: &tmux_query::TopologyAnswer,
+        own_pane: &str,
+    ) -> Vec<Effect> {
+        let mut panes = topology::read_panes(&answer.panes);
+        topology::classify_sidebar_panes(&mut panes, own_pane);
+        apply_classified_topology(application, answer, &panes, own_pane)
+    }
 
     /// One record, from a pane of a named server.
     fn record(session: &str, tmux: &str, pane: &str) -> String {
@@ -637,7 +688,7 @@ mod tests {
     fn answer(clients: &str) -> tmux_query::TopologyAnswer {
         tmux_query::TopologyAnswer {
             windows: "@0\t0\t0\tsidebar\n@1\t1\t1\tagent\n".into(),
-            panes: "@0\t%0\t1\tsidebar\n@1\t%2\t1\tagent\n".into(),
+            panes: "@0\t%0\t1\t\tsidebar\n@1\t%2\t1\t\tagent\n".into(),
             clients: clients.into(),
         }
     }
@@ -647,6 +698,116 @@ mod tests {
             .iter()
             .filter(|effect| matches!(effect, Effect::Tell(agent_wrangler_sidebar::ClientMessage::Seen(session)) if session.as_str() == "caller"))
             .count()
+    }
+
+    #[test]
+    fn a_sidebar_agent_cannot_leak_into_the_notification_footer() {
+        let mut app = Application::new(Options::default());
+        app.reduce(Input::PermissionReported(Permission::Granted));
+        let mut agents = SidebarAgents::new("%0");
+        app.reduce(Input::Agents(agents.receive(calling_snapshot())));
+        let answer = answer("1\n");
+        let mut panes = topology::read_panes(&answer.panes);
+        panes[1].is_sidebar = true;
+        apply_agent_projection(&mut app, &mut agents, &panes);
+        apply_classified_topology(&mut app, &answer, &panes, "%0");
+        let view = app.render(agent_wrangler_ui::Rect::new(0, 0, 120, 40));
+        assert!(!view.selectable_items().iter().any(|item| matches!(
+            &item.action, agent_wrangler_sidebar::ViewAction::ActivateAgent(id) if id.as_str() == "caller"
+        )));
+    }
+
+    #[test]
+    fn every_view_omits_sidebar_rows_agents_and_actions_and_restores_reused_panes() {
+        use agent_wrangler_sidebar::ViewAction;
+        let answer = tmux_query::TopologyAnswer {
+            windows: "@0\t0\t1\tfirst\n@7\t4\t0\tsecond\n".into(),
+            panes: "@0\t%0\t1\t\town\n@0\t%2\t0\t\tpeer\n@7\t%3\t1\t\tordinary\n@7\t%4\t0\t\tremote-peer\n".into(),
+            clients: "0\n".into(),
+        };
+        let mut registry = Registry::default();
+        let mut agent_panes = BTreeMap::new();
+        for (id, pane) in [
+            ("own", "%0"),
+            ("peer", "%2"),
+            ("keep", "%3"),
+            ("remote", "%4"),
+            ("unplaced", ""),
+        ] {
+            let mut agent = Agent::new(
+                SessionId::new(id).unwrap(),
+                "claude",
+                LabelFacts {
+                    dir: id.into(),
+                    ..LabelFacts::default()
+                },
+                Origin::default(),
+            );
+            agent.turn = agent::Turn::Attention;
+            agent.raised = 1;
+            agent.records.last_message = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"preview\"}]}}".into();
+            if !pane.is_empty() {
+                agent_panes.insert(agent.session.clone(), PaneId::new(pane));
+            }
+            registry.report(agent);
+        }
+        let snapshot = AgentSnapshot::Compatible {
+            registry,
+            panes: agent_panes,
+        };
+        for (sections, dashboard) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut options = Options::default();
+            options.view.sections = sections;
+            options.view.dashboard = dashboard;
+            let mut app = Application::new(options);
+            app.reduce(Input::PermissionReported(Permission::Granted));
+            let mut agents = SidebarAgents::new("%0");
+            app.reduce(Input::Agents(agents.receive(snapshot.clone())));
+            let mut panes = topology::read_panes(&answer.panes);
+            for pane in &mut panes {
+                pane.is_sidebar = pane.id != "%3";
+            }
+            apply_agent_projection(&mut app, &mut agents, &panes);
+            let effects = apply_classified_topology(&mut app, &answer, &panes, "%0");
+            assert!(!effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Tell(_))));
+            let view = app.render(agent_wrangler_ui::Rect::new(0, 0, 120, 60));
+            let actions: Vec<_> = view
+                .selectable_items()
+                .iter()
+                .map(|item| &item.action)
+                .collect();
+            assert!(actions.contains(&&ViewAction::ActivateAgent(SessionId::new("keep").unwrap())));
+            assert_eq!(
+                actions.contains(&&ViewAction::ActivateAgent(
+                    SessionId::new("unplaced").unwrap()
+                )),
+                !dashboard
+            );
+            for id in ["own", "peer", "remote"] {
+                assert!(
+                    !actions.contains(&&ViewAction::ActivateAgent(SessionId::new(id).unwrap())),
+                    "{sections}/{dashboard}/{id}"
+                );
+            }
+            for id in ["%0", "%2", "%4"] {
+                assert!(!actions.contains(&&ViewAction::ActivatePane(PaneId::new(id))));
+            }
+            panes[1].is_sidebar = false;
+            apply_agent_projection(&mut app, &mut agents, &panes);
+            apply_classified_topology(&mut app, &answer, &panes, "%0");
+            let view = app.render(agent_wrangler_ui::Rect::new(0, 0, 120, 60));
+            assert!(view
+                .selectable_items()
+                .iter()
+                .any(|item| item.action
+                    == ViewAction::ActivateAgent(SessionId::new("peer").unwrap())));
+            assert!(
+                agents.update_panes(&panes).is_none(),
+                "unchanged exclusions must not republish"
+            );
+        }
     }
 
     #[test]

@@ -480,8 +480,8 @@ shared configuration parser. The byte decoder retains fragmented escape
 sequences, preserves the row and column of SGR mouse clicks, and ignores
 bracketed paste. The drawing adapter clips the shared frame at its scroll
 offset. Activation names stable window and pane IDs, not displayed indexes.
-The sole manually started instance consumes its own broadcasts; it does not
-place panes or synchronize with other instances.
+Each manually started instance consumes its own broadcasts; it does not place
+panes or synchronize selection with other instances.
 
 Each socket connection has one writer queue for heartbeats and `Seen`. A payload
 carries a handle to that connection into the drawing thread. An effect from an
@@ -544,8 +544,9 @@ so an error check finds nothing. Psmux does exactly that. The handshake
 therefore asks the server to name its flags back with `#{client_flags}`, and the
 sidebar keeps the control client only when the answer names `no-output`. A
 server that fails the check is left, and a timer asks every half second instead.
-That is a capability check and not a `cfg`, so psmux works today and gets the
-faster feed with no change here on the day it grows the flag.
+That is a capability check and not a `cfg`. It remains separate from the required
+pane-option capability check; a host must pass that check before either transport
+starts. Current psmux does not support arbitrary pane-local user options.
 
 The timer runs whether or not a control client does. A control client that dies
 leaves no gap in the feed, and a tick that arrives while a question is
@@ -560,11 +561,18 @@ starts with a letter.
 
 Separate questions report windows and panes. A window name and a pane title
 are both free text and either can hold a tab. Each query puts its free text
-field last, so a split into four parts is exact. A third question runs
+field last, so fixed-field splits preserve tabs in names and titles. Panes also
+report their ownership marker before the title. A third question runs
 `list-clients -t <session> -F '#{client_control_mode}'`. Visibility requires at
 least one non-control client; the sidebar's own control client does not count.
 Missing or malformed client reports cannot confirm visibility. Both transports
 return the same marker-separated reports to one parser.
+
+The pane format emits a marker unchanged only when it matches `^[v0-9:%]+$`;
+otherwise it emits an empty marker field. This character gate runs before tab
+and newline framing, so malformed option text cannot become a valid marker
+prefix or split a pane report. It does not validate ownership: Rust remains
+authoritative for marker version, length, numeric ranges and owner liveness.
 
 The adapter disables focus effects while it installs a topology answer. A new
 agent snapshot also disables them and invalidates outstanding topology queries.
@@ -586,9 +594,40 @@ host name. The format asks whether the title is still the host name and names
 the running program when it is. Zellij falls back to the command in the same
 way.
 
-The pane that the client runs in is reported as the sidebar pane of its window,
-and it is left out of the content panes. Tmux parks no pane, so every pane is on
-screen. Tmux runs no plugin, so no other kind of pane holds the focus.
+The pane that the client runs in is reported as the sidebar pane of its window.
+The adapter also excludes every live marked peer from content. A peer can hold
+`Other` focus, but never this instance's `Sidebar` focus. Raw panes remain
+available for physical companionship and activation validation.
+
+### Sidebar pane ownership
+
+`sidebar_pane.rs` registers `@agent-wrangler-sidebar` before terminal takeover
+and before threads start. It targets the captured server and validated own pane.
+The schema is `v1:<pane-id>:<pid>:<OS-start-seconds>:<startup-token>`. Strict decimal
+validation keeps option text out of command syntax. A conditional compare-and-set
+and exact local/format readback detect unsupported hosts and competing owners.
+The guard compares the complete value before unsetting it on orderly exit;
+bounded best-effort cleanup cannot remove a replacement registration.
+
+Both topology transports use the same pane format and classification. Sysinfo
+reads a fresh, batched process snapshot for the marked PIDs. Missing, malformed,
+wrong-pane, dead, zombie or wrong-start owners do not hide content. Sleeping,
+stopped and debugged owners still count. The startup token protects cleanup;
+it does not increase the second-resolution OS start identity. Process visibility
+and a shared local PID namespace are required. A crash needs no cleanup sweep.
+
+`sidebar_agents.rs` retains the authoritative daemon snapshot and projects out
+only records explicitly mapped to excluded sidebar IDs. That projection also
+covers the notification footer, which reads the registry rather than pane rows.
+Exclusion changes restore records without waiting for another daemon snapshot.
+Unplaced and unrelated records retain their existing behavior. Snapshot adoption
+still requires a newer topology observation before an acknowledgement.
+
+The native effect gate keeps a sidebar alive while a live peer shares its
+physical window, even when filtering leaves no displayed content. This applies
+to implicit close effects from topology, agent and focus events. Explicit quit
+bypasses that gate and stops only the requested instance. Cross-session movement
+still requires restart; this change does not add automatic session migration.
 
 ### The socket, and what proves the transport
 

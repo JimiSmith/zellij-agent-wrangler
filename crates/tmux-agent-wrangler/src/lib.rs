@@ -41,8 +41,8 @@
 //! in the build proves the Windows path from end to end.
 //!
 //! Psmux answers a fixed string for `#{client_flags}` and accepts
-//! `refresh-client -f` without acting on it. So a sidebar there keeps no
-//! control client, and it asks about the session on a timer instead.
+//! `refresh-client -f` without acting on it. That transport can use polling, but
+//! current psmux also lacks required pane-local options and fails registration.
 
 use std::process::{ExitCode, ExitStatus};
 
@@ -56,6 +56,8 @@ pub mod control;
 pub mod heartbeat;
 pub mod input;
 pub mod sidebar;
+mod sidebar_agents;
+pub mod sidebar_pane;
 pub mod socket_name;
 pub mod tmux_location;
 pub mod tmux_query;
@@ -78,6 +80,10 @@ pub enum FatalError {
     NotInsideTmux,
     /// `TMUX` is set and `TMUX_PANE` is not.
     NoPaneId,
+    /// The pane variable is not a stable pane target.
+    InvalidPaneId,
+    /// The sidebar could not claim or retain its pane-local ownership marker.
+    SidebarPane(String),
     /// The tmux program did not run.
     TmuxDidNotRun(std::io::Error),
     /// Tmux ran and refused the question, and this is what it said.
@@ -109,6 +115,11 @@ impl std::fmt::Display for FatalError {
                 "TMUX_PANE is not set. This program cannot name its own pane."
             ),
             FatalError::TmuxDidNotRun(why) => write!(out, "cannot run tmux: {why}"),
+            FatalError::SidebarPane(why) => write!(out, "cannot register sidebar pane: {why}"),
+            FatalError::InvalidPaneId => write!(
+                out,
+                "TMUX_PANE must be a percent sign followed by an unsigned pane number."
+            ),
             FatalError::TmuxRefusedQuestion(said) => {
                 write!(out, "tmux refused the question: {said}")
             }

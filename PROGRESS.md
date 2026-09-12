@@ -44,6 +44,14 @@ cross-instance synchronization. The release attaches no tmux binary yet, by
 decision. These native capabilities are separate from the Zellij checkpoints
 described above.
 
+Every native view now excludes all live sidebar panes using pane-local owner
+markers, not titles or commands. Cleanup is owner-safe; fresh PID/start-time
+checks make dead markers harmless and keep stopped sidebars excluded. The native
+adapter also projects sidebar-bound agents out of notifications and retains
+physical peer companionship for implicit closure. Unsupported pane-option hosts
+fail before terminal takeover; current psmux is in that category. The code still
+cross-builds for Windows, but does not claim psmux runtime support.
+
 The daemon now reads two more things out of a transcript, in the pass it already
 runs. The first is the most recent record that says something. The second is the
 tool call that no result answers yet. Both travel as they were read, and the
@@ -594,9 +602,9 @@ between a control client and a child process. The reading does not.
 
 **A capability check and not a `cfg`.** The sidebar asks the server what it can
 do, and keeps the control client only when the server names `no-output` back. A
-server that cannot do it gets the timer. So psmux works today with no
-`cfg(windows)` anywhere, and it gets the faster feed with no change to this code
-on the day it grows the flag.
+server that cannot do it gets the timer, provided it passed the independent
+pane-option ownership check. Current psmux fails that required check. No
+`cfg(windows)` is needed for either capability decision.
 
 **The timer runs whether or not a control client does.** A control client that
 dies leaves no gap in the feed. A tick that arrives while a control client holds

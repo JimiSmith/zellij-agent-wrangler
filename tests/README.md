@@ -37,6 +37,31 @@ through `sh` so process discovery reaches the long-lived harness.
 The control recovery script detaches only the control client and checks that
 polling still updates the tree and acknowledges focused calls.
 
+The native ownership suite uses the same `drive.Pty` and screen emulator, plus
+per-pane tmux captures for row membership:
+
+    cargo build -p tmux-agent-wrangler -p agent-wrangler --locked
+    python3 -m unittest discover -s tests -p test_tmux_exclusion.py -v
+
+`test_tmux_exclusion.py` names a private `wrangler-test-exclusion-<pid>` server
+and daemon user. All tmux operations go through its targeted argv helper; cleanup
+matches both the test executable and isolated user before stopping a daemon.
+It never uses the shared scripts' reset helper. The suite currently requires
+Linux for process-signal and cleanup assertions. It checks every view (including
+dashboard/sections precedence), same-mode pairs, all directed mode restarts,
+control/polling, agent/footer restoration, malformed/inherited/stale owners,
+startup/ownership loss, SIGSTOP/SIGCONT/SIGKILL, respawn, focus/input and peer-only
+auto-close behavior, pane movement and window renumbering. Captures and exact
+command logs are in `tests/out/exclusion`.
+Rust owner tests cover zombie and wrong-start identities, conditional cleanup,
+command limits and unsupported-host readbacks without requiring tmux.
+
+`test_delimiters_in_markers_cannot_hide_ordinary_panes` covers tabs, newlines and
+other unsafe marker characters through both control and polling. The pane format
+replaces unsafe values with an empty field before tab/newline framing; values
+that match `^[v0-9:%]+$` pass unchanged. Rust still validates marker version,
+length, numeric ranges and owner liveness.
+
 The zellij cases skip themselves when `zellij` is not on `PATH`, and the tmux
 cases skip themselves when `tmux` is not on `PATH`.
 

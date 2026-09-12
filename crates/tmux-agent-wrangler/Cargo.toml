@@ -30,6 +30,8 @@ agent-wrangler-sidebar = { path = "../agent-wrangler-sidebar" }
 # daemon binds the name through the same crate, so both ends agree on what a
 # name means.
 interprocess = { version = "2.2", default-features = false }
+# Process start times prevent a reused process id from claiming an old pane.
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 # The terminal under the drawing: raw mode, the alternate screen, the size of
 # the pane, and two buffers that hold the new frame and the one before it. The
 # pair of buffers limits a draw to the cells that changed. Every

@@ -124,7 +124,9 @@ pub fn build_activation_command(
     let mut command = Command::new(TMUX_PROGRAM);
     match effect {
         Effect::FocusPane(id) => {
-            let pane = panes.iter().find(|pane| pane.id == id.as_str())?;
+            let pane = panes
+                .iter()
+                .find(|pane| pane.id == id.as_str() && !pane.is_sidebar)?;
             let window = format!("{session}:{}", pane.window_id);
             let target = format!("{window}.{}", pane.id);
             command.args([
@@ -163,8 +165,17 @@ mod tests {
     }
 
     #[test]
+    fn activation_rejects_a_sidebar_even_when_a_stale_action_names_it() {
+        let mut panes = crate::topology::read_panes("@7\t%12\t1\t\teditor\n");
+        panes[0].is_sidebar = true;
+        let focus =
+            agent_wrangler_sidebar::Effect::FocusPane(agent_wrangler_sidebar::PaneId::new("%12"));
+        assert!(build_activation_command("$3", &focus, &panes).is_none());
+    }
+
+    #[test]
     fn activation_uses_stable_ids_not_window_indexes() {
-        let panes = crate::topology::read_panes("@7\t%12\t1\teditor\n");
+        let panes = crate::topology::read_panes("@7\t%12\t1\t\teditor\n");
         let focus =
             agent_wrangler_sidebar::Effect::FocusPane(agent_wrangler_sidebar::PaneId::new("%12"));
         let pane = build_activation_command("$3", &focus, &panes).unwrap();

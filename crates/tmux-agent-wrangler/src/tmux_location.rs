@@ -68,6 +68,26 @@ impl TmuxSessionId {
     }
 }
 
+/// A stable pane target. The marker and conditional commands accept only this
+/// validated spelling, so option text cannot become a tmux command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TmuxPaneId(String);
+
+impl TmuxPaneId {
+    pub fn new(text: &str) -> Option<Self> {
+        let digits = text.strip_prefix('%')?;
+        if digits.is_empty() || digits.len() > 10 || !digits.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse::<u32>().ok()?;
+        Some(Self(text.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The tmux server that holds this process, and the pane that it runs in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TmuxLocation {
@@ -77,7 +97,7 @@ pub struct TmuxLocation {
     /// Nothing here reads it for meaning.
     server_socket: String,
     /// The pane, as `TMUX_PANE` gives it.
-    pane_id: String,
+    pane_id: TmuxPaneId,
 }
 
 impl TmuxLocation {
@@ -107,7 +127,7 @@ impl TmuxLocation {
         }
         Ok(TmuxLocation {
             server_socket: server.to_string(),
-            pane_id: pane.to_string(),
+            pane_id: TmuxPaneId::new(&pane).ok_or(FatalError::InvalidPaneId)?,
         })
     }
 
@@ -116,13 +136,18 @@ impl TmuxLocation {
         &self.server_socket
     }
 
+    pub fn pane_id(&self) -> &TmuxPaneId {
+        &self.pane_id
+    }
+
     /// The session that holds this pane.
     ///
     /// Side effect: this function runs `tmux`. The caller asks again on every
     /// connection, so a window that moved to another session names the right
     /// socket as soon as the daemon blinks.
     pub fn read_session(&self) -> Result<TmuxSessionId, FatalError> {
-        let answer = build_session_id_command(&self.pane_id)
+        let answer = build_session_id_command(self.pane_id.as_str())
+            .env("TMUX", format!("{},0,0", self.server_socket))
             .output()
             .map_err(FatalError::TmuxDidNotRun)?;
         if !answer.status.success() {
@@ -264,6 +289,28 @@ mod tests {
             ])),
             Err(FatalError::NotInsideTmux)
         ));
+    }
+
+    #[test]
+    fn invalid_pane_targets_are_refused_before_tmux_runs() {
+        for pane in [
+            "0",
+            "%",
+            "%1;kill-server",
+            "%+1",
+            "%1\n",
+            "%１２",
+            "%4294967296",
+        ] {
+            assert!(
+                TmuxLocation::from_variables(variable_lookup(&[
+                    ("TMUX", "/tmp/test,1,0"),
+                    ("TMUX_PANE", pane),
+                ]))
+                .is_err(),
+                "accepted {pane:?}"
+            );
+        }
     }
 
     #[test]

@@ -35,6 +35,10 @@ drawing: raw mode, the alternate screen, the size of its pane, and the pair of
 buffers that limits a draw to the cells that changed. Ratatui comes with default
 features OFF and with the `crossterm` feature alone. Nothing else ever.
 
+The tmux adapter also takes `sysinfo` with default features off and `system`
+alone. Fresh process IDs and OS start times validate pane-local sidebar owners
+after crashes. Shared crates and the daemon do not acquire that dependency.
+
 `agent-wrangler-ui` takes `ratatui-core` for the buffer and `tui-scrollview` for
 the clipping. The dashboard grows taller than the pane as soon as a row opens
 its block. The whole table then draws into a buffer of its own height, and the
