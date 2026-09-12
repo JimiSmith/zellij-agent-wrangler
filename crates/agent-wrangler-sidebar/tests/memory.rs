@@ -99,6 +99,7 @@ fn layout(step: usize) -> SessionLayout {
         tabs: (0..TABS)
             .map(|tab| TabLayout {
                 position: TabPosition::at(tab),
+                has_other_panes: false,
                 other_focused: false,
                 content_panes: (0..PANES_PER_TAB)
                     .map(|pane| PaneReport {

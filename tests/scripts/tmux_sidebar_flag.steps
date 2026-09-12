@@ -1,0 +1,15 @@
+# Startup and ordinary quit in a surviving shell on an isolated tmux server.
+env: TERM=xterm-256color
+sh?: tests/scripts/reset-tmux.sh
+sh: cargo build -p tmux-agent-wrangler -p agent-wrangler --locked
+spawn: tmux -L wrangler-test -f /dev/null new-session -s wrangler-test-flag -n content
+wait: wrangler-0:content @ 20
+sh: tmux -L wrangler-test split-window -h -l 34 -t wrangler-test-flag "USER=wrangler-test XDG_STATE_HOME=$PWD/tests/out/state PATH=$PWD/target/debug:\$PATH $PWD/target/debug/tmux-agent-wrangler; echo SIDEBAR-EXITED; sleep 30"
+wait: 0: content @ 25
+sh: test "$(tmux -L wrangler-test show-options -pv -t wrangler-test-flag:0.1 @agent-wrangler-sidebar)" = 1
+sh: test -z "$(tmux -L wrangler-test show-options -pqv -t wrangler-test-flag:0.0 @agent-wrangler-sidebar)"
+dump: tmux_sidebar_flag_registered
+sh: tmux -L wrangler-test send-keys -t wrangler-test-flag:0.1 q
+wait: SIDEBAR-EXITED @ 20
+sh: test -z "$(tmux -L wrangler-test show-options -pqv -t wrangler-test-flag:0.1 @agent-wrangler-sidebar)"
+dump: tmux_sidebar_flag_cleaned
