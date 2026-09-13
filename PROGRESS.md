@@ -917,6 +917,22 @@ tool again, and the reader here copies that. This ends a child in seconds where
 the clock below takes half an hour. It is read for a child alone. A lead takes
 another prompt from the user after every turn it ends.
 
+**Claude starts a teammate two ways, and only one of them is a child.** A
+teammate that runs inside its lead is a child: its hooks name the lead in
+`session_id` and name the teammate in `agent_id`, and the daemon composes an id
+out of the pair. With `teammateMode` set to `tmux` or to `iterm2`, and with
+`auto` inside one of those terminals, Claude splits a pane and starts the
+teammate as a session of its own. That session has a session id of its own, a
+transcript of its own beside the lead's, and hooks that carry no `agent_id` at
+all. The daemon used to file it as a top-level agent. A user saw exactly that in
+tmux, where a team of three drew as four unrelated rows. Neither transcript names
+the other session. The whole link is `teamName` on every conversation record of
+the teammate, and `leadSessionId` in `~/.claude/teams/<team name>/config.json`.
+The daemon therefore reads that one file and fills `lead` from it, and the
+dashboard draws the teammate under its lead although the two run in different
+panes. The tree says where a pane is, so it keeps a row for such a teammate
+where that teammate runs. Measured on Claude Code 2.1.270.
+
 **Claude does not always end a child, so a clock has to.** A workflow agent that
 ends normally fires `SubagentStop`. One that its own runner aborts fires
 nothing: the Agent tool runs the stop hooks by hand when its query is
