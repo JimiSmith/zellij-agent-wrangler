@@ -202,33 +202,49 @@ fn urgency(agent: &Agent) -> Urgency {
     }
 }
 
-/// Every group of one pane: each agent that no agent of the pane started, with
+/// One agent, and where it runs.
+type AgentInPane<'a> = (&'a Tab, &'a Pane, &'a Agent);
+
+/// Every group of the session: each agent that no agent shown here leads, with
 /// everything under that agent.
-fn groups_of_pane<'a>(tab: &'a Tab, pane: &'a Pane) -> Vec<AgentGroup<'a>> {
-    let held: BTreeSet<&SessionId> = pane.agents.iter().map(|agent| &agent.session).collect();
-    let mut children: BTreeMap<&SessionId, Vec<&Agent>> = BTreeMap::new();
-    let mut roots: Vec<&Agent> = Vec::new();
-    for agent in &pane.agents {
-        // An agent whose lead is not in this pane leads a group of its own. The
+///
+/// A group spans panes and tabs. Claude starts a teammate in a terminal pane of
+/// its own, where it is a session of its own and its record still names the
+/// session that leads it. The lead and that teammate therefore draw as one
+/// group, and each row keeps the tab and the pane that it runs in.
+fn groups_of_session(tabs: &[Tab]) -> Vec<AgentGroup<'_>> {
+    let running: Vec<AgentInPane> = tabs
+        .iter()
+        .flat_map(|tab| tab.panes.iter().map(move |pane| (tab, pane)))
+        .flat_map(|(tab, pane)| pane.agents.iter().map(move |agent| (tab, pane, agent)))
+        .collect();
+    let held: BTreeSet<&SessionId> = running.iter().map(|(_, _, agent)| &agent.session).collect();
+    let mut children: BTreeMap<&SessionId, Vec<AgentInPane>> = BTreeMap::new();
+    let mut roots: Vec<AgentInPane> = Vec::new();
+    for place in running {
+        let (_, _, agent) = place;
+        // An agent whose lead is not drawn here leads a group of its own. The
         // daemon files no such record, and a row must not vanish because two
         // reports arrived out of order.
         match agent.lead.as_ref().filter(|lead| held.contains(lead)) {
-            Some(lead) => children.entry(lead).or_default().push(agent),
-            None => roots.push(agent),
+            Some(lead) => children.entry(lead).or_default().push(place),
+            None => roots.push(place),
         }
     }
     // The children of one agent draw in the order of their own ids, so one set
     // of records always draws in one order. A Claude agent id is random, so the
     // order says nothing about which child began first.
     for under in children.values_mut() {
-        under.sort_by(|one, other| one.session.cmp(&other.session));
+        under.sort_by(|(_, _, one), (_, _, other)| one.session.cmp(&other.session));
     }
-    roots.sort_by(|one, other| one.session.cmp(&other.session));
+    // The roots keep the order they were found in: the tabs, then the panes of
+    // each tab, then the agents of each pane. A lead therefore draws where it
+    // runs, and a second pane does not reorder the first.
     roots
         .into_iter()
         .map(|root| {
             let mut rows = Vec::new();
-            let urgency = walk_group(tab, pane, root, &children, Vec::new(), &mut rows);
+            let urgency = walk_group(root, &children, Vec::new(), &mut rows);
             AgentGroup { urgency, rows }
         })
         .collect()
@@ -241,14 +257,13 @@ fn groups_of_pane<'a>(tab: &'a Tab, pane: &'a Pane) -> Vec<AgentGroup<'a>> {
 /// a group by urgency. A child that raises a call keeps its place, and no row
 /// moves under the cursor while children work.
 fn walk_group<'a>(
-    tab: &'a Tab,
-    pane: &'a Pane,
-    agent: &'a Agent,
-    children: &BTreeMap<&SessionId, Vec<&'a Agent>>,
+    place: AgentInPane<'a>,
+    children: &BTreeMap<&SessionId, Vec<AgentInPane<'a>>>,
     stem: Vec<Branch>,
     into: &mut Vec<AgentPlace<'a>>,
 ) -> Urgency {
-    let under: &[&Agent] = match children.get(&agent.session) {
+    let (tab, pane, agent) = place;
+    let under: &[AgentInPane<'a>] = match children.get(&agent.session) {
         Some(under) => under,
         None => &[],
     };
@@ -267,7 +282,7 @@ fn walk_group<'a>(
             true => Branch::Last,
             false => Branch::More,
         });
-        worst = worst.min(walk_group(tab, pane, child, children, deeper, into));
+        worst = worst.min(walk_group(*child, children, deeper, into));
     }
     worst
 }
@@ -445,11 +460,7 @@ pub fn build_dashboard(
     open: &OpenPreviews,
     options: &DrawingOptions,
 ) -> Vec<Row> {
-    let mut groups: Vec<AgentGroup> = tabs
-        .iter()
-        .flat_map(|tab| tab.panes.iter().map(move |pane| (tab, pane)))
-        .flat_map(|(tab, pane)| groups_of_pane(tab, pane))
-        .collect();
+    let mut groups: Vec<AgentGroup> = groups_of_session(tabs);
     // A stable sort. Two groups that report the same facts therefore keep the
     // order that the tree gives them, and no row moves under the cursor.
     groups.sort_by_key(|group| group.urgency);
@@ -855,10 +866,7 @@ mod tests {
                 true,
                 vec![pane(1, text, true, vec![agent("one", "name")])],
             )];
-            let places = groups_of_pane(&tabs[0], &tabs[0].panes[0])
-                .pop()
-                .unwrap()
-                .rows;
+            let places = groups_of_session(&tabs).pop().unwrap().rows;
             assert_eq!(column_width(Column::Pane, &places), expected, "{text:?}");
             let (columns, name) = fit(&places, WIDE).unwrap();
             assert_eq!(
@@ -956,6 +964,47 @@ mod tests {
             stems(&rows),
             vec![vec![], vec![Branch::Last], vec![Branch::Last, Branch::Last],]
         );
+    }
+
+    #[test]
+    fn a_teammate_in_a_pane_of_its_own_draws_under_its_lead() {
+        // Claude starts a teammate in a terminal pane of its own, where it is a
+        // session of its own. The record still names the session that leads it,
+        // and the two draw as one group although they run in two panes.
+        let tabs = vec![
+            tab(
+                0,
+                "wrangler",
+                true,
+                vec![pane(1, "claude", true, vec![agent("one", "the lead")])],
+            ),
+            tab(
+                1,
+                "notes",
+                false,
+                vec![pane(
+                    2,
+                    "claude",
+                    false,
+                    vec![under_lead("mate", "one", "the teammate")],
+                )],
+            ),
+        ];
+        let rows = dashboard(&tabs, WIDE);
+        assert_eq!(names(&rows), ["the lead", "the teammate"]);
+        assert_eq!(stems(&rows), vec![vec![], vec![Branch::Last]]);
+        // Each row keeps the tab that it runs in. TAB is the first column after
+        // AGENT.
+        let tabs_drawn: Vec<String> = rows
+            .iter()
+            .filter_map(|row| match &row.content {
+                RowContent::DashboardAgent { cells, .. } => {
+                    Some(cells[0].text.trim_end().to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tabs_drawn, ["1 wrangler", "2 notes"]);
     }
 
     #[test]

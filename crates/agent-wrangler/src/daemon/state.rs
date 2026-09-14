@@ -338,7 +338,8 @@ pub fn look(plan: &Plan, world: &dyn World, since: &BTreeMap<SessionId, Option<u
 struct ReportedAgent {
     /// The session that the daemon files this hook under.
     session: SessionId,
-    /// The session that started it, for a hook that fired inside a child.
+    /// The session that this one follows: the parent of a child, or the lead of
+    /// a team for a teammate that runs as a session of its own.
     lead: Option<SessionId>,
 }
 
@@ -425,6 +426,12 @@ impl State {
     /// hold. No record then names a lead that is not there. The order of events
     /// makes that safe: a teammate is filed on its own start event, which fires
     /// before any child of that teammate starts.
+    ///
+    /// A hook that names no child speaks for a session. Such a session is filed
+    /// under its own id, and it still follows another session when it is a
+    /// teammate that Claude started in a terminal pane of its own. Its own
+    /// transcript names the team, and Claude's record of that team names the
+    /// session that leads it.
     fn reported_agent(
         &self,
         lead: &SessionId,
@@ -432,9 +439,16 @@ impl State {
         reading: &Reading,
     ) -> Option<ReportedAgent> {
         let Some(agent) = child_agent else {
+            // A lead never follows itself, and no record names a lead that the
+            // registry does not hold.
+            let team_lead = reading
+                .facts
+                .team_lead
+                .clone()
+                .filter(|team| team != lead && self.registry.get(team).is_some());
             return Some(ReportedAgent {
                 session: lead.clone(),
-                lead: None,
+                lead: team_lead,
             });
         };
         let parent = match &reading.facts.parent {
@@ -1176,6 +1190,64 @@ mod tests {
     fn a_hook_that_names_no_child_files_the_session_as_it_does_today() {
         let world = Fake::default();
         world.running(AGENT);
+        let mut state = State::default();
+        state.on_hook(&hook("working"), &world);
+        assert_eq!(state.registry().get(&session("one")).unwrap().lead, None);
+    }
+
+    /// The hook of a teammate that Claude started in a terminal pane of its own.
+    /// Such a teammate is a session, so the hook names its own session and names
+    /// no child at all.
+    fn teammate_hook(event: &str) -> Hook {
+        Hook {
+            session_id: "mate".to_string(),
+            transcript: "/t/mate.jsonl".to_string(),
+            ..hook(event)
+        }
+    }
+
+    /// What that teammate's own transcript and its team record say together.
+    fn led_by(lead: &str) -> SessionFacts {
+        SessionFacts {
+            team_lead: SessionId::new(lead),
+            ..SessionFacts::default()
+        }
+    }
+
+    #[test]
+    fn a_teammate_in_a_pane_of_its_own_follows_the_lead_of_its_team() {
+        // Claude gives such a teammate a session id of its own, so the daemon
+        // files it under that id. Only the team record links it to the lead.
+        let world = Fake::default();
+        world.running(AGENT);
+        world.reads("/t/mate.jsonl", led_by("one"), 1);
+        let mut state = State::default();
+        state.on_hook(&hook("working"), &world);
+        state.on_hook(&teammate_hook("working"), &world);
+
+        let filed = state.registry().get(&session("mate")).unwrap();
+        assert_eq!(filed.lead, Some(session("one")));
+        // The lead is a session of its own and follows nobody.
+        assert_eq!(state.registry().get(&session("one")).unwrap().lead, None);
+    }
+
+    #[test]
+    fn a_teammate_whose_lead_is_not_held_follows_nobody() {
+        // The team record names a session that this daemon never saw. A record
+        // that names it draws a row that hangs under nothing.
+        let world = Fake::default();
+        world.running(AGENT);
+        world.reads("/t/mate.jsonl", led_by("elsewhere"), 1);
+        let mut state = State::default();
+        state.on_hook(&teammate_hook("working"), &world);
+        assert_eq!(state.registry().get(&session("mate")).unwrap().lead, None);
+    }
+
+    #[test]
+    fn a_lead_that_names_its_own_team_does_not_follow_itself() {
+        let world = Fake::default();
+        world.running(AGENT);
+        world.reads("/t/one.jsonl", led_by("one"), 1);
         let mut state = State::default();
         state.on_hook(&hook("working"), &world);
         assert_eq!(state.registry().get(&session("one")).unwrap().lead, None);
