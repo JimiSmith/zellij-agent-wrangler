@@ -70,9 +70,12 @@ missing. Such a run is not full verification. `run_all.py` refuses that setup
 and also rejects skips reported by unittest.
 
 Dumps are written to `tests/out/`, which is not tracked.
+Rust tests run separately. They also require a `tmux` executable for native
+integration tests. Install tmux on Linux, `brew install tmux` on macOS, or
+psmux 3.3.8 on Windows (its release archive includes `tmux.exe`; add that
+directory to `PATH`). These are local prerequisites as well as CI dependencies.
 
-Rust tests run separately. From the repository root, use the same command as
-the Linux CI job:
+From the repository root, use the same command as the Linux CI job:
 
     cargo test --workspace --locked --no-fail-fast -- --include-ignored
 

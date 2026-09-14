@@ -143,6 +143,21 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install the native Windows tmux runtime
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'psmux.zip'
+          $directory = Join-Path $env:RUNNER_TEMP 'psmux'
+          Invoke-WebRequest 'https://github.com/psmux/psmux/releases/download/v3.3.8/psmux-v3.3.8-windows-x64.zip' -OutFile $archive
+          $expected = '1ad127ba937194a890b933a73d9b023e297bd73dc742abd841bf159984c2effe'
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+            throw 'psmux archive checksum mismatch'
+          }
+          Expand-Archive $archive -DestinationPath $directory
+          $env:PATH = "$directory;$env:PATH"
+          $directory | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          tmux -V
+          if ($LASTEXITCODE -ne 0) { throw 'tmux runtime verification failed' }
       - id: toolchain
         run: rustup component add clippy
       - name: Lint every native crate
@@ -166,6 +181,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install the tmux runtime
+        run: brew install tmux && tmux -V
       - id: toolchain
         run: rustup component add clippy
       - name: Lint every native crate
