@@ -70,10 +70,15 @@ missing. Such a run is not full verification. `run_all.py` refuses that setup
 and also rejects skips reported by unittest.
 
 Dumps are written to `tests/out/`, which is not tracked.
-Rust tests run separately. They also require a `tmux` executable for native
-integration tests. Install tmux on Linux, `brew install tmux` on macOS, or
-psmux 3.3.8 on Windows (its release archive includes `tmux.exe`; add that
-directory to `PATH`). These are local prerequisites as well as CI dependencies.
+
+Rust tests run separately. Native integration tests require tmux on Linux and
+macOS (`brew install tmux` on macOS). Windows cannot run the pane-registration
+integration test because psmux does not support pane-local user options. On
+Windows, append the following test filter to the native Cargo test command:
+
+    --skip tmux_location::tests::sidebar_registration_cleans_only_its_pane_and_tolerates_removed_panes
+
+CI uses this same Windows-only exception. Linux and macOS run the test.
 
 From the repository root, use the same command as the Linux CI job:
 
