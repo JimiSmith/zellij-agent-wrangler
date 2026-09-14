@@ -231,6 +231,23 @@ def guard_session_name(name):
     return name
 
 
+def end_session_pipes(session):
+    """End this session's held pipes, which can outlive the Zellij session."""
+    guard_session_name(session)
+    expected = ["zellij", "--session", session, "pipe", "--name", "wrangler:agents"]
+    processes = subprocess.run(
+        ["ps", "-ww", "-e", "-o", "pid=,args="],
+        capture_output=True, text=True, check=True,
+    )
+    for line in processes.stdout.splitlines():
+        fields = line.split()
+        if fields[1:] == expected:
+            try:
+                os.kill(int(fields[0]), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+
 def runs_tmux(text):
     """Tells whether a command line runs the tmux program.
 
@@ -314,14 +331,14 @@ class Runner:
         live = set(live_sessions())
         for name in self.sessions:
             guard_session_name(name)
-            if name not in live:
-                continue
-            self._log("cleanup: deleting zellij session %s" % name)
-            subprocess.run(
-                ["zellij", "delete-session", name, "--force"],
-                capture_output=True,
-                text=True,
-            )
+            if name in live:
+                self._log("cleanup: deleting zellij session %s" % name)
+                subprocess.run(
+                    ["zellij", "delete-session", name, "--force"],
+                    capture_output=True,
+                    text=True,
+                )
+            end_session_pipes(name)
 
     def _end_tmux_server(self):
         """Ends the tmux server of this harness, and no other.

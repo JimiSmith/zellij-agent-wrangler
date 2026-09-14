@@ -37,8 +37,11 @@ keys: <C-t>
 keys: 2
 sleep: 2
 
-sh: tests/scripts/raise-call.sh answered-one wrangler-test-answered "$(cat tests/out/answered-pane.txt)" needsAttention
+# The interpreter keeps process discovery on the long-lived harness, not the
+# helper that exits after the hook.
+sh: sh tests/scripts/raise-call.sh answered-one wrangler-test-answered "$(cat tests/out/answered-pane.txt)" needsAttention
 sleep: 2
+sh: tests/scripts/expect-turn.sh answered-one attention
 
 # The sidebar of the second tab draws the call, although the agent is not here.
 wait: ● @ 20

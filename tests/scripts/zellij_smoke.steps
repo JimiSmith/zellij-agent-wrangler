@@ -17,6 +17,9 @@ spawn: zellij --session wrangler-test-smoke
 wait: Ctrl @ 20
 waitgone: First Run Setup Wizard @ 2
 
+# A shell can give the default tab a title wider than the stock tab bar.
+sh: zellij --session wrangler-test-smoke action rename-tab smoke
+wait: wrangler-test-smoke @ 20
 dump: zellij_smoke
 
 # Ctrl-q is the stock quit binding. Cleanup can reap the session in any case,

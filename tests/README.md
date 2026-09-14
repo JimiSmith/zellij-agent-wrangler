@@ -19,9 +19,37 @@ terminal would have drawn.
 
 ## Running
 
-From the repository root:
+Run the complete harness locally before pushing. GitHub runs this same command,
+with the same test discovery and failure rules:
 
-    python3 -m unittest discover -s tests -v      # all of it
+    python3 tests/run_all.py
+
+Install Python 3, Bash, Cargo, tmux and Zellij first, and add the Rust target:
+
+    rustup target add wasm32-wasip1
+
+The live scripts build the native programs and the wasm plugin they use. CI
+installs Zellij 0.45.1 and the Ubuntu 24.04 tmux package. To reproduce a host
+difference, compare `zellij --version` and `tmux -V` before changing a test.
+
+`run_all.py` discovers every `test*.py` unittest module and every `.steps` file
+under `tests/scripts/`. It runs the scripts sequentially, including those already
+called by a unittest. The unittest assertions and the standalone script checks
+both run. New scripts need no workflow edit or registration list.
+
+The command fails for a missing required program, an empty suite, any skipped
+test, an expected failure, or any test or script failure. It continues through
+the remaining scripts after a failure and writes individual logs plus
+`tests/out/run-all/summary.json`. There is no CI-only mode or skip allowance.
+
+The runner puts `target/debug` first on `PATH`, selects Bash, sets the terminal
+type, clears inherited multiplexer location variables, and gives tmux a fresh
+socket directory. It does not replace the user's home directory. Run only one
+live harness at a time: scripts still share fixture files and the test daemon.
+
+For a focused local investigation, the smaller commands remain available:
+
+    python3 -m unittest discover -s tests -v      # Python tests, not every script
     python3 -m unittest tests.test_screen -v      # emulator only, no pty
     python3 tests/drive.py tests/scripts/bash_smoke.steps
     python3 tests/drive.py tests/scripts/zellij_smoke.steps
@@ -37,10 +65,27 @@ through `sh` so process discovery reaches the long-lived harness.
 The control recovery script detaches only the control client and checks that
 polling still updates the tree and acknowledges focused calls.
 
-The zellij cases skip themselves when `zellij` is not on `PATH`, and the tmux
-cases skip themselves when `tmux` is not on `PATH`.
+Direct unittest discovery skips the Zellij or tmux cases when that program is
+missing. Such a run is not full verification. `run_all.py` refuses that setup
+and also rejects skips reported by unittest.
 
 Dumps are written to `tests/out/`, which is not tracked.
+
+Rust tests run separately. From the repository root, use the same command as
+the Linux CI job:
+
+    cargo test --workspace --locked --no-fail-fast -- --include-ignored
+
+This includes integration tests and doctests. CI also tests core without its
+native feature, because workspace feature unification would otherwise hide
+that configuration:
+
+    cargo test -p agent-wrangler-core --no-default-features --locked --no-fail-fast -- --include-ignored
+    cargo test -p agent-wrangler-core --no-default-features --features json --locked --no-fail-fast -- --include-ignored
+
+GitHub runs the checks on pull requests, pushes to `main`, version tags and
+manual dispatch. The live harness must pass before a release can be built or
+published. Its logs and screen dumps are uploaded even when tests fail.
 
 `drive.py` takes `--rows`, `--cols`, `--outdir` and `--quiet`, and reads the
 step list from stdin when the script argument is `-`.
@@ -55,6 +100,10 @@ command in the run itself mentioned; `guard_session_name` raises on anything
 else. `zellij kill-all-sessions` and `zellij delete-all-sessions` are refused
 outright as `sh:` steps. A developer's own sessions are never in reach of a test
 run.
+
+Cleanup also ends the exact `wrangler:agents` pipe commands for those session
+names. A Zellij pipe can outlive a closed session and its daemon; leaving it
+running makes the next pipe-count assertion include an earlier run.
 
 ### Which tmux server a run reaches
 
