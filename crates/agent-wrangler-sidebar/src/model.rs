@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use agent_wrangler_core::agent::SessionId;
 pub use agent_wrangler_core::client_message::ClientMessage;
@@ -55,7 +55,10 @@ pub struct TabLayout {
     pub position: TabPosition,
     pub content_panes: Vec<PaneReport>,
     pub sidebar_pane: Option<SidebarPaneReport>,
-    /// Whether the host event reports a different plugin pane as focused.
+    /// Physical panes excluded from content, other than this sidebar.
+    /// They keep a tab nonempty even when it has no content rows.
+    pub has_other_panes: bool,
+    /// Whether the host event reports another non-content pane as focused.
     pub other_focused: bool,
 }
 
@@ -149,6 +152,9 @@ pub enum Input {
     VisibilityChanged(bool),
     TabsReported(Vec<TabReport>),
     LayoutReported(SessionLayout),
+    /// Panes the host excludes from content, including their agent notifications.
+    /// This changes presentation, not authoritative agent records.
+    ExcludedPanesChanged(BTreeSet<PaneId>),
     PaneChanged(PaneId),
     PaneTitleObserved {
         pane: PaneId,

@@ -6,6 +6,7 @@
 //! - The status: the branch, the model and the context.
 //! - The records: the last message, and the tool that still runs.
 //! - The parent, for a child that another child started.
+//! - The team lead, for a teammate that runs as a session of its own.
 //!
 //! No agent puts any of that in a hook body. A reader therefore takes it off
 //! disk at the moment when a hook fires. That is what keeps a row current. An
@@ -19,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::agent::{AgentId, LabelFacts, StatusFacts, TranscriptRecords};
+use crate::agent::{AgentId, LabelFacts, SessionId, StatusFacts, TranscriptRecords};
 // The reader that finds a record and the reader that draws it ask the same
 // three questions of it. Those three live beside the drawing's reader, which is
 // behind `json`, and `native` takes `json` with it.
@@ -42,6 +43,18 @@ pub struct SessionFacts {
     /// A session and a Copilot agent report `None` here, because neither reads
     /// a meta file.
     pub parent: Option<AgentId>,
+    /// The session that leads the team that this session belongs to.
+    ///
+    /// Claude starts a teammate in one of two ways. A teammate that runs inside
+    /// its lead is a child, and every hook of it names the lead already. A
+    /// teammate that Claude starts in a terminal pane of its own is a session,
+    /// and no hook of it names the lead at all. Such a session writes the name
+    /// of its team on every conversation record, and
+    /// [`read_claude_team_lead`] turns that name into the id of the lead.
+    ///
+    /// The field is `None` for a session in no team, and for a child, whose
+    /// transcript names no team.
+    pub team_lead: Option<SessionId>,
     /// Whether the last record of the window is the tool result that ends the
     /// agent's turn. See [`ends_the_turn`].
     ///
@@ -156,6 +169,55 @@ fn status_from_assistant_record(record: &Value) -> Option<StatusFacts> {
     })
 }
 
+/// The directory that holds one directory for each team.
+const TEAMS: &str = "teams";
+
+/// What Claude writes about one team, inside that team's own directory.
+const TEAM_CONFIG: &str = "config.json";
+
+/// The team name, when the reader can safely build a path out of it.
+///
+/// The name reaches this code out of a transcript record, and the reader joins
+/// it onto a directory. A name with a separator or a dot in it names a file
+/// outside the teams directory. The reader therefore takes a name only when
+/// every character in it is one that Claude writes.
+fn team_directory_name(name: &str) -> Option<&str> {
+    let plain = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+    plain.then_some(name)
+}
+
+/// The session that leads the team called `team_name`.
+///
+/// Claude starts a teammate in a terminal pane as a session of its own. No hook
+/// of such a session names the lead, and neither transcript names the other
+/// session. The team name on the teammate's records is the whole link, and
+/// Claude's own record of the team turns that name into the id of the lead:
+///
+/// ```text
+/// <claude directory>/projects/<project directory>/<session id>.jsonl
+/// <claude directory>/teams/<team name>/config.json
+/// ```
+///
+/// The path is built from `transcript` rather than from the home directory,
+/// because a user is free to move the whole Claude directory. Both files then
+/// move together.
+///
+/// Side effect: this function reads one file. It reads none for a session that
+/// names no team, which is every session outside a team.
+///
+/// The answer is nothing for a team that Claude wrote no record of, and for a
+/// record that names no lead. Measured on Claude Code 2.1.270.
+pub fn read_claude_team_lead(transcript: &str, team_name: &str) -> Option<SessionId> {
+    let name = team_directory_name(team_name)?;
+    let claude = Path::new(transcript).parent()?.parent()?.parent()?;
+    let text = std::fs::read_to_string(claude.join(TEAMS).join(name).join(TEAM_CONFIG)).ok()?;
+    let config: Value = serde_json::from_str(&text).ok()?;
+    SessionId::new(string_field(&config, "leadSessionId")?)
+}
+
 /// What a Claude session is called, and what it works with, read from its
 /// transcript.
 ///
@@ -172,6 +234,11 @@ fn status_from_assistant_record(record: &Value) -> Option<StatusFacts> {
 /// teammate carries the same field, and the reader passes over it. That record
 /// says what the name became, and the conversation records after it already say
 /// so.
+///
+/// The name of the team rides on the same records, and the reader takes the two
+/// off one record. The two therefore describe one moment, and a rename cannot
+/// move one without the other. [`read_claude_team_lead`] turns that name into
+/// the session that leads the team.
 ///
 /// What the session works with comes from the last `assistant` record in the
 /// window. All three of those values ride on that one record, so the three
@@ -206,6 +273,7 @@ pub fn read_claude_session(transcript: &str) -> SessionFacts {
 
     let (mut given, mut written) = (String::new(), String::new());
     let (mut name, mut color) = (String::new(), String::new());
+    let mut team_name = String::new();
     let mut status = StatusFacts::default();
     let mut last_message = String::new();
     // Every tool call in this window that no result answers yet, oldest first.
@@ -258,6 +326,7 @@ pub fn read_claude_session(transcript: &str) -> SessionFacts {
             Some("assistant") => {
                 if name.is_empty() {
                     name = string_field(&record, "agentName").unwrap_or("").to_string();
+                    team_name = string_field(&record, "teamName").unwrap_or("").to_string();
                 }
                 // The later record wins, the way the later title does.
                 if let Some(found) = status_from_assistant_record(&record) {
@@ -273,7 +342,8 @@ pub fn read_claude_session(transcript: &str) -> SessionFacts {
                 }
             }
             _ if name.is_empty() => {
-                name = string_field(&record, "agentName").unwrap_or("").to_string()
+                name = string_field(&record, "agentName").unwrap_or("").to_string();
+                team_name = string_field(&record, "teamName").unwrap_or("").to_string();
             }
             _ => {}
         }
@@ -306,6 +376,7 @@ pub fn read_claude_session(transcript: &str) -> SessionFacts {
         // A transcript never names a parent. Only a meta file does, and only a
         // child has one. [`read_claude_child`] fills this in afterwards.
         parent: None,
+        team_lead: read_claude_team_lead(transcript, &team_name),
         turn_ended,
     }
 }
@@ -497,6 +568,9 @@ pub fn read_copilot_session(home: &Path, session: &str) -> SessionFacts {
         // of them. A Copilot agent therefore starts nothing that the daemon
         // draws under it.
         parent: None,
+        // Copilot has no teams, so a Copilot session leads nothing and follows
+        // nobody.
+        team_lead: None,
         // The daemon never opens a Copilot transcript, so nothing here can say
         // that a turn ended.
         turn_ended: false,
@@ -1297,5 +1371,76 @@ mod tests {
         assert_eq!(yaml_scalar("'it''s'"), "it's");
         assert_eq!(yaml_scalar("null"), "");
         assert_eq!(yaml_scalar("  plain  "), "plain");
+    }
+
+    /// A Claude directory holding one session transcript, and Claude's record of
+    /// one team beside it. `team_config` is empty to write no record at all.
+    fn write_teammate_session(dir: &Path, records: &[&str], team_config: &str) -> String {
+        let project = dir.join("projects").join("-home-u-quarry");
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = project.join("a4dcbe29.jsonl");
+        std::fs::write(&transcript, records.join("\n")).unwrap();
+        if !team_config.is_empty() {
+            let team = dir.join(TEAMS).join("session-21525576");
+            std::fs::create_dir_all(&team).unwrap();
+            std::fs::write(team.join(TEAM_CONFIG), team_config).unwrap();
+        }
+        transcript.to_string_lossy().to_string()
+    }
+
+    /// One conversation record of a teammate that runs as a session of its own.
+    /// Claude writes the team and the name on every such record.
+    const TEAMMATE_RECORD: &str = concat!(
+        r#"{"type":"assistant","teamName":"session-21525576","agentName":"shared-crates","#,
+        r#""gitBranch":"main","message":{"model":"claude-opus-5","usage":{"input_tokens":2}}}"#
+    );
+
+    /// Claude's record of that team. Measured on Claude Code 2.1.270.
+    const TEAM_RECORD: &str = concat!(
+        r#"{"name":"session-21525576","leadSessionId":"21525576-33d1-4d5b-96b1-37caedd52f06","#,
+        r#""members":[]}"#
+    );
+
+    #[test]
+    fn a_teammate_session_names_the_lead_of_its_team() {
+        // Claude starts a teammate in a terminal pane as a session of its own.
+        // No hook of that session names the lead, and the transcript names only
+        // the team. Claude's record of the team names the lead.
+        let scratch = Scratch::new("team-lead");
+        let transcript = write_teammate_session(scratch.path(), &[TEAMMATE_RECORD], TEAM_RECORD);
+        let facts = read_claude_session(&transcript);
+        assert_eq!(facts.label.name, "shared-crates");
+        assert_eq!(
+            facts.team_lead,
+            SessionId::new("21525576-33d1-4d5b-96b1-37caedd52f06")
+        );
+    }
+
+    #[test]
+    fn a_session_outside_a_team_names_no_lead() {
+        let scratch = Scratch::new("team-none");
+        let plain = r#"{"type":"assistant","message":{"model":"claude-opus-5","usage":{}}}"#;
+        let transcript = write_teammate_session(scratch.path(), &[plain], TEAM_RECORD);
+        assert_eq!(read_claude_session(&transcript).team_lead, None);
+    }
+
+    #[test]
+    fn a_team_that_claude_wrote_no_record_of_names_no_lead() {
+        let scratch = Scratch::new("team-no-record");
+        let transcript = write_teammate_session(scratch.path(), &[TEAMMATE_RECORD], "");
+        assert_eq!(read_claude_session(&transcript).team_lead, None);
+    }
+
+    #[test]
+    fn a_team_name_that_can_reach_another_directory_names_no_lead() {
+        // The reader joins this name onto a directory. A name with a separator
+        // or a dot in it names a file elsewhere, so the reader refuses it.
+        for name in ["../../elsewhere", "session/21525576", "..", ""] {
+            assert_eq!(team_directory_name(name), None, "{name}");
+        }
+        assert_eq!(
+            team_directory_name("session-21525576"),
+            Some("session-21525576")
+        );
     }
 }

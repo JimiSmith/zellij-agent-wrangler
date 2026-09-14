@@ -60,12 +60,13 @@ pub const WINDOW_FORMAT: &str = "#{window_id}\t#{window_index}\t#{window_active}
 /// the running program when it is. That matches what a zellij sidebar draws,
 /// because zellij reports the same escape sequence title and falls back to the
 /// command in the same way.
-pub const PANE_FORMAT: &str = "#{window_id}\t#{pane_id}\t#{pane_active}\t\
+pub const PANE_FORMAT: &str =
+    "#{window_id}\t#{pane_id}\t#{pane_active}\t#{@agent-wrangler-sidebar}\t\
      #{?#{==:#{pane_title},#{host_short}},#{pane_current_command},#{pane_title}}";
 
 /// How many fields each format writes.
 const WINDOW_FIELDS: usize = 4;
-const PANE_FIELDS: usize = 4;
+const PANE_FIELDS: usize = 5;
 
 /// One window, as tmux reported it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,6 +91,9 @@ pub struct ReportedPane {
     /// pane per window, so this is true in a window that the user is not in.
     pub active: bool,
     pub title: String,
+    /// Whether the reserved pane-local `@agent-wrangler-sidebar` option is `1`.
+    /// The physical pane remains in this report even when it is marked.
+    pub is_sidebar: bool,
 }
 
 /// A valid client report must name at least one non-control client.
@@ -127,7 +131,7 @@ pub fn read_panes(answer: &str) -> Vec<ReportedPane> {
         .lines()
         .filter_map(|line| {
             let fields: Vec<&str> = line.splitn(PANE_FIELDS, FIELD_BREAK).collect();
-            let [window_id, id, active, title] = fields.as_slice() else {
+            let [window_id, id, active, sidebar_flag, title] = fields.as_slice() else {
                 return None;
             };
             Some(ReportedPane {
@@ -135,6 +139,7 @@ pub fn read_panes(answer: &str) -> Vec<ReportedPane> {
                 id: (*id).to_string(),
                 active: *active == TMUX_TRUE,
                 title: (*title).to_string(),
+                is_sidebar: *sidebar_flag == TMUX_TRUE,
             })
         })
         .collect()
@@ -161,12 +166,11 @@ pub fn tab_reports(windows: &[ReportedWindow]) -> Vec<TabReport> {
 /// The session layout that the shared sidebar takes.
 ///
 /// `sidebar_pane` names the pane that this program runs in, and this function
-/// leaves that pane out of the content panes. A sidebar that drew itself as a
-/// pane would give the user a row for the pane they already look at.
+/// leaves that pane and every marked peer out of the content panes. The raw
+/// reports still contain all physical panes for focus and lifecycle decisions.
 ///
-/// Two fields are fixed here because tmux has nothing that answers for them.
-/// Tmux parks no pane, so every pane is on screen. Tmux runs no plugin, so no
-/// other kind of pane can hold the focus.
+/// Tmux parks no pane, so every content pane is on screen. Marked peers count
+/// as other physical panes and can hold focus without focusing this instance.
 pub fn session_layout(
     windows: &[ReportedWindow],
     panes: &[ReportedPane],
@@ -182,7 +186,13 @@ pub fn session_layout(
                 .collect();
             TabLayout {
                 position: TabPosition::at(order),
-                other_focused: false,
+                has_other_panes: mine
+                    .iter()
+                    .any(|pane| pane.id != own_pane && pane.is_sidebar),
+                other_focused: window.active
+                    && mine
+                        .iter()
+                        .any(|pane| pane.id != own_pane && pane.is_sidebar && pane.active),
                 sidebar_pane: mine.iter().find(|pane| pane.id == own_pane).map(|pane| {
                     SidebarPaneReport {
                         focused: window.active && pane.active,
@@ -190,7 +200,7 @@ pub fn session_layout(
                 }),
                 content_panes: mine
                     .iter()
-                    .filter(|pane| pane.id != own_pane)
+                    .filter(|pane| pane.id != own_pane && !pane.is_sidebar)
                     .map(|pane| PaneReport {
                         id: PaneId::new(pane.id.clone()),
                         title: pane.title.clone(),
@@ -216,6 +226,8 @@ pub fn focus(windows: &[ReportedWindow], panes: &[ReportedPane], own_pane: &str)
         .find(|pane| pane.window_id == window.id && pane.active)?;
     let target = if pane.id == own_pane {
         FocusTarget::Sidebar
+    } else if pane.is_sidebar {
+        FocusTarget::Other
     } else {
         FocusTarget::Content(PaneId::new(pane.id.clone()))
     };
@@ -233,7 +245,7 @@ mod tests {
     /// closed. The user is in the second pane of window 1.
     const WINDOWS: &str = "@1\t1\t1\teditor\n@7\t4\t0\tbuild logs\n";
     const PANES: &str =
-        "@1\t%0\t0\tnvim\n@1\t%3\t1\tbash\n@1\t%9\t0\tsidebar\n@7\t%5\t1\ttail -f\n";
+        "@1\t%0\t0\t\tnvim\n@1\t%3\t1\t\tbash\n@1\t%9\t0\t1\tsidebar\n@7\t%5\t1\t\ttail -f\n";
 
     fn windows() -> Vec<ReportedWindow> {
         read_windows(WINDOWS)
@@ -287,10 +299,28 @@ mod tests {
 
     #[test]
     fn a_title_that_holds_a_tab_survives_whole() {
-        let read = read_panes("@1\t%0\t1\tvim\tnotes.txt\n");
+        let read = read_panes("@1\t%0\t1\t1\tvim\tnotes.txt\n");
         assert_eq!(read.len(), 1);
         assert_eq!(read[0].title, "vim\tnotes.txt");
         assert_eq!(read[0].id, "%0");
+    }
+
+    #[test]
+    fn only_the_exact_sidebar_flag_marks_a_physical_pane() {
+        for (flag, expected) in [
+            ("1", true),
+            ("", false),
+            ("0", false),
+            ("true", false),
+            ("01", false),
+        ] {
+            let read = read_panes(&format!("@1\t%0\t0\t{flag}\ttmux-agent-wrangler\n"));
+            assert_eq!(read.len(), 1, "marked panes remain in physical topology");
+            assert_eq!(read[0].is_sidebar, expected, "{flag:?}");
+            assert_eq!(read[0].title, "tmux-agent-wrangler");
+        }
+        let read = read_panes("@1\t%0\t0\t1\tbash\n");
+        assert!(read[0].is_sidebar, "titles do not classify panes");
     }
 
     #[test]
@@ -387,6 +417,45 @@ mod tests {
     }
 
     #[test]
+    fn only_marked_peers_in_the_same_window_count_as_other_physical_panes() {
+        for (peers, first, second) in [
+            ("", false, false),
+            ("@1\t%3\t0\t1\tpeer\n", true, false),
+            ("@7\t%5\t1\t1\tpeer\n", false, true),
+            ("@1\t%3\t0\t\ttmux-agent-wrangler\n", false, false),
+        ] {
+            let panes = read_panes(&format!("@1\t%9\t1\t1\town\n{peers}"));
+            let layout = session_layout(&windows(), &panes, "%9");
+            assert_eq!(layout.tabs[0].has_other_panes, first);
+            assert_eq!(layout.tabs[1].has_other_panes, second);
+        }
+    }
+
+    #[test]
+    fn peer_focus_is_other_in_both_layout_and_focus_reports() {
+        for active_window in ["@1", "@7"] {
+            let windows = read_windows(&format!(
+                "@1\t1\t{}\tfirst\n@7\t4\t{}\tsecond\n",
+                u8::from(active_window == "@1"),
+                u8::from(active_window == "@7")
+            ));
+            let panes = read_panes("@1\t%9\t0\t1\town\n@1\t%3\t1\t1\tpeer\n@7\t%5\t1\t1\tpeer\n");
+            let layout = session_layout(&windows, &panes, "%9");
+            for (window, tab) in windows.iter().zip(&layout.tabs) {
+                assert_eq!(tab.other_focused, window.id == active_window);
+                assert!(!tab.sidebar_pane.as_ref().is_some_and(|pane| pane.focused));
+            }
+            assert_eq!(
+                focus(&windows, &panes, "%9"),
+                Some(Focus {
+                    tab: TabId::new(active_window),
+                    target: FocusTarget::Other,
+                })
+            );
+        }
+    }
+
+    #[test]
     fn the_focus_names_the_active_pane_of_the_active_window() {
         assert_eq!(
             focus(&windows(), &panes(), "%9"),
@@ -418,13 +487,13 @@ mod tests {
 
     #[test]
     fn an_active_window_with_no_active_pane_places_nobody() {
-        let headless = read_panes("@1\t%0\t0\tnvim\n");
+        let headless = read_panes("@1\t%0\t0\t\tnvim\n");
         assert_eq!(focus(&windows(), &headless, "%9"), None);
     }
 
     #[test]
     fn a_window_that_lists_no_pane_still_draws_a_row() {
-        let layout = session_layout(&windows(), &read_panes("@1\t%0\t1\tnvim\n"), "%9");
+        let layout = session_layout(&windows(), &read_panes("@1\t%0\t1\t\tnvim\n"), "%9");
         assert_eq!(layout.tabs.len(), 2);
         assert!(layout.tabs[1].content_panes.is_empty());
     }
@@ -448,6 +517,7 @@ mod tests {
                 "#{window_id}",
                 "#{pane_id}",
                 "#{pane_active}",
+                "#{@agent-wrangler-sidebar}",
                 // The title falls back to the running program, because tmux
                 // answers the host name for a pane that set no title.
                 "#{?#{==:#{pane_title},#{host_short}},#{pane_current_command},#{pane_title}}"

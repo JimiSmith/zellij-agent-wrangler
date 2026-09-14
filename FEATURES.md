@@ -80,7 +80,8 @@ once with no agent reporting itself again.
 - [x] Rows ordered by urgency: the agents that want you lead, and inside that
       group the longest wait leads
 - [x] Columns dropped one at a time from the right edge as the pane narrows
-- [x] Subagents and teammates as rows under the agent that started them
+- [x] Subagents and teammates as rows under the agent that started them,
+      including a teammate that Claude runs in a terminal pane of its own
 - [x] Needs you, Working and Idle queues, with top-level counts; a child can
       raise its group without changing the status shown for its parent
 - [x] Fixed STATUS before AGENT; optional CTX, MODEL, BRANCH, PANE and TAB

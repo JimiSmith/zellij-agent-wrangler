@@ -430,7 +430,7 @@ mod tests {
         // A pane id starts with a percent sign, exactly as a notification does.
         // Only the block tells them apart, and a sidebar that got this wrong
         // would ask again for every pane that it was told about.
-        let outcomes = take_all(&["%begin 1787 300 1", "@0\t%0\t1\tbash", "%end 1787 300 1"]);
+        let outcomes = take_all(&["%begin 1787 300 1", "@0\t%0\t1\t\tbash", "%end 1787 300 1"]);
         assert!(outcomes.iter().all(|o| *o == ControlOutcome::Nothing));
     }
 
@@ -447,7 +447,7 @@ mod tests {
             ANSWER_BREAK,
             "%end 1787 299 1",
             "%begin 1787 300 1",
-            "@0\t%0\t1\tbash",
+            "@0\t%0\t1\t\tbash",
             "%end 1787 300 1",
             "%begin 1787 301 1",
             CLIENTS_BREAK,
@@ -467,7 +467,7 @@ mod tests {
         assert_eq!(
             answered,
             [&ControlOutcome::Answered(format!(
-                "@0\t0\t0\teditor\n@1\t1\t1\tlogs\n{ANSWER_BREAK}\n@0\t%0\t1\tbash\n{CLIENTS_BREAK}\n1\n0\n"
+                "@0\t0\t0\teditor\n@1\t1\t1\tlogs\n{ANSWER_BREAK}\n@0\t%0\t1\t\tbash\n{CLIENTS_BREAK}\n1\n0\n"
             ))]
         );
         let ControlOutcome::Answered(text) = answered[0] else {
@@ -476,6 +476,46 @@ mod tests {
         let parsed = crate::tmux_query::split_answer(text).unwrap();
         assert_eq!(parsed.clients, "1\n0\n");
         assert!(crate::topology::has_interactive_client(&parsed.clients));
+    }
+
+    #[test]
+    fn control_answer_preserves_sidebar_flags_and_all_physical_panes() {
+        let outcomes = take_all(&[
+            "%begin 1 1 1",
+            "@1\t1\t1\teditor",
+            "%end 1 1 1",
+            "%begin 1 2 1",
+            ANSWER_BREAK,
+            "%end 1 2 1",
+            "%begin 1 3 1",
+            "@1\t%0\t1\t1\tsidebar",
+            "@1\t%1\t0\t\ttmux-agent-wrangler",
+            "%end 1 3 1",
+            "%begin 1 4 1",
+            CLIENTS_BREAK,
+            "%end 1 4 1",
+            "%begin 1 5 1",
+            "0",
+            "%end 1 5 1",
+            "%begin 1 6 1",
+            ANSWER_DONE,
+            "%end 1 6 1",
+        ]);
+        let answers: Vec<_> = outcomes
+            .iter()
+            .filter_map(|outcome| match outcome {
+                ControlOutcome::Answered(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answers.len(), 1);
+        let answer = crate::tmux_query::split_answer(answers[0]).unwrap();
+        let panes = crate::topology::read_panes(&answer.panes);
+        assert_eq!(panes.len(), 2);
+        assert!(panes[0].is_sidebar);
+        assert!(!panes[1].is_sidebar);
+        assert_eq!(panes[1].title, "tmux-agent-wrangler");
+        assert!(query_command_line("$3").contains("#{@agent-wrangler-sidebar}"));
     }
 
     #[test]

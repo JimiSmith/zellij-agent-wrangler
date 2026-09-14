@@ -30,6 +30,7 @@ pub struct Application {
     layout: SessionLayout,
     registry: Registry,
     agent_panes: BTreeMap<SessionId, PaneId>,
+    excluded_panes: BTreeSet<PaneId>,
     answered: AnsweredCalls,
     client: HelperProgramState,
     session_name: Option<String>,
@@ -62,10 +63,17 @@ impl Application {
     }
 
     pub fn reduce(&mut self, input: Input) -> Decision {
-        match input {
+        let decision = match input {
             Input::VisibilityChanged(visible) => self.change_visibility(visible),
             Input::TabsReported(tabs) => self.report_tabs(tabs),
             Input::LayoutReported(layout) => self.report_layout(layout),
+            Input::ExcludedPanesChanged(panes) => {
+                let changed = self.excluded_panes != panes;
+                self.excluded_panes = panes;
+                let mut decision = Decision::default();
+                decision.request_repaint(changed);
+                decision
+            }
             Input::PaneChanged(pane) => Decision::effect(Effect::RefreshPaneTitle(pane)),
             Input::PaneTitleObserved { pane, title } => self.observe_pane_title(pane, title),
             Input::FocusObserved(focus) => self.observe_focus(focus),
@@ -79,6 +87,36 @@ impl Application {
             Input::Message(message) => self.message(message),
             Input::Agents(snapshot) => self.adopt(snapshot),
             Input::EventSettled => self.confirmed_effects(),
+        };
+        self.invalidate_excluded_selection();
+        decision
+    }
+
+    /// A host can exclude a pane after its row was drawn. Remove stale targets
+    /// before another key or click can select that pane or one of its agents.
+    fn invalidate_excluded_selection(&mut self) {
+        let excluded = |key: &RowKey| {
+            let pane = match key {
+                RowKey::Pane(pane) => Some(pane),
+                RowKey::Agent(agent) | RowKey::Section(agent) | RowKey::Notification(agent) => {
+                    self.agent_panes.get(agent)
+                }
+                RowKey::Tab(_) => None,
+            };
+            pane.is_some_and(|pane| self.excluded_panes.contains(pane))
+        };
+        if self.selected.as_ref().is_some_and(excluded) {
+            self.selected = None;
+        }
+        if let Some(view) = &mut self.rendered {
+            if view.selection.as_ref().is_some_and(excluded) {
+                view.selection = None;
+            }
+            for item in &mut view.interactions {
+                if item.as_ref().is_some_and(|item| excluded(&item.key)) {
+                    *item = None;
+                }
+            }
         }
     }
 
@@ -406,18 +444,18 @@ impl Application {
         resolved: &[tree::Tab],
         decision: &mut Decision,
     ) {
-        if !self
+        let Some(layout) = self
             .layout
             .tabs
             .iter()
-            .any(|tab| tab.position == focused_tab && tab.sidebar_pane.is_some())
-        {
+            .find(|tab| tab.position == focused_tab && tab.sidebar_pane.is_some())
+        else {
             return;
-        }
+        };
         let Some(tab) = resolved.iter().find(|tab| tab.position == focused_tab) else {
             return;
         };
-        if !tab.panes.is_empty() {
+        if layout.has_other_panes || !tab.panes.is_empty() {
             self.tabs_with_company.insert(focused_id.clone());
         } else if self.tabs_with_company.contains(focused_id) {
             decision.effects.push(Effect::CloseSidebar);
@@ -632,6 +670,12 @@ impl Application {
         self.registry
             .calling()
             .into_iter()
+            .filter(|agent| {
+                !self
+                    .agent_panes
+                    .get(&agent.session)
+                    .is_some_and(|pane| self.excluded_panes.contains(pane))
+            })
             .map(|agent| Notification {
                 session: agent.session.clone(),
                 agent_program: agent.agent.clone(),
@@ -780,6 +824,118 @@ mod tests {
     use agent_wrangler_ui::model::RowContent;
     use agent_wrangler_ui::options::{DrawingOptions, StatusTemplate};
 
+    #[test]
+    fn excluded_panes_invalidate_existing_and_arriving_selections() {
+        let peer = SessionId::new("peer").unwrap();
+        for key in [
+            RowKey::Pane(PaneId::new("hidden")),
+            RowKey::Agent(peer.clone()),
+            RowKey::Section(peer.clone()),
+            RowKey::Notification(peer.clone()),
+        ] {
+            let mut app = app();
+            app.reduce(Input::PermissionReported(Permission::Granted));
+            app.reduce(Input::TabsReported(vec![tab("one", 0)]));
+            app.reduce(Input::LayoutReported(layout(
+                0,
+                &[(0, &["hidden", "ordinary"])],
+            )));
+            app.reduce(focus("one", FocusTarget::Sidebar));
+            app.reduce(Input::Agents(agents(&[(
+                "peer",
+                "hidden",
+                Turn::Attention,
+            )])));
+            let registry = app.registry.clone();
+            app.reduce(Input::Message(Broadcast::Selection(key.clone())));
+            app.render(PANE);
+            let effects = app
+                .reduce(Input::ExcludedPanesChanged(BTreeSet::from([PaneId::new(
+                    "hidden",
+                )])))
+                .effects;
+            assert_eq!(app.selected, None, "{key:?}");
+            assert!(app
+                .rendered
+                .as_ref()
+                .unwrap()
+                .interactions
+                .iter()
+                .flatten()
+                .all(
+                    |item| item.action != ViewAction::ActivatePane(PaneId::new("hidden"))
+                        && item.action != ViewAction::ActivateAgent(peer.clone())
+                ));
+            assert!(!effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Tell(_))));
+            assert_eq!(app.registry, registry);
+            for action in [UserAction::Next, UserAction::Next, UserAction::Previous] {
+                app.reduce(Input::User(action));
+                assert!(
+                    matches!(&app.selected, None | Some(RowKey::Tab(_)))
+                        || app.selected == Some(RowKey::Pane(PaneId::new("ordinary")))
+                );
+            }
+            app.reduce(Input::Message(Broadcast::Selection(key.clone())));
+            assert_eq!(app.selected, None, "new selection: {key:?}");
+            app.reduce(Input::Message(Broadcast::Selection(RowKey::Pane(
+                PaneId::new("ordinary"),
+            ))));
+            assert_eq!(app.selected, Some(RowKey::Pane(PaneId::new("ordinary"))));
+        }
+    }
+
+    #[test]
+    fn agent_remapping_to_an_excluded_pane_invalidates_its_cached_selection() {
+        let mut app = app();
+        app.reduce(Input::PermissionReported(Permission::Granted));
+        app.reduce(Input::TabsReported(vec![tab("one", 0)]));
+        app.reduce(Input::LayoutReported(layout(0, &[(0, &["ordinary"])])));
+        app.reduce(focus("one", FocusTarget::Sidebar));
+        app.reduce(Input::ExcludedPanesChanged(BTreeSet::from([PaneId::new(
+            "excluded",
+        )])));
+        app.reduce(Input::Agents(agents(&[(
+            "peer",
+            "ordinary",
+            Turn::Attention,
+        )])));
+        let key = RowKey::Agent(SessionId::new("peer").unwrap());
+        app.reduce(Input::Message(Broadcast::Selection(key.clone())));
+        assert_eq!(app.render(PANE).selection, Some(key.clone()));
+        let effects = app
+            .reduce(Input::Agents(agents(&[(
+                "peer",
+                "excluded",
+                Turn::Attention,
+            )])))
+            .effects;
+        assert_eq!(app.selected, None);
+        assert_eq!(app.rendered.as_ref().unwrap().selection, None);
+        assert!(app
+            .reduce(Input::User(UserAction::Activate))
+            .effects
+            .is_empty());
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Tell(_))));
+        assert_eq!(app.registry.iter().count(), 1);
+        assert_eq!(
+            app.registry
+                .get(&SessionId::new("peer").unwrap())
+                .unwrap()
+                .turn,
+            Turn::Attention
+        );
+        assert!(!app
+            .render(PANE)
+            .interactions
+            .iter()
+            .flatten()
+            .any(|item| item.key == key));
+    }
+
     fn tab(id: &str, position: usize) -> TabReport {
         TabReport {
             id: TabId::new(id),
@@ -796,6 +952,7 @@ mod tests {
                 .iter()
                 .map(|(position, panes)| TabLayout {
                     position: TabPosition::at(*position),
+                    has_other_panes: false,
                     other_focused: false,
                     content_panes: panes
                         .iter()
@@ -1313,6 +1470,92 @@ mod tests {
             .answered
             .already_answered_sessions(&app.registry)
             .is_empty());
+    }
+
+    #[test]
+    fn other_focus_tracks_tab_changes_without_replacing_remembered_content() {
+        let mut app = app();
+        let mut reports = vec![tab("10", 0), tab("20", 1)];
+        reports[0].active = true;
+        app.reduce(Input::TabsReported(reports.clone()));
+        let mut reported = layout(0, &[(0, &["7"]), (1, &["8"])]);
+        app.reduce(Input::LayoutReported(reported.clone()));
+        app.reduce(focus("10", FocusTarget::Content(PaneId::new("7"))));
+        for (index, id) in [(0, "10"), (1, "20"), (0, "10")] {
+            app.reduce(Input::VisibilityChanged(false));
+            for (i, tab) in reports.iter_mut().enumerate() {
+                tab.active = i == index;
+                reported.tabs[i].other_focused = i == index;
+            }
+            app.reduce(Input::TabsReported(reports.clone()));
+            app.reduce(Input::LayoutReported(reported.clone()));
+            app.reduce(Input::VisibilityChanged(true));
+            app.reduce(focus(id, FocusTarget::Other));
+            app.reduce(Input::EventSettled);
+            let resolved = app.reconciled_session();
+            assert_eq!(
+                resolved.focus,
+                session::ReconciledFocus::Confirmed(Focus {
+                    tab: TabId::new(id),
+                    target: FocusTarget::Other,
+                })
+            );
+            assert_eq!(
+                resolved
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.active)
+                    .map(|tab| tab.id.as_str())
+                    .collect::<Vec<_>>(),
+                [id]
+            );
+            assert!(resolved
+                .tabs
+                .iter()
+                .flat_map(|tab| &tab.panes)
+                .all(|pane| !pane.focused));
+            assert_eq!(
+                app.left_behind.get(&TabId::new("10")),
+                Some(&PaneId::new("7"))
+            );
+            assert!(app.render(PANE).selection.is_none());
+        }
+    }
+
+    #[test]
+    fn hidden_physical_panes_keep_the_sidebar_open_until_the_last_one_leaves() {
+        for starts_with_content in [false, true] {
+            let mut app = app();
+            app.reduce(Input::TabsReported(vec![tab("10", 0)]));
+            let mut reported = layout(0, &[(0, &[])]);
+            reported.tabs[0].has_other_panes = true;
+            if starts_with_content {
+                reported.tabs[0].content_panes =
+                    layout(0, &[(0, &["7"])]).tabs.remove(0).content_panes;
+            }
+            app.reduce(Input::LayoutReported(reported.clone()));
+            assert!(!app
+                .reduce(focus("10", FocusTarget::Sidebar))
+                .effects
+                .contains(&Effect::CloseSidebar));
+            reported.tabs[0].content_panes.clear();
+            app.reduce(Input::LayoutReported(reported.clone()));
+            assert!(!app
+                .reduce(focus("10", FocusTarget::Sidebar))
+                .effects
+                .contains(&Effect::CloseSidebar));
+            assert!(!app
+                .reduce(Input::EventSettled)
+                .effects
+                .contains(&Effect::CloseSidebar));
+            assert!(app.tabs_with_company.contains(&TabId::new("10")));
+            reported.tabs[0].has_other_panes = false;
+            app.reduce(Input::LayoutReported(reported));
+            assert!(app
+                .reduce(focus("10", FocusTarget::Sidebar))
+                .effects
+                .contains(&Effect::CloseSidebar));
+        }
     }
 
     #[test]

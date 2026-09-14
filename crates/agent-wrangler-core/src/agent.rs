@@ -403,9 +403,15 @@ pub struct Agent {
     /// It is taken once, where the call happens, so everything downstream orders
     /// the calls the same way, and compares no clock of its own.
     pub raised: u64,
-    /// The session that started this agent, or `None` for an agent that no
-    /// agent started. The daemon fills it from the `agent_id` on a hook, and
-    /// reads it off no file. [`Agent::with_lead`] attaches it.
+    /// The session that this agent follows, or `None` for an agent that follows
+    /// none. [`Agent::with_lead`] attaches it.
+    ///
+    /// The daemon fills it two ways. For a child it is the agent that started
+    /// the child, taken from the `agent_id` on a hook. For a teammate that
+    /// Claude started in a terminal pane of its own it is the lead of the team,
+    /// taken from Claude's own record of that team. A child sits under its lead
+    /// in the composed id as well, and such a teammate is a session of its own
+    /// and does not.
     pub lead: Option<SessionId>,
 }
 

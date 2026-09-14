@@ -7,7 +7,9 @@
 //! the *position* of a thing: its placement, its branch, and the index it is
 //! labeled with.
 
-use agent_wrangler_core::agent::{Agent, Turn};
+use std::collections::BTreeSet;
+
+use agent_wrangler_core::agent::{Agent, SessionId, Turn};
 use agent_wrangler_core::label::label;
 
 use crate::model::{
@@ -42,13 +44,22 @@ fn indicator(agent: &Agent, pane: &Pane, options: &DrawingOptions) -> Indicator 
     }
 }
 
-/// The agents of a pane that the tree draws: the sessions, and no child.
+/// The agents of a pane that the tree draws: the sessions, and no agent that
+/// another agent of the same pane leads.
 ///
-/// A child of an agent is not a session of the pane. The dashboard draws the
-/// depth. Without this, one lead that runs twenty children fills its pane with
-/// twenty rows that carry no structure at all.
+/// A child runs inside its lead, so it is not a session of the pane. The
+/// dashboard draws the depth. Without this, one lead that runs twenty children
+/// fills its pane with twenty rows that carry no structure at all.
+///
+/// A teammate that Claude started in a terminal pane of its own runs in a pane
+/// that its lead does not, and the tree says where a pane is. Such a teammate
+/// therefore keeps a row of its own, and the dashboard alone draws it under the
+/// lead.
 fn sessions_of(pane: &Pane) -> impl Iterator<Item = &Agent> {
-    pane.agents.iter().filter(|agent| agent.lead.is_none())
+    let held: BTreeSet<&SessionId> = pane.agents.iter().map(|agent| &agent.session).collect();
+    pane.agents
+        .iter()
+        .filter(move |agent| !agent.lead.as_ref().is_some_and(|lead| held.contains(lead)))
 }
 
 /// The rows one agent draws, wherever it is drawn: its own row, and the status
@@ -523,6 +534,33 @@ mod tests {
         assert_eq!(
             agents[0].key,
             Some(RowKey::Agent(SessionId::new("one").unwrap()))
+        );
+    }
+
+    #[test]
+    fn a_teammate_in_a_pane_of_its_own_keeps_a_row_of_its_own() {
+        // Claude starts a teammate in a terminal pane of its own, where it is a
+        // session of its own. The tree says where a pane is, so that teammate
+        // draws where it runs. The dashboard alone draws it under the lead.
+        let mut host = running(pane(2, "claude", false), "claude", &["mate"]);
+        host.agents[0].lead = Some(SessionId::new("one").unwrap());
+        let rows = tree(&[tab(
+            0,
+            "editor",
+            true,
+            vec![with_a_group(pane(1, "claude", false)), host],
+        )]);
+        let keys: Vec<&Option<RowKey>> = rows
+            .iter()
+            .filter(|row| matches!(row.content, RowContent::Agent { .. }))
+            .map(|row| &row.key)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                &Some(RowKey::Agent(SessionId::new("one").unwrap())),
+                &Some(RowKey::Agent(SessionId::new("mate").unwrap())),
+            ]
         );
     }
 

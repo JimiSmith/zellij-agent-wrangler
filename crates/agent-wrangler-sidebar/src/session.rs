@@ -222,11 +222,14 @@ fn reconcile_focus(
     let Some(focused_tab) = position_of(reports, &observed.tab) else {
         return ReconciledFocus::Pending;
     };
+    // Another non-content pane can confirm focus without this sidebar,
+    // but the layout must report that focus in the same tab.
     if !matches!(observed.target, FocusTarget::Content(_))
-        && !layout
-            .tabs
-            .iter()
-            .any(|tab| tab.position == focused_tab && tab.sidebar_pane.is_some())
+        && !layout.tabs.iter().any(|tab| {
+            tab.position == focused_tab
+                && (tab.sidebar_pane.is_some()
+                    || (observed.target == FocusTarget::Other && tab.other_focused))
+        })
     {
         return ReconciledFocus::Pending;
     }
@@ -258,12 +261,14 @@ mod tests {
             tabs: vec![
                 TabLayout {
                     position: TabPosition::at(0),
+                    has_other_panes: false,
                     other_focused: false,
                     content_panes: vec![on_screen("%1", "one")],
                     sidebar_pane: Some(SidebarPaneReport { focused: false }),
                 },
                 TabLayout {
                     position: TabPosition::at(1),
+                    has_other_panes: false,
                     other_focused: false,
                     content_panes: vec![on_screen("%2", "two")],
                     sidebar_pane: None,
@@ -290,6 +295,49 @@ mod tests {
 
     fn observed(reports: &[TabReport], layout: &SessionLayout, focus: &Focus) -> ReconciledSession {
         reconcile(reports, layout, true, Some(focus), &BTreeSet::new())
+    }
+
+    #[test]
+    fn other_focus_confirms_the_active_tab_without_a_local_sidebar() {
+        let reports = vec![tab("mine", 0), tab("other", 1)];
+        let mut layout = layout();
+        layout.tabs[1].other_focused = true;
+        let focus = Focus {
+            tab: TabId::new("other"),
+            target: FocusTarget::Other,
+        };
+        let resolved = observed(&reports, &layout, &focus);
+        assert_eq!(resolved.focus, ReconciledFocus::Confirmed(focus.clone()));
+        assert!(!resolved.tabs[0].active);
+        assert!(resolved.tabs[1].active);
+        assert!(resolved
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.panes)
+            .all(|pane| !pane.focused));
+        assert_eq!(
+            reconcile(&reports, &layout, false, Some(&focus), &BTreeSet::new()).focus,
+            ReconciledFocus::Unknown
+        );
+        assert_eq!(
+            observed(&reports[..1], &layout, &focus).focus,
+            ReconciledFocus::Pending
+        );
+        layout.tabs[1].other_focused = false;
+        layout.tabs[0].other_focused = true;
+        assert_eq!(
+            observed(&reports, &layout, &focus).focus,
+            ReconciledFocus::Pending
+        );
+        layout.tabs[1].other_focused = true;
+        let own_focus = Focus {
+            target: FocusTarget::Sidebar,
+            ..focus
+        };
+        assert_eq!(
+            observed(&reports, &layout, &own_focus).focus,
+            ReconciledFocus::Pending
+        );
     }
 
     #[test]

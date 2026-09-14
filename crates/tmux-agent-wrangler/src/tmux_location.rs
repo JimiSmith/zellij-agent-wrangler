@@ -135,6 +135,56 @@ impl TmuxLocation {
     }
 }
 
+/// A pane-local sidebar flag, removed on ordinary scope exit.
+/// This is not an ownership record. A crash can leave a surviving pane marked.
+pub struct SidebarRegistration {
+    location: TmuxLocation,
+}
+
+impl SidebarRegistration {
+    /// Sets this pane's flag before topology queries or terminal setup begin.
+    /// A host that rejects pane-local options reports an error, not a fallback.
+    pub fn register(location: &TmuxLocation) -> Result<Self, FatalError> {
+        let answer = build_sidebar_flag_command(location, false)
+            .output()
+            .map_err(FatalError::TmuxDidNotRun)?;
+        if !answer.status.success() {
+            return Err(FatalError::TmuxRefusedQuestion(trimmed_output(
+                &answer.stderr,
+            )));
+        }
+        Ok(Self {
+            location: location.clone(),
+        })
+    }
+}
+
+impl Drop for SidebarRegistration {
+    fn drop(&mut self) {
+        // A removed pane's stable ID fails without changing any other pane.
+        // Cleanup must not replace the result of the sidebar run.
+        let _ = build_sidebar_flag_command(&self.location, true).output();
+    }
+}
+
+/// Builds a pane-local flag change on the server captured at startup.
+fn build_sidebar_flag_command(location: &TmuxLocation, remove: bool) -> Command {
+    let mut command = Command::new(TMUX_PROGRAM);
+    command.args([
+        "-S",
+        location.server_socket(),
+        "set-option",
+        if remove { "-pu" } else { "-p" },
+        "-t",
+        &location.pane_id,
+        "@agent-wrangler-sidebar",
+    ]);
+    if !remove {
+        command.arg("1");
+    }
+    command
+}
+
 /// The command that asks tmux which session holds one pane.
 ///
 /// The words are built here and run by the caller. A test can therefore read the
@@ -167,6 +217,122 @@ mod tests {
                 .find(|(known, _)| known == name)
                 .map(|(_, value)| value.clone())
         }
+    }
+
+    #[test]
+    fn sidebar_registration_targets_only_its_pane_on_its_server() {
+        for server in ["/tmp/other tmux/socket", r"\\.\pipe\psmux-default"] {
+            let location = TmuxLocation::from_variables(variable_lookup(&[
+                ("TMUX", &format!("{server},3242,99")),
+                ("TMUX_PANE", "%12"),
+            ]))
+            .unwrap();
+            for (remove, flag, value) in [(false, "-p", vec!["1"]), (true, "-pu", vec![])] {
+                let command = build_sidebar_flag_command(&location, remove);
+                assert_eq!(command.get_program(), "tmux");
+                let args: Vec<_> = command
+                    .get_args()
+                    .map(|arg| arg.to_str().unwrap())
+                    .collect();
+                let mut expected = vec![
+                    "-S",
+                    server,
+                    "set-option",
+                    flag,
+                    "-t",
+                    "%12",
+                    "@agent-wrangler-sidebar",
+                ];
+                expected.extend(value);
+                assert_eq!(args, expected);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a real tmux server; run explicitly with --ignored"]
+    fn sidebar_registration_cleans_only_its_pane_and_tolerates_removed_panes() {
+        struct TestServer(String);
+        impl TestServer {
+            fn output(&self, args: &[&str]) -> String {
+                let output = Command::new(TMUX_PROGRAM)
+                    .args(["-L", &self.0])
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    trimmed_output(&output.stderr)
+                );
+                trimmed_output(&output.stdout)
+            }
+        }
+        impl Drop for TestServer {
+            fn drop(&mut self) {
+                let _ = Command::new(TMUX_PROGRAM)
+                    .args(["-L", &self.0, "kill-server"])
+                    .output();
+            }
+        }
+        let server = TestServer(format!("wrangler-flag-test-{}", std::process::id()));
+        server.output(&["-f", "", "new-session", "-d", "-s", "flag-test"]);
+        let socket = server.output(&["display-message", "-p", "#{socket_path}"]);
+        let own = server.output(&["display-message", "-p", "#{pane_id}"]);
+        let peer = server.output(&["split-window", "-d", "-P", "-F", "#{pane_id}"]);
+        let location = TmuxLocation::from_variables(variable_lookup(&[
+            ("TMUX", &format!("{socket},0,99")),
+            ("TMUX_PANE", &own),
+        ]))
+        .unwrap();
+        server.output(&[
+            "set-option",
+            "-p",
+            "-t",
+            &peer,
+            "@agent-wrangler-sidebar",
+            "1",
+        ]);
+        let registration = SidebarRegistration::register(&location).unwrap();
+        assert_eq!(
+            server.output(&["show-options", "-pv", "-t", &own, "@agent-wrangler-sidebar"]),
+            "1"
+        );
+        drop(registration);
+        assert_eq!(
+            server.output(&[
+                "show-options",
+                "-pqv",
+                "-t",
+                &own,
+                "@agent-wrangler-sidebar"
+            ]),
+            ""
+        );
+        assert_eq!(
+            server.output(&[
+                "show-options",
+                "-pv",
+                "-t",
+                &peer,
+                "@agent-wrangler-sidebar"
+            ]),
+            "1"
+        );
+        let registration = SidebarRegistration::register(&location).unwrap();
+        server.output(&["kill-pane", "-t", &own]);
+        drop(registration);
+        assert_eq!(
+            server.output(&[
+                "show-options",
+                "-pv",
+                "-t",
+                &peer,
+                "@agent-wrangler-sidebar"
+            ]),
+            "1"
+        );
+        assert!(SidebarRegistration::register(&location).is_err());
     }
 
     #[test]
