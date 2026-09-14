@@ -223,6 +223,33 @@ class TestStepsAgainstBash(unittest.TestCase):
         self.assertIn("--- last", result.stderr)
 
 
+class TestSessionPipeCleanup(unittest.TestCase):
+    def test_cleanup_ends_only_pipes_for_the_exact_test_session(self):
+        from unittest.mock import patch
+
+        process_listing = subprocess.CompletedProcess(
+            ["ps"], 0,
+            "101 zellij --session wrangler-test-pipe pipe --name wrangler:agents\n"
+            "102 zellij --session wrangler-test-pipe-other pipe --name wrangler:agents\n"
+            "103 zellij --session personal pipe --name wrangler:agents\n"
+            "104 zellij --session wrangler-test-pipe pipe --name another-plugin\n"
+            "105 sh -c zellij --session wrangler-test-pipe pipe --name wrangler:agents\n",
+        )
+        self.assertTrue(callable(getattr(drive, "end_session_pipes", None)))
+        with patch.object(drive.subprocess, "run", return_value=process_listing), patch.object(drive.os, "kill") as kill:
+            drive.end_session_pipes("wrangler-test-pipe")
+        kill.assert_called_once_with(101, drive.signal.SIGTERM)
+
+    def test_cleanup_refuses_a_foreign_session_before_listing_processes(self):
+        from unittest.mock import patch
+
+        self.assertTrue(callable(getattr(drive, "end_session_pipes", None)))
+        with patch.object(drive.subprocess, "run") as run:
+            with self.assertRaises(StepFailure):
+                drive.end_session_pipes("personal")
+        run.assert_not_called()
+
+
 class TestScriptFiles(unittest.TestCase):
     def test_bash_smoke_script(self):
         with open(os.path.join(SCRIPTS, "bash_smoke.steps"), encoding="utf-8") as handle:
@@ -377,7 +404,7 @@ class TestTmuxTree(unittest.TestCase):
         # thirty-four columns is longer than twenty columns hold.
         self.assertIn("pane-title-for-resize", wide)
         self.assertNotIn("pane-title-for-resize", narrow)
-        self.assertIn("pane-ti…", narrow)
+        self.assertIn("pane-titl…", narrow)
 
     def test_the_sidebar_reached_the_client_of_this_build(self):
         # The client is found by name on PATH. A developer with the released
