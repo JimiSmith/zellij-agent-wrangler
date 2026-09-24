@@ -313,7 +313,7 @@ mod tests {
                 "crates/agent-wrangler-ui/src/render.rs",
             ),
             ("Write", "file_path", "PROGRESS.md"),
-            ("Edit", "file_path", "CLAUDE.md"),
+            ("Edit", "file_path", "AGENTS.md"),
             ("WebFetch", "url", "https://zellij.dev"),
             ("Skill", "skill", "diff-viewer:review"),
         ] {

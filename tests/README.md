@@ -19,18 +19,28 @@ terminal would have drawn.
 
 ## Running
 
-Run the complete harness locally before pushing. GitHub runs this same command,
-with the same test discovery and failure rules:
+Install Python 3, Bash, Cargo, tmux and Zellij. The host build also needs a C
+compiler, `pkg-config` and OpenSSL development headers. On Ubuntu or Debian:
 
-    python3 tests/run_all.py
+    sudo apt-get install --yes build-essential pkg-config libssl-dev
 
-Install Python 3, Bash, Cargo, tmux and Zellij first, and add the Rust target:
+Then add the Rust target:
 
     rustup target add wasm32-wasip1
 
-The live scripts build the native programs and the wasm plugin they use. CI
-installs Zellij 0.45.1 and the Ubuntu 24.04 tmux package. To reproduce a host
-difference, compare `zellij --version` and `tmux -V` before changing a test.
+Build the programs before running the complete harness locally. GitHub runs
+these same build and test commands, with the same test discovery and failure
+rules:
+
+    cargo build -p agent-wrangler -p tmux-agent-wrangler --locked
+    cargo build -p zellij-agent-wrangler --target wasm32-wasip1 --locked
+    python3 tests/run_all.py
+
+The Python integration tests run before the live scripts and need the native
+binaries in `target/debug/`. Some live scripts rebuild the programs they use.
+The live CI job installs Zellij 0.45.1 and the Ubuntu 24.04 tmux package. To
+reproduce a host difference, compare `zellij --version` and `tmux -V` before
+changing a test.
 
 `run_all.py` discovers every `test*.py` unittest module and every `.steps` file
 under `tests/scripts/`. It runs the scripts sequentially, including those already

@@ -1,12 +1,13 @@
 # Working in this repository
 
-Agent Wrangler draws a sidebar that shows every coding agent in a terminal
-multiplexer, and says whose turn it is. A daemon holds the agent state. A
-sidebar draws it. The two are separate programs.
+Agent Wrangler draws a sidebar that shows coding agents with installed hooks
+in a terminal multiplexer, and says whose turn it is. A daemon holds the agent
+state. A sidebar draws it. The two are separate programs.
 
-Read `ARCHITECTURE.md` for how the parts fit together. Read `PROGRESS.md` for
-what is built, and for what zellij turned out to do. `FEATURES.md` holds the
-feature list. This file holds the rules.
+Use `ARCHITECTURE.md` for component boundaries and data flow, `PROGRESS.md` for
+implementation history and measured multiplexer behavior, and `FEATURES.md`
+for feature status. Read the parts relevant to the change. This file holds the
+working rules.
 
 ## The crates
 
@@ -15,8 +16,8 @@ feature list. This file holds the rules.
 | `agent-wrangler-core` | Agent records, the registry, labels, commands, and the client message format. Shared by every client and the daemon. |
 | `agent-wrangler-ui` | Rows, the tree, frame composition, styling and ANSI. Draws into a ratatui buffer. |
 | `agent-wrangler-sidebar` | Application state, the reducer, effects, session reconciliation and options. |
-| `agent-wrangler` | One binary: the hook client, the daemon, the installer and the platform integration. |
-| `zellij-agent-wrangler` | The zellij plugin. Builds for wasm only. |
+| `agent-wrangler` | The hook client, daemon, installer and platform integration in one executable; Windows also has a windowless twin. |
+| `zellij-agent-wrangler` | The zellij plugin binary targets wasm; its library also builds on the host for tests. |
 | `tmux-agent-wrangler` | The tmux client. Reads the tmux topology, draws the sidebar, and reads the state on its socket. |
 
 The dependency direction never reverses. These are every edge:
@@ -94,14 +95,16 @@ rename anything in `proto.rs`.
 The native half runs on Linux, macOS and Windows. Write code that runs on all
 three, and prove it.
 
-- No `cfg` for a system outside `crates/agent-wrangler/src/platform/`. That
-  module answers "what does it take to start a program without disturbing the
-  user" once for each system.
+- Keep platform-specific process and socket behavior in
+  `crates/agent-wrangler/src/platform/`. The installer also uses `cfg` for file
+  permissions and the Windows client name; tests use it for system-specific
+  assertions. Do not spread platform-specific runtime behavior elsewhere.
 - Build no path by hand and write no separator. Socket names go through
   `GenericNamespaced`, which is a unix socket on unix and a named pipe on
   Windows.
-- Run a program by name, never by a path. Let the system resolve it.
-- Never spawn a shell. Pass the arguments already separate.
+- Run external tools by name and let the system resolve them. Use the current
+  executable's path when starting this program's daemon or installing hooks.
+- When launching a process from Rust, pass arguments separately without a shell.
 - Both spellings of the end of a stream take one arm. A unix peer's read
   returns zero after a shutdown. A Windows client's read fails after a
   `DisconnectNamedPipe`. Code that waits for zero alone waits for ever on
@@ -112,32 +115,35 @@ three, and prove it.
 Check the Windows build from Linux with:
 
 ```
-cargo clippy -p agent-wrangler -p agent-wrangler-core -p tmux-agent-wrangler \
+cargo clippy -p agent-wrangler -p agent-wrangler-core \
+    -p agent-wrangler-ui -p agent-wrangler-sidebar -p tmux-agent-wrangler \
     --target x86_64-pc-windows-msvc --all-targets --locked -- -D warnings
 ```
 
-That is the Windows CI job's own command, aimed at the Windows target. It needs
-no linker, so it catches everything except what fails at run time.
+This covers the same native crates as the Windows CI job, aimed at the Windows
+target. Install that Rust target first. Clippy needs no linker, so it catches
+compile and lint failures but not runtime failures.
 
 `--all-targets` is necessary, and a plain `cargo check` is not enough. A test
 module whose every test is `#[cfg(unix)]` is empty on Windows, and an import at
 the top of it is then unused. Clippy fails on that, and a build of the library
-alone never looks at it. Only a tag runs the CI, so a fault of this kind waits
-until a release to appear.
+alone never looks at it. CI runs on pull requests, pushes to `main`, and tags;
+the cross-target command catches the problem locally before CI.
 
-## Rule three: no multiplexer in the shared crates
+## Rule three: multiplexer behavior belongs in adapters
 
-Zellij runs today. Tmux is next. Others can follow.
+Zellij and tmux run today. Others can follow.
 
-- `agent-wrangler-core`, `agent-wrangler-ui` and `agent-wrangler-sidebar` name
-  no multiplexer. They speak of tabs, panes, rows and sessions.
+- `agent-wrangler-core`, `agent-wrangler-ui` and `agent-wrangler-sidebar` do not
+  interpret multiplexer topology. Core carries selected location variables as
+  opaque values; shared state and drawing speak of tabs, panes, rows and sessions.
 - A multiplexer crate adapts. It converts host reports into the portable
   vocabulary and executes the effects it gets back.
 - The daemon holds agent state and nothing about where it is shown. It learns a
   location only as opaque values captured from the environment.
-- A new multiplexer must need no change to the three shared crates. If it does,
-  the boundary is in the wrong place. Move the boundary, do not special case
-  the multiplexer.
+- A new multiplexer should put its topology and effects in an adapter. Core may
+  need to capture another opaque location variable, but shared state and drawing
+  should not gain multiplexer-specific decisions.
 
 ## Types over checks
 
@@ -158,14 +164,46 @@ Bare `cargo build` fails. It tries to link the plugin binary, whose host
 functions exist only inside zellij. Nothing else is affected: clippy does not
 link, and `cargo test` builds the plugin's library and not its binary.
 
-Run all four before you commit. These are what the Linux CI job runs.
+Run focused checks while working. For complete local verification before a push
+on Linux, use the repository root. Install Python 3, Bash, Cargo, tmux and
+Zellij. The host build also needs a C compiler, `pkg-config` and OpenSSL
+development headers; on Ubuntu or Debian, install them with:
+
+```
+sudo apt-get install --yes build-essential pkg-config libssl-dev
+```
+
+Add the Rust tools and wasm target:
+
+```
+rustup component add clippy rustfmt
+rustup target add wasm32-wasip1
+```
+
+The live CI job uses Zellij 0.45.1 and the Ubuntu 24.04 tmux package. Check
+the versions with `zellij --version` and `tmux -V` if a live test behaves
+differently locally.
+Run the following commands; together they cover the Linux Rust checks, both
+independent core feature configurations, and every Python test and live step
+script:
 
 ```
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy -p zellij-agent-wrangler --target wasm32-wasip1 \
     --all-targets --locked -- -D warnings
-cargo test --workspace --locked
+cargo test --workspace --locked --no-fail-fast -- --include-ignored
+cargo clippy -p agent-wrangler-core --no-default-features \
+    --all-targets --locked -- -D warnings
+cargo test -p agent-wrangler-core --no-default-features \
+    --locked --no-fail-fast -- --include-ignored
+cargo clippy -p agent-wrangler-core --no-default-features --features json \
+    --all-targets --locked -- -D warnings
+cargo test -p agent-wrangler-core --no-default-features --features json \
+    --locked --no-fail-fast -- --include-ignored
+cargo build -p agent-wrangler -p tmux-agent-wrangler --locked
+cargo build -p zellij-agent-wrangler --target wasm32-wasip1 --locked
+python3 tests/run_all.py
 ```
 
 `--all` is necessary on `fmt` because the root is a virtual manifest. The plain
@@ -174,16 +212,41 @@ form covers the default members and not every crate.
 The second clippy run is not a duplicate. The plugin ships as wasm, and the host
 lint says nothing about the released artifact.
 
-The Windows and macOS jobs cannot build the plugin, so they name the native
-crates instead:
+The core checks use separate Cargo invocations because workspace feature
+unification enables `native` and can hide a broken minimal or `json`-only build.
+The Rust test command includes ignored tests and doctests. One ignored test
+starts a real tmux server, so tmux must be installed even for the Rust suite.
+Build the native binaries before `tests/run_all.py`: its Python integration tests
+run before the step scripts and launch `target/debug/agent-wrangler` and
+`target/debug/tmux-agent-wrangler`. The wasm build matches the live CI setup.
+Run only one live harness at a time; its scripts share fixture files and a test
+daemon. `tests/run_all.py` refuses missing tools, skipped tests and empty suites.
+
+The Windows and macOS CI jobs build and test the native crates rather than the
+wasm plugin. On macOS, run these checks for all five native crates:
 
 ```
-cargo clippy -p agent-wrangler -p agent-wrangler-core -p tmux-agent-wrangler \
+cargo clippy -p agent-wrangler -p agent-wrangler-core \
+    -p agent-wrangler-ui -p agent-wrangler-sidebar -p tmux-agent-wrangler \
     --all-targets --locked -- -D warnings
-cargo test -p agent-wrangler -p agent-wrangler-core -p tmux-agent-wrangler --locked
+cargo test -p agent-wrangler -p agent-wrangler-core \
+    -p agent-wrangler-ui -p agent-wrangler-sidebar -p tmux-agent-wrangler \
+    --locked --no-fail-fast -- --include-ignored
 ```
 
-Add a new native crate to both of those lists. Nothing else adds it for you.
+On Windows, use these one-line commands in PowerShell. The native test command
+appends the exception that Windows CI uses:
+
+```
+cargo clippy -p agent-wrangler -p agent-wrangler-core -p agent-wrangler-ui -p agent-wrangler-sidebar -p tmux-agent-wrangler --all-targets --locked -- -D warnings
+cargo test -p agent-wrangler -p agent-wrangler-core -p agent-wrangler-ui -p agent-wrangler-sidebar -p tmux-agent-wrangler --locked --no-fail-fast -- --include-ignored --skip tmux_location::tests::sidebar_registration_cleans_only_its_pane_and_tolerates_removed_panes
+```
+
+Add a new native crate to both platform jobs' crate lists. Windows skips only
+this tmux pane-registration integration test because psmux does not support the
+pane-local option it needs. Linux and macOS run that test.
+The Windows and macOS jobs provide the runtime checks that a Linux local run
+cannot provide.
 
 `./dev.sh` builds the plugin and opens a live zellij session with a sidebar in
 every tab.
@@ -192,17 +255,7 @@ The end to end harness drives a real program in a real pty and asserts on the
 cells that land on the screen. `zellij action dump-screen` returns nothing for a
 plugin pane, so this is the only way to see what a sidebar drew.
 
-```
-python3 -m unittest discover -s tests -v
-python3 tests/drive.py tests/scripts/agent_row.steps
-python3 tests/drive.py tests/scripts/dashboard_view.steps
-python3 tests/drive.py tests/scripts/transcript_records.steps
-python3 tests/drive.py tests/scripts/preview_mode.steps
-python3 tests/drive.py tests/scripts/tmux_tree.steps
-```
-
-The zellij cases skip themselves when `zellij` is not on `PATH`, and the tmux
-cases do the same without `tmux`.
+For focused commands and more harness details, use `tests/README.md`.
 
 Three things keep a run away from what the developer has installed, and
 `tests/README.md` explains each one.
@@ -232,7 +285,7 @@ removes a check elsewhere".
 
 ## Before you commit
 
-1. All tests pass.
+1. Relevant tests pass; run the full Rust and live suites before a push.
 2. `cargo fmt --all` leaves nothing to change.
 3. Clippy is clean at `-D warnings`.
 
