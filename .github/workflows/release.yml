@@ -26,6 +26,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The included ignored test starts a real tmux server.
+      - name: Install the tmux runtime for Rust integration tests
+        run: sudo apt-get update && sudo apt-get install --yes tmux
       - id: toolchain
         run: rustup component add clippy rustfmt
       - id: wasm-target
